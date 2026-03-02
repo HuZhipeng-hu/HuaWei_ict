@@ -1,0 +1,22 @@
+# ============================================
+# NeuroGrip Pro V2 — 模型转换配置
+# ============================================
+
+# 模型架构（需与训练配置一致）
+model:
+  model_type: "standard"
+  in_channels: 6
+  num_classes: 6
+  base_channels: 16
+  use_se: true
+
+# 导出配置
+export:
+  input_shape: [1, 6, 24, 6]    # (batch, channels, freq_bins, time_frames)
+  checkpoint: "checkpoints/neurogrip_best.ckpt"
+  output: "models/neurogrip"
+
+# 量化配置
+quantize:
+  enabled: false            # 是否执行 INT8 量化
+  bit_num: 8                # 量化位宽

@@ -1,0 +1,60 @@
+# ============================================
+# NeuroGrip Pro V2 — 运行时配置
+# ============================================
+
+# 模型架构（需与训练配置一致）
+model:
+  model_type: "standard"
+  in_channels: 6
+  num_classes: 6
+  base_channels: 16
+  use_se: true
+  dropout_rate: 0.0         # 推理时关闭 Dropout
+
+# 信号预处理（需与训练配置一致）
+preprocess:
+  sampling_rate: 200.0
+  num_channels: 6
+  total_channels: 8
+  lowcut: 20.0
+  highcut: 90.0
+  filter_order: 4
+  stft_window_size: 24
+  stft_hop_size: 12
+  stft_n_fft: 46
+  segment_length: 84
+  segment_stride: 42
+
+# 推理配置
+inference:
+  model_path: "models/neurogrip.mindir"
+  device: "CPU"
+  num_threads: 4
+
+# 硬件配置
+hardware:
+  # 传感器
+  sensor_mode: "armband"    # "armband" 或 "standalone"
+  sensor_port: null         # null = 自动检测
+  sensor_baudrate: 115200
+  armband_sampling_rate: 1000
+  sensor_buffer_size: 2000
+
+  # 执行器
+  actuator_mode: "real"     # "real" 或 "standalone"
+  actuator_i2c_bus: 1
+  actuator_i2c_address: 64  # 0x40
+  actuator_frequency: 50
+
+  # 舵机角度
+  servo_angle_open: 0.0
+  servo_angle_half: 90.0
+  servo_angle_closed: 180.0
+
+# 后处理
+vote_window_size: 5         # 投票窗口大小
+vote_min_count: 3           # 最小投票数
+confidence_threshold: 0.5   # 置信度阈值
+
+# 控制循环
+control_rate_hz: 30.0       # Hz
