@@ -35,10 +35,34 @@ class InferenceEngine:
 
     Args:
         model_path: .mindir 模型文件路径
-        device: 推理设备 ("CPU" / "GPU" / "NPU")
+        device: 推理设备 ("CPU" / "GPU" / "Ascend")，兼容别名 "NPU"->"Ascend"
         num_threads: CPU 推理线程数
         latency_window: 延迟统计的滑动窗口大小
     """
+
+    _DEVICE_ALIASES = {
+        "CPU": "CPU",
+        "GPU": "GPU",
+        "ASCEND": "ASCEND",
+        "NPU": "ASCEND",
+    }
+    _TARGET_MAP = {
+        "CPU": "cpu",
+        "GPU": "gpu",
+        "ASCEND": "ascend",
+    }
+
+    @classmethod
+    def _normalize_device(cls, device: str) -> str:
+        key = str(device).strip().upper()
+        normalized = cls._DEVICE_ALIASES.get(key)
+        if normalized is None:
+            supported = ", ".join(sorted(cls._DEVICE_ALIASES))
+            raise ValueError(
+                f"Unsupported inference device: {device!r}. "
+                f"Expected one of: {supported}."
+            )
+        return normalized
 
     def __init__(
         self,
@@ -50,6 +74,7 @@ class InferenceEngine:
         self.model_path = model_path
         self._latencies = deque(maxlen=latency_window)
         self._inference_count = 0
+        self.device = self._normalize_device(device)
 
         if not MSLITE_AVAILABLE:
             logger.warning(
@@ -69,15 +94,27 @@ class InferenceEngine:
 
         # 构建推理上下文
         cpu_context = mslite.Context()
-        cpu_context.target = [device.lower()]
-        cpu_context.cpu.thread_num = num_threads
+        target = self._TARGET_MAP[self.device]
+        cpu_context.target = [target]
+        if self.device == "CPU":
+            cpu_context.cpu.thread_num = num_threads
 
         # 加载模型
         self._model = mslite.Model()
-        self._model.build_from_file(str(model_file), mslite.ModelType.MINDIR, cpu_context)
+        try:
+            self._model.build_from_file(str(model_file), mslite.ModelType.MINDIR, cpu_context)
+        except Exception as exc:
+            raise RuntimeError(
+                "build_from_file failed for "
+                f"model={model_file}, device={self.device} (target={target}). "
+                "Possible causes: unsupported ops in current MindSpore Lite backend "
+                "(for example AdaptiveAvgPool2D on CPU), model/runtime version mismatch, "
+                "or corrupted MINDIR. Try switching device (Ascend/GPU), and re-exporting "
+                "a Lite-compatible model."
+            ) from exc
 
         logger.info(f"推理引擎已就绪: {model_path}")
-        logger.info(f"  设备: {device}, 线程数: {num_threads}")
+        logger.info(f"  设备: {self.device}, 线程数: {num_threads}")
 
     def predict(
         self,

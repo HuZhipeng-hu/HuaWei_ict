@@ -32,6 +32,61 @@ def has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
+def normalize_runtime_device(raw_device: str) -> str:
+    aliases = {
+        "CPU": "CPU",
+        "GPU": "GPU",
+        "ASCEND": "ASCEND",
+        "NPU": "ASCEND",
+    }
+    key = str(raw_device).strip().upper()
+    return aliases.get(key, key)
+
+
+def check_mindir_loadability(model_path: Path, device: str, strict: bool) -> Check:
+    if not has_module("mindspore_lite"):
+        return Check(
+            "WARN",
+            "runtime.model_load_check",
+            "mindspore_lite not installed; skipped build_from_file loadability check",
+        )
+
+    try:
+        import mindspore_lite as mslite
+    except Exception as exc:  # pragma: no cover - environment dependent
+        return Check(
+            "WARN",
+            "runtime.model_load_check",
+            f"mindspore_lite import failed ({exc}); skipped loadability check",
+        )
+
+    target = device.lower()
+    context = mslite.Context()
+    context.target = [target]
+    if device == "CPU":
+        context.cpu.thread_num = 1
+
+    model = mslite.Model()
+    try:
+        model.build_from_file(str(model_path), mslite.ModelType.MINDIR, context)
+    except Exception as exc:
+        level = "ERROR" if strict else "WARN"
+        return Check(
+            level,
+            "runtime.model_load_check",
+            (
+                f"build_from_file failed for {model_path} on device={device}. "
+                f"Details: {exc}. This often indicates unsupported Lite ops "
+                "(e.g. AdaptiveAvgPool2D on CPU) or model/runtime mismatch."
+            ),
+        )
+    return Check(
+        "INFO",
+        "runtime.model_load_check",
+        f"build_from_file passed for {model_path} on device={device}",
+    )
+
+
 def collect_dependency_checks(mode: str) -> list[Check]:
     checks: list[Check] = []
     base_required = ("numpy", "scipy", "yaml")
@@ -108,15 +163,49 @@ def collect_file_checks(code_root: Path, data_root: Path) -> list[Check]:
     return checks
 
 
-def collect_config_checks(code_root: Path, data_root: Path) -> list[Check]:
+def collect_config_checks(code_root: Path, data_root: Path, mode: str) -> list[Check]:
     checks: list[Check] = []
 
     runtime_cfg = read_yaml(code_root / "configs" / "runtime.yaml")
     conversion_cfg = read_yaml(code_root / "configs" / "conversion.yaml")
+    inference_cfg = runtime_cfg.get("inference", {})
+    runtime_device_raw = inference_cfg.get("device", "CPU")
+    runtime_device = normalize_runtime_device(runtime_device_raw)
 
-    model_path = code_root / runtime_cfg.get("inference", {}).get("model_path", "models/neurogrip.mindir")
+    if runtime_device not in {"CPU", "GPU", "ASCEND"}:
+        checks.append(
+            Check(
+                "ERROR",
+                "runtime.inference.device",
+                (
+                    f"unsupported value {runtime_device_raw!r}. "
+                    "Expected one of CPU/GPU/Ascend (alias NPU)."
+                ),
+            )
+        )
+    else:
+        checks.append(Check("INFO", "runtime.inference.device", f"{runtime_device}"))
+        if mode == "ascend" and runtime_device == "CPU":
+            checks.append(
+                Check(
+                    "ERROR",
+                    "runtime.inference.device",
+                    "mode=ascend does not allow runtime.inference.device=CPU. "
+                    "Set configs/runtime.yaml inference.device to Ascend (or use --device).",
+                )
+            )
+
+    model_path = code_root / inference_cfg.get("model_path", "models/neurogrip.mindir")
     if model_path.exists():
         checks.append(Check("INFO", "runtime.model_path", f"found: {model_path}"))
+        if runtime_device in {"CPU", "GPU", "ASCEND"}:
+            checks.append(
+                check_mindir_loadability(
+                    model_path=model_path,
+                    device=runtime_device,
+                    strict=(mode == "ascend"),
+                )
+            )
     else:
         checks.append(
             Check(
@@ -219,7 +308,7 @@ def main() -> int:
 
     checks.extend(collect_dependency_checks(args.mode))
     checks.extend(collect_file_checks(code_root, data_root))
-    checks.extend(collect_config_checks(code_root, data_root))
+    checks.extend(collect_config_checks(code_root, data_root, args.mode))
 
     print("=" * 72)
     print(f"NeuroGrip preflight mode={args.mode}")

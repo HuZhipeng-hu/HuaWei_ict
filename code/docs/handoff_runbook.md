@@ -4,9 +4,9 @@ This runbook is for handing off the project to a machine that has the full Ascen
 
 ## 1. Repository Guardrails
 
-- Primary development/exec root: `F:\ICT\义肢核心代码\code`
-- Legacy snapshot: `F:\ICT\义肢核心代码\code\code`
-- Do not develop in `code\code`; treat it as archived reference only.
+- Primary repository root: `F:\ICT\义肢核心代码\_incoming\HuaWei_ict_github`
+- Primary development/exec root: `F:\ICT\义肢核心代码\_incoming\HuaWei_ict_github\code`
+- Use this as the only active codebase for handoff.
 
 ## 2. Environment Expectations
 
@@ -56,12 +56,13 @@ Notes:
 
 ## 5. Ascend Machine Validation
 
-Run from `F:\ICT\义肢核心代码\code`:
+Run from `F:\ICT\义肢核心代码\_incoming\HuaWei_ict_github\code`:
 
 ```powershell
 python scripts/preflight.py --mode ascend
 python -m training.train --data_dir ../data --config configs/training.yaml --epochs 1
 python -m conversion.convert --checkpoint checkpoints/neurogrip_best.ckpt --output models/neurogrip --config configs/conversion.yaml
+python scripts/preflight.py --mode ascend
 python -m runtime.run --config configs/runtime.yaml --standalone --max_cycles 300
 python -m runtime.run --config configs/runtime.yaml
 ```
@@ -74,13 +75,22 @@ python -m runtime.run --config configs/runtime.yaml
 2. Runtime model file missing (`models/neurogrip.mindir`):
 - Run training + conversion first.
 
-3. Shape mismatch at runtime:
+3. Runtime model build fails on Lite backend (example keywords):
+- `AdaptiveAvgPool2D`, `unsupported primitive type`
+- `GetPrimitiveCreator failed`, `InferSubgraph failed`, `ret = -500`
+- `build_from_file failed! Error is Common error code.`
+- Actions:
+  - Ensure runtime device is configured as `Ascend` on target machine.
+  - Re-export `.mindir` after compatibility fixes; do not rely on old model artifacts.
+  - Re-run `python scripts/preflight.py --mode ascend` after conversion.
+
+4. Shape mismatch at runtime:
 - Ensure preprocess settings are aligned across:
   - `configs/training.yaml`
   - `configs/conversion.yaml`
   - `configs/runtime.yaml`
 
-4. Hardware communication issues:
+5. Hardware communication issues:
 - Validate serial port / I2C settings in `configs/runtime.yaml`.
 - Use `--standalone --max_cycles N` first to isolate software from hardware issues.
 

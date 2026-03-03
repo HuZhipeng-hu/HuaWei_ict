@@ -2,6 +2,7 @@
 神经网络构建模块
 
 包含组成 NeuroGripNet 的可复用构件：
+- GlobalAvgPool2DCompat: Lite 兼容的全局平均池化
 - ParallelConvBlock: Inception 风格多尺度并行卷积
 - SEBlock: Squeeze-and-Excitation 通道注意力
 - DepthwiseSeparableConv: 深度可分离卷积（轻量版使用）
@@ -30,6 +31,22 @@ def _check_mindspore():
 # =============================================================================
 
 if MINDSPORE_AVAILABLE:
+    class GlobalAvgPool2DCompat(nn.Cell):
+        """
+        Lite 兼容全局平均池化。
+
+        等价于 AdaptiveAvgPool2D(output_size=(1,1))，但使用 ReduceMean
+        避免在部分 MindSpore Lite CPU 后端上出现算子不支持。
+        """
+
+        def __init__(self):
+            super().__init__()
+            self.reduce_mean = ops.ReduceMean(keep_dims=True)
+
+        def construct(self, x):
+            # (B, C, H, W) -> (B, C, 1, 1)
+            return self.reduce_mean(x, (2, 3))
+
 
     class SEBlock(nn.Cell):
         """
@@ -47,7 +64,7 @@ if MINDSPORE_AVAILABLE:
             super().__init__()
             mid_channels = max(channels // reduction, 1)
 
-            self.squeeze = ops.AdaptiveAvgPool2D(output_size=(1, 1))
+            self.squeeze = GlobalAvgPool2DCompat()
             self.excitation = nn.SequentialCell([
                 nn.Dense(channels, mid_channels, has_bias=False),
                 nn.ReLU(),
@@ -210,6 +227,10 @@ if MINDSPORE_AVAILABLE:
 
 else:
     # MindSpore 不可用时的占位符
+    class GlobalAvgPool2DCompat:
+        def __init__(self, *args, **kwargs):
+            _check_mindspore()
+
     class SEBlock:
         def __init__(self, *args, **kwargs):
             _check_mindspore()

@@ -5,6 +5,7 @@ Examples:
     python -m runtime.run --config configs/runtime.yaml
     python -m runtime.run --standalone
     python -m runtime.run --model models/neurogrip.mindir --port COM3
+    python -m runtime.run --device Ascend
     python -m runtime.run --standalone --max_cycles 200
 """
 
@@ -39,6 +40,12 @@ def parse_args():
         type=str,
         default=None,
         help="Override model path from config.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help='Override inference device from config ("CPU"/"GPU"/"Ascend", alias "NPU").',
     )
     parser.add_argument(
         "--port",
@@ -86,6 +93,8 @@ def main():
 
     if args.model:
         config.inference.model_path = args.model
+    if args.device:
+        config.inference.device = args.device
     if args.port:
         config.hardware.sensor_port = args.port
     if args.rate is not None:

@@ -122,7 +122,7 @@ class InferenceConfig:
     """推理配置"""
 
     model_path: str = "models/neurogrip.mindir"
-    device: str = "CPU"  # 推理设备
+    device: str = "CPU"  # 推理设备: "CPU" / "GPU" / "Ascend"（兼容别名 NPU）
     num_threads: int = 4  # 推理线程数
 
 

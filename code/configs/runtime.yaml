@@ -28,7 +28,7 @@ preprocess:
 # 推理配置
 inference:
   model_path: "models/neurogrip.mindir"
-  device: "CPU"
+  device: "Ascend"
   num_threads: 4
 
 # 硬件配置

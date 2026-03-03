@@ -15,13 +15,17 @@ from typing import Optional, Dict, Any
 
 try:
     import mindspore.nn as nn
-    import mindspore.ops as ops
-    from mindspore import Tensor
     MINDSPORE_AVAILABLE = True
 except ImportError:
     MINDSPORE_AVAILABLE = False
 
-from .blocks import ParallelConvBlock, SEBlock, DepthwiseSeparableConv, _check_mindspore
+from .blocks import (
+    ParallelConvBlock,
+    SEBlock,
+    DepthwiseSeparableConv,
+    GlobalAvgPool2DCompat,
+    _check_mindspore,
+)
 from ..gestures import NUM_CLASSES
 
 
@@ -40,7 +44,7 @@ if MINDSPORE_AVAILABLE:
             → ParallelConvBlock_1  → (B, base*3, F, T)
             → MaxPool2d            → (B, base*3, F/2, T/2)
             → ParallelConvBlock_2  → (B, base*2*3, F/2, T/2)
-            → AdaptiveAvgPool2d    → (B, base*2*3, 1, 1)
+            → GlobalAvgPool2d      → (B, base*2*3, 1, 1)
             → Flatten              → (B, base*6)
             → Dropout
             → Dense                → (B, num_classes)
@@ -81,7 +85,7 @@ if MINDSPORE_AVAILABLE:
             ch_after_block2 = base_channels * 2 * 3  # 96
 
             # 全局平均池化 → 分类器
-            self.global_pool = ops.AdaptiveAvgPool2D(output_size=(1, 1))
+            self.global_pool = GlobalAvgPool2DCompat()
             self.flatten = nn.Flatten()
             self.dropout = nn.Dropout(p=dropout_rate)
             self.classifier = nn.Dense(ch_after_block2, num_classes)
@@ -153,7 +157,7 @@ if MINDSPORE_AVAILABLE:
                 DepthwiseSeparableConv(ch1, ch2, kernel_size=3),
             ])
 
-            self.global_pool = ops.AdaptiveAvgPool2D(output_size=(1, 1))
+            self.global_pool = GlobalAvgPool2DCompat()
             self.flatten = nn.Flatten()
             self.dropout = nn.Dropout(p=dropout_rate)
             self.classifier = nn.Dense(ch2, num_classes)
