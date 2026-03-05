@@ -160,12 +160,15 @@ class ArmbandSensor(SensorBase):
                 if not self._serial or not self._serial.is_open:
                     break
 
+                # Some USB-serial drivers may report in_waiting=0 intermittently
+                # even while data is streaming. Fall back to a blocking read so
+                # we do not miss frames in that case.
                 available = self._serial.in_waiting
-                if available > 0:
-                    raw_buffer.extend(self._serial.read(available))
-                else:
-                    time.sleep(0.001)
+                read_size = available if available > 0 else 256
+                chunk = self._serial.read(read_size)
+                if not chunk:
                     continue
+                raw_buffer.extend(chunk)
 
                 # Parse as many frames as possible.
                 while True:
