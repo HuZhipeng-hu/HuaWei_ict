@@ -1,9 +1,11 @@
-"""
+﻿"""
 Main runtime controller.
 
 Control loop:
     sensor.read_window -> preprocess -> inference -> vote -> actuator
 """
+
+from __future__ import annotations
 
 import logging
 import signal
@@ -14,7 +16,7 @@ from typing import Optional
 from runtime.control.state_machine import SystemState, SystemStateMachine
 from runtime.hardware.base import ActuatorBase, SensorBase
 from runtime.hardware.factory import create_actuator, create_sensor
-from runtime.inference import InferenceEngine, SlidingWindowVoter
+from runtime.inference import InferenceEngine, InferenceRateScheduler, SlidingWindowVoter
 from shared.config import RuntimeConfig
 from shared.gestures import GestureType
 from shared.preprocessing import PreprocessPipeline
@@ -58,6 +60,8 @@ class ProsthesisController:
             num_threads=inf_cfg.num_threads,
         )
 
+        self.infer_scheduler = InferenceRateScheduler(config.infer_rate_hz)
+
         self.voter = SlidingWindowVoter(
             window_size=config.vote_window_size,
             min_count=config.vote_min_count,
@@ -80,6 +84,8 @@ class ProsthesisController:
 
         if cfg.control_rate_hz <= 0:
             raise ValueError(f"control_rate_hz must be > 0, got {cfg.control_rate_hz}")
+        if cfg.infer_rate_hz < 0:
+            raise ValueError(f"infer_rate_hz must be >= 0, got {cfg.infer_rate_hz}")
         if pp.stft_hop_size <= 0:
             raise ValueError(f"stft_hop_size must be > 0, got {pp.stft_hop_size}")
         if pp.stft_window_size <= 0:
@@ -166,6 +172,7 @@ class ProsthesisController:
         logger.info("  Sensor: %s", self.sensor.get_info())
         logger.info("  Actuator: %s", self.actuator.get_info())
         logger.info("  Control rate: %s Hz", self.config.control_rate_hz)
+        logger.info("  Infer rate: %s Hz (0 means no limit)", self.config.infer_rate_hz)
         if max_cycles is not None:
             logger.info("  Max cycles: %s", max_cycles)
 
@@ -226,6 +233,9 @@ class ProsthesisController:
     def _control_step(self, window_size: int) -> None:
         window = self.sensor.read_window(window_size)
         if window is None:
+            return
+
+        if not self.infer_scheduler.should_run():
             return
 
         spectrogram = self.pipeline.process_window(window)

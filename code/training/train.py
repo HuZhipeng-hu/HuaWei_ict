@@ -1,15 +1,12 @@
-"""
-训练入口脚本
+﻿"""
+Training entrypoint.
 
-使用方式:
-    python -m training.train --config configs/training.yaml --data_dir data/
-
-参数:
-    --config    训练配置 YAML 文件路径
-    --data_dir  数据目录路径（包含手势子文件夹）
-    --epochs    覆盖配置中的训练轮数（可选）
-    --device    覆盖配置中的设备（可选）
+Examples:
+    python -m training.train --config configs/training.yaml --data_dir ../data
+    python -m training.train --data_dir ../data --split_mode grouped_file --test_ratio 0.2
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
@@ -19,88 +16,122 @@ from pathlib import Path
 
 import numpy as np
 
-# 将项目根目录加入路径
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shared.config import (
-    TrainingConfig, ModelConfig, PreprocessConfig,
-    AugmentationConfig, load_training_config,
+from shared.config import (  # noqa: E402
+    AugmentationConfig,
+    ModelConfig,
+    PreprocessConfig,
+    TrainingConfig,
+    load_training_config,
 )
-from shared.models import create_model, count_parameters
-from shared.preprocessing import PreprocessPipeline
-from shared.gestures import validate_gesture_definitions, NUM_CLASSES
+from shared.gestures import NUM_CLASSES, validate_gesture_definitions  # noqa: E402
+from shared.models import count_parameters, create_model  # noqa: E402
+from shared.preprocessing import PreprocessPipeline  # noqa: E402
+from training.data.augmentation import DataAugmentor  # noqa: E402
+from training.data.csv_dataset import CSVDatasetLoader  # noqa: E402
+from training.data.split_strategy import (  # noqa: E402
+    SPLIT_MODES,
+    build_manifest,
+    grouped_kfold_indices,
+    legacy_kfold_indices,
+    load_manifest,
+    save_manifest,
+    split_and_optionally_augment,
+    split_arrays_from_manifest,
+)
+from training.evaluate import load_and_evaluate  # noqa: E402
+from training.reporting import save_classification_report  # noqa: E402
+from training.trainer import Trainer  # noqa: E402
 
-from training.data.csv_dataset import CSVDatasetLoader
-from training.data.augmentation import DataAugmentor
-from training.trainer import Trainer
-from training.evaluate import evaluate_model
-
-# 日志配置
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    datefmt='%H:%M:%S',
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("training")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="NeuroGrip Pro V2 — 模型训练",
+        description="NeuroGrip model training",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--config", type=str, default="configs/training.yaml", help="Training YAML path")
+    parser.add_argument("--data_dir", type=str, required=True, help="Dataset root directory")
+    parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
+    parser.add_argument("--batch_size", type=int, default=None, help="Override training batch size")
     parser.add_argument(
-        "--config", type=str, default="configs/training.yaml",
-        help="训练配置 YAML 文件路径",
-    )
-    parser.add_argument(
-        "--data_dir", type=str, required=True,
-        help="数据目录路径（包含 Relax/, fist/, Pinch/ 等子文件夹）",
-    )
-    parser.add_argument(
-        "--epochs", type=int, default=None,
-        help="覆盖配置中的训练轮数",
-    )
-    parser.add_argument(
-        "--batch_size", type=int, default=None,
-        help="覆盖配置中的批大小",
-    )
-    parser.add_argument(
-        "--device", type=str, default=None,
+        "--device",
+        type=str,
+        default=None,
         choices=["CPU", "GPU", "Ascend"],
-        help="覆盖配置中的训练设备",
+        help="Override training device",
     )
+    parser.add_argument("--no_augment", action="store_true", help="Disable data augmentation")
+
     parser.add_argument(
-        "--no_augment", action="store_true",
-        help="禁用数据增强",
+        "--split_mode",
+        type=str,
+        default=None,
+        choices=list(SPLIT_MODES),
+        help="Split mode: legacy or grouped_file",
     )
+    parser.add_argument("--test_ratio", type=float, default=None, help="Test split ratio")
+    parser.add_argument("--split_manifest_in", type=str, default=None, help="Load split manifest from path")
+    parser.add_argument("--split_manifest_out", type=str, default=None, help="Write split manifest to path")
+
     return parser.parse_args()
+
+
+def _create_model(model_config: ModelConfig, for_eval: bool = False):
+    return create_model(
+        {
+            "model_type": model_config.model_type,
+            "in_channels": model_config.in_channels,
+            "num_classes": model_config.num_classes,
+            "base_channels": model_config.base_channels,
+            "use_se": model_config.use_se,
+            "dropout_rate": 0.0 if for_eval else model_config.dropout_rate,
+        }
+    )
+
+
+def _build_augmentor_if_enabled(aug_config: AugmentationConfig):
+    if not aug_config.enabled:
+        return None
+    return DataAugmentor(
+        time_warp_rate=aug_config.time_warp_rate,
+        amplitude_scale=aug_config.amplitude_scale,
+        noise_std=aug_config.noise_std,
+        mixup_alpha=getattr(aug_config, "mixup_alpha", 0.2),
+    )
+
+
+def _log_split_summary(split_name: str, labels: np.ndarray) -> None:
+    counts = [int(np.sum(labels == class_id)) for class_id in range(NUM_CLASSES)]
+    logger.info("%s split: %s samples, class_counts=%s", split_name, len(labels), counts)
 
 
 def main():
     args = parse_args()
     start_time = time.time()
 
-    logger.info("=" * 60)
-    logger.info("NeuroGrip Pro V2 — 模型训练")
-    logger.info("=" * 60)
+    logger.info("=" * 64)
+    logger.info("NeuroGrip model training")
+    logger.info("=" * 64)
 
-    # -------------------------------------------------------------------------
-    # 1. 加载配置
-    # -------------------------------------------------------------------------
     config_path = Path(args.config)
     if config_path.exists():
-        logger.info(f"加载配置: {config_path}")
-        model_config, preprocess_config, train_config, aug_config = \
-            load_training_config(str(config_path))
+        logger.info("Loading config: %s", config_path)
+        model_config, preprocess_config, train_config, aug_config = load_training_config(str(config_path))
     else:
-        logger.info("未找到配置文件，使用默认配置")
+        logger.info("Config not found, using default config.")
         model_config = ModelConfig()
         preprocess_config = PreprocessConfig()
         train_config = TrainingConfig()
         aug_config = AugmentationConfig()
 
-    # CLI 参数覆盖
     if args.epochs is not None:
         train_config.epochs = args.epochs
     if args.batch_size is not None:
@@ -109,16 +140,17 @@ def main():
         train_config.device = args.device
     if args.no_augment:
         aug_config.enabled = False
+    if args.split_mode is not None:
+        train_config.split_mode = args.split_mode
+    if args.test_ratio is not None:
+        train_config.test_ratio = args.test_ratio
 
-    # -------------------------------------------------------------------------
-    # 2. 验证手势定义
-    # -------------------------------------------------------------------------
+    if train_config.split_mode not in SPLIT_MODES:
+        raise ValueError(f"Invalid split_mode={train_config.split_mode!r}, expected one of {SPLIT_MODES}")
+
     validate_gesture_definitions()
-    logger.info(f"手势定义验证通过: {NUM_CLASSES} 类")
+    logger.info("Gesture definition check passed: %s classes", NUM_CLASSES)
 
-    # -------------------------------------------------------------------------
-    # 3. 构建预处理流水线
-    # -------------------------------------------------------------------------
     pipeline = PreprocessPipeline(
         sampling_rate=preprocess_config.sampling_rate,
         num_channels=preprocess_config.num_channels,
@@ -130,10 +162,7 @@ def main():
         stft_n_fft=preprocess_config.stft_n_fft,
     )
 
-    # -------------------------------------------------------------------------
-    # 4. 加载数据
-    # -------------------------------------------------------------------------
-    logger.info(f"加载数据: {args.data_dir}")
+    logger.info("Loading dataset from: %s", args.data_dir)
     loader = CSVDatasetLoader(
         data_dir=args.data_dir,
         preprocess=pipeline,
@@ -144,159 +173,163 @@ def main():
         segment_stride=preprocess_config.segment_stride,
     )
 
-    # 打印数据统计
-    stats = loader.get_stats()
-    logger.info(f"数据统计: {stats}")
+    logger.info("Dataset stats: %s", loader.get_stats())
+    samples, labels, source_ids = loader.load_all_with_sources()
+    logger.info("Loaded samples: %s, shape=%s", len(samples), samples.shape)
 
-    # 加载所有样本
-    samples, labels = loader.load_all()
-    logger.info(f"样本总数: {len(samples)}, 形状: {samples.shape}")
+    manifest_in = args.split_manifest_in or train_config.split_manifest_path
+    manifest_out = args.split_manifest_out or train_config.split_manifest_path
 
-    # -------------------------------------------------------------------------
-    # 5. 数据增强
-    # -------------------------------------------------------------------------
-    if aug_config.enabled:
-        augmentor = DataAugmentor(
-            time_warp_rate=aug_config.time_warp_rate,
-            amplitude_scale=aug_config.amplitude_scale,
-            noise_std=aug_config.noise_std,
-            mixup_alpha=getattr(aug_config, 'mixup_alpha', 0.2),
-        )
-        use_mixup = getattr(aug_config, 'use_mixup', False)
-        expected = len(samples) * aug_config.augment_factor
-        if use_mixup:
-            expected += len(samples)
-        logger.info(
-            f"执行数据增强 (x{aug_config.augment_factor}"
-            f"{'+Mixup' if use_mixup else ''}): "
-            f"{len(samples)} → ~{expected}"
-        )
-        samples, labels = augmentor.augment_batch(
-            samples, labels,
-            factor=aug_config.augment_factor,
-            use_mixup=use_mixup,
-        )
-        logger.info(f"增强后样本数: {len(samples)}")
-
-    # -------------------------------------------------------------------------
-    # 6. 构建模型辅助函数
-    # -------------------------------------------------------------------------
-    def _create_fresh_model():
-        """创建一个全新的模型实例"""
-        return create_model({
-            "model_type": model_config.model_type,
-            "in_channels": model_config.in_channels,
-            "num_classes": model_config.num_classes,
-            "base_channels": model_config.base_channels,
-            "use_se": model_config.use_se,
-            "dropout_rate": model_config.dropout_rate,
-        })
-
-    # -------------------------------------------------------------------------
-    # 7. 训练（支持 K-Fold 和普通模式）
-    # -------------------------------------------------------------------------
-    kfold = getattr(train_config, 'kfold', 0)
-
-    if kfold > 0:
-        # ===== K-Fold 交叉验证模式 =====
-        logger.info(f"\n{'='*60}")
-        logger.info(f"K-Fold 交叉验证: {kfold} 折")
-        logger.info(f"{'='*60}")
-
-        fold_accs = []
-        for fold_idx, (train_data, val_data) in \
-                CSVDatasetLoader.kfold_split(samples, labels, k=kfold):
-            logger.info(f"\n--- Fold {fold_idx+1}/{kfold} ---")
-            logger.info(
-                f"训练: {len(train_data[0])} 样本, "
-                f"验证: {len(val_data[0])} 样本"
+    if manifest_in:
+        manifest = load_manifest(manifest_in)
+        logger.info("Using split manifest from: %s", manifest_in)
+        if manifest.num_samples and manifest.num_samples != len(samples):
+            raise ValueError(
+                f"Manifest sample count mismatch: manifest={manifest.num_samples}, loaded={len(samples)}"
             )
-
-            # 每折独立模型和 trainer
-            fold_model = _create_fresh_model()
-            fold_trainer = Trainer(fold_model, train_config)
-            fold_history = fold_trainer.train(
-                train_data=train_data,
-                val_data=val_data,
-            )
-            fold_accs.append(fold_trainer.best_val_acc)
-            logger.info(
-                f"Fold {fold_idx+1} 最佳 Val Acc: "
-                f"{fold_trainer.best_val_acc:.4f}"
-            )
-
-        # 汇总
-        import numpy as np
-        mean_acc = np.mean(fold_accs)
-        std_acc = np.std(fold_accs)
-        logger.info(f"\n{'='*60}")
-        logger.info(
-            f"K-Fold 结果: "
-            f"平均 Val Acc = {mean_acc:.4f} ± {std_acc:.4f}"
-        )
-        logger.info(f"各折: {[f'{a:.4f}' for a in fold_accs]}")
-        logger.info(f"{'='*60}")
-
-        # K-Fold 后用全部数据做最终训练
-        logger.info("\n使用全部数据做最终训练...")
-        model = _create_fresh_model()
-        # 用最后一折的 val 做最终评估
-        (train_samples, train_labels), (val_samples, val_labels) = \
-            CSVDatasetLoader.split(
-                samples, labels, val_ratio=train_config.val_ratio,
-            )
-
     else:
-        # ===== 普通训练模式 =====
-        (train_samples, train_labels), (val_samples, val_labels) = \
-            CSVDatasetLoader.split(
-                samples, labels, val_ratio=train_config.val_ratio,
+        manifest = build_manifest(
+            labels=labels,
+            source_ids=source_ids,
+            split_mode=train_config.split_mode,
+            val_ratio=train_config.val_ratio,
+            test_ratio=train_config.test_ratio,
+            seed=train_config.split_seed,
+            data_dir=str(Path(args.data_dir).resolve()),
+        )
+        logger.info(
+            "Built split manifest mode=%s seed=%s val_ratio=%.3f test_ratio=%.3f",
+            manifest.split_mode,
+            manifest.seed,
+            manifest.val_ratio,
+            manifest.test_ratio,
+        )
+
+    if manifest_out:
+        save_manifest(manifest, manifest_out)
+
+    if manifest.split_mode == "grouped_file":
+        train_src = set(manifest.train_sources)
+        val_src = set(manifest.val_sources)
+        test_src = set(manifest.test_sources)
+        if train_src & val_src or train_src & test_src or val_src & test_src:
+            raise RuntimeError("Grouped split source leakage detected in manifest")
+
+    augmentor = _build_augmentor_if_enabled(aug_config)
+    use_mixup = getattr(aug_config, "use_mixup", False)
+    augment_factor = int(getattr(aug_config, "augment_factor", 1))
+
+    (train_samples, train_labels), (val_samples, val_labels), (test_samples, test_labels) = split_and_optionally_augment(
+        samples=samples,
+        labels=labels,
+        manifest=manifest,
+        augmentor=augmentor,
+        augment_factor=augment_factor,
+        use_mixup=use_mixup,
+    )
+
+    if len(train_samples) == 0:
+        raise RuntimeError("Train split is empty after split")
+    if len(val_samples) == 0:
+        raise RuntimeError("Validation split is empty after split")
+    if len(test_samples) == 0:
+        raise RuntimeError("Test split is empty after split")
+
+    _log_split_summary("Train", train_labels)
+    _log_split_summary("Val", val_labels)
+    _log_split_summary("Test", test_labels)
+
+    if train_config.kfold > 1:
+        logger.info("=" * 64)
+        logger.info("Running KFold validation: k=%s (with fixed independent test split)", train_config.kfold)
+        logger.info("=" * 64)
+
+        dev_indices = np.asarray(manifest.train_indices + manifest.val_indices, dtype=np.int64)
+        if manifest.split_mode == "grouped_file":
+            fold_iterator = grouped_kfold_indices(
+                labels=labels,
+                source_ids=source_ids,
+                base_indices=dev_indices,
+                k=train_config.kfold,
+                seed=train_config.split_seed,
             )
-        model = _create_fresh_model()
+        else:
+            fold_iterator = legacy_kfold_indices(
+                labels=labels,
+                base_indices=dev_indices,
+                k=train_config.kfold,
+                seed=train_config.split_seed,
+            )
 
-    num_params = count_parameters(model)
+        fold_val_accs = []
+        for fold_idx, fold_train_idx, fold_val_idx in fold_iterator:
+            logger.info("Fold %s/%s", fold_idx + 1, train_config.kfold)
+            fold_train_samples = samples[fold_train_idx]
+            fold_train_labels = labels[fold_train_idx]
+            fold_val_samples = samples[fold_val_idx]
+            fold_val_labels = labels[fold_val_idx]
+
+            if augmentor is not None and (augment_factor > 1 or use_mixup):
+                fold_train_samples, fold_train_labels = augmentor.augment_batch(
+                    fold_train_samples,
+                    fold_train_labels,
+                    factor=augment_factor,
+                    use_mixup=use_mixup,
+                )
+
+            fold_model = _create_model(model_config, for_eval=False)
+            fold_trainer = Trainer(fold_model, train_config)
+            fold_trainer.train(
+                train_data=(fold_train_samples, fold_train_labels),
+                val_data=(fold_val_samples, fold_val_labels),
+            )
+            fold_val_accs.append(float(fold_trainer.best_val_acc))
+            logger.info("Fold %s best val acc: %.4f", fold_idx + 1, fold_trainer.best_val_acc)
+
+        logger.info(
+            "KFold done: mean=%.4f std=%.4f values=%s",
+            float(np.mean(fold_val_accs)),
+            float(np.std(fold_val_accs)),
+            [f"{v:.4f}" for v in fold_val_accs],
+        )
+
+    model = _create_model(model_config, for_eval=False)
     logger.info(
-        f"模型创建完成: {model_config.model_type}, "
-        f"参数量: {num_params:,}"
-    )
-    logger.info(
-        f"数据划分: 训练 {len(train_samples)} / 验证 {len(val_samples)}"
+        "Model created: type=%s params=%s",
+        model_config.model_type,
+        f"{count_parameters(model):,}",
     )
 
-    # -------------------------------------------------------------------------
-    # 8. 最终训练
-    # -------------------------------------------------------------------------
     trainer = Trainer(model, train_config)
-    history = trainer.train(
+    trainer.train(
         train_data=(train_samples, train_labels),
         val_data=(val_samples, val_labels),
     )
 
-    # -------------------------------------------------------------------------
-    # 9. 最终评估
-    # -------------------------------------------------------------------------
-    logger.info("\n" + "=" * 60)
-    logger.info("最终评估（最佳模型 + 验证集）")
-    logger.info("=" * 60)
+    logger.info("\n" + "=" * 64)
+    logger.info("Final evaluation on test split")
+    logger.info("=" * 64)
 
-    # 重新加载最佳检查点
-    from training.evaluate import load_and_evaluate
     best_ckpt = Path(train_config.checkpoint_dir) / "neurogrip_best.ckpt"
-    if best_ckpt.exists():
-        eval_model = create_model({
-            "model_type": model_config.model_type,
-            "in_channels": model_config.in_channels,
-            "num_classes": model_config.num_classes,
-            "base_channels": model_config.base_channels,
-            "use_se": model_config.use_se,
-            "dropout_rate": 0.0,  # 评估时关闭 Dropout
-        })
-        results = load_and_evaluate(
-            eval_model, str(best_ckpt), val_samples, val_labels,
-        )
+    if not best_ckpt.exists():
+        raise FileNotFoundError(f"Best checkpoint not found: {best_ckpt}")
+
+    eval_model = _create_model(model_config, for_eval=True)
+    test_results = load_and_evaluate(
+        eval_model,
+        str(best_ckpt),
+        test_samples,
+        test_labels,
+    )
+
+    report = test_results.get("report")
+    if isinstance(report, dict):
+        output_dir = Path(train_config.log_dir) / "evaluation"
+        artifacts = save_classification_report(report, output_dir=output_dir, prefix="test")
+        logger.info("Saved evaluation report: %s", artifacts)
 
     elapsed = time.time() - start_time
-    logger.info(f"\n训练完成! 总耗时: {elapsed/60:.1f} 分钟")
+    logger.info("Training finished in %.1f min", elapsed / 60.0)
 
 
 if __name__ == "__main__":

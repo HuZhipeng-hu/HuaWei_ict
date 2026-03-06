@@ -1,4 +1,4 @@
-"""
+﻿"""
 Runtime entrypoint for prosthesis control.
 
 Examples:
@@ -65,6 +65,12 @@ def parse_args():
         help="Override control loop rate in Hz.",
     )
     parser.add_argument(
+        "--infer_rate_hz",
+        type=float,
+        default=None,
+        help="Override inference frequency limit in Hz (0 means no limit).",
+    )
+    parser.add_argument(
         "--max_cycles",
         type=int,
         default=None,
@@ -99,6 +105,8 @@ def main():
         config.hardware.sensor_port = args.port
     if args.rate is not None:
         config.control_rate_hz = args.rate
+    if args.infer_rate_hz is not None:
+        config.infer_rate_hz = args.infer_rate_hz
 
     if args.standalone:
         config.hardware.sensor_mode = "standalone"
