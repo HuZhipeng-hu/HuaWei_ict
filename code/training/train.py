@@ -113,6 +113,90 @@ def _log_split_summary(split_name: str, labels: np.ndarray) -> None:
     logger.info("%s split: %s samples, class_counts=%s", split_name, len(labels), counts)
 
 
+def _prepare_split_manifest(
+    *,
+    labels: np.ndarray,
+    source_ids: np.ndarray,
+    split_mode: str,
+    val_ratio: float,
+    test_ratio: float,
+    split_seed: int,
+    data_dir: str,
+    cli_manifest_in: str | None,
+    config_manifest_path: str | None,
+    manifest_out: str | None,
+):
+    """
+    Resolve/load/build split manifest with portable fallback behavior.
+
+    Rules:
+    - Explicit --split_manifest_in is strict: missing file raises FileNotFoundError.
+    - Config split_manifest_path is soft: missing file triggers auto build + save.
+    - If neither input path exists, build in-memory and save only when manifest_out is provided.
+    """
+    explicit_manifest_path = Path(cli_manifest_in) if cli_manifest_in else None
+    config_manifest = Path(config_manifest_path) if config_manifest_path else None
+    manifest_out_path = Path(manifest_out) if manifest_out else None
+
+    def _build() -> object:
+        built_manifest = build_manifest(
+            labels=labels,
+            source_ids=source_ids,
+            split_mode=split_mode,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=split_seed,
+            data_dir=str(Path(data_dir).resolve()),
+        )
+        logger.info(
+            "Built split manifest mode=%s seed=%s val_ratio=%.3f test_ratio=%.3f",
+            built_manifest.split_mode,
+            built_manifest.seed,
+            built_manifest.val_ratio,
+            built_manifest.test_ratio,
+        )
+        return built_manifest
+
+    if explicit_manifest_path is not None:
+        if not explicit_manifest_path.exists():
+            raise FileNotFoundError(
+                "Split manifest file not found for explicit --split_manifest_in: "
+                f"{explicit_manifest_path}. "
+                "To create one first, run training once with "
+                "--split_manifest_out <path>; or pass an existing file via "
+                "--split_manifest_in <path>."
+            )
+
+        manifest = load_manifest(explicit_manifest_path)
+        logger.info("Using split manifest from explicit --split_manifest_in: %s", explicit_manifest_path)
+        if manifest_out_path is not None:
+            save_manifest(manifest, manifest_out_path)
+            logger.info("Saved split manifest copy to: %s", manifest_out_path)
+        return manifest
+
+    if config_manifest is not None and config_manifest.exists():
+        manifest = load_manifest(config_manifest)
+        logger.info("Using split manifest from config: %s", config_manifest)
+        if manifest_out_path is not None:
+            save_manifest(manifest, manifest_out_path)
+            logger.info("Saved split manifest copy to: %s", manifest_out_path)
+        return manifest
+
+    manifest = _build()
+
+    if config_manifest is not None and not config_manifest.exists():
+        save_target = manifest_out_path or config_manifest
+        save_manifest(manifest, save_target)
+        logger.info("Auto-generated split manifest at %s", save_target)
+        return manifest
+
+    if manifest_out_path is not None:
+        save_manifest(manifest, manifest_out_path)
+        logger.info("Saved split manifest to: %s", manifest_out_path)
+
+    return manifest
+
+
 def main():
     args = parse_args()
     start_time = time.time()
@@ -177,36 +261,22 @@ def main():
     samples, labels, source_ids = loader.load_all_with_sources()
     logger.info("Loaded samples: %s, shape=%s", len(samples), samples.shape)
 
-    manifest_in = args.split_manifest_in or train_config.split_manifest_path
-    manifest_out = args.split_manifest_out or train_config.split_manifest_path
-
-    if manifest_in:
-        manifest = load_manifest(manifest_in)
-        logger.info("Using split manifest from: %s", manifest_in)
-        if manifest.num_samples and manifest.num_samples != len(samples):
-            raise ValueError(
-                f"Manifest sample count mismatch: manifest={manifest.num_samples}, loaded={len(samples)}"
-            )
-    else:
-        manifest = build_manifest(
-            labels=labels,
-            source_ids=source_ids,
-            split_mode=train_config.split_mode,
-            val_ratio=train_config.val_ratio,
-            test_ratio=train_config.test_ratio,
-            seed=train_config.split_seed,
-            data_dir=str(Path(args.data_dir).resolve()),
+    manifest = _prepare_split_manifest(
+        labels=labels,
+        source_ids=source_ids,
+        split_mode=train_config.split_mode,
+        val_ratio=train_config.val_ratio,
+        test_ratio=train_config.test_ratio,
+        split_seed=train_config.split_seed,
+        data_dir=args.data_dir,
+        cli_manifest_in=args.split_manifest_in,
+        config_manifest_path=train_config.split_manifest_path,
+        manifest_out=args.split_manifest_out,
+    )
+    if manifest.num_samples and manifest.num_samples != len(samples):
+        raise ValueError(
+            f"Manifest sample count mismatch: manifest={manifest.num_samples}, loaded={len(samples)}"
         )
-        logger.info(
-            "Built split manifest mode=%s seed=%s val_ratio=%.3f test_ratio=%.3f",
-            manifest.split_mode,
-            manifest.seed,
-            manifest.val_ratio,
-            manifest.test_ratio,
-        )
-
-    if manifest_out:
-        save_manifest(manifest, manifest_out)
 
     if manifest.split_mode == "grouped_file":
         train_src = set(manifest.train_sources)

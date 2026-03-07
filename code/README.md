@@ -34,6 +34,10 @@ code/
 python -m training.train --config configs/training.yaml --data_dir ../data
 ```
 
+If `training.split_manifest_path` is configured but the manifest file does not
+exist yet, training will auto-generate it and save it to the configured path
+(or to `--split_manifest_out` if explicitly provided).
+
 Useful split options:
 
 ```bash

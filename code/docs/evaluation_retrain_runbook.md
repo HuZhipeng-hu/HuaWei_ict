@@ -6,6 +6,10 @@ This runbook defines the trusted workflow for 6-class retraining and deployment.
 
 Preferred: create once, then reuse for all model comparisons.
 
+On first run, if `training/data.split_manifest_path` is configured but missing,
+`training.train` will auto-generate and persist a manifest at that path
+(or at `--split_manifest_out` if provided).
+
 ```bash
 python -m training.train \
   --config configs/training.yaml \
