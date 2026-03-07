@@ -61,6 +61,17 @@ def main():
     args = parse_args()
 
     model_config, preprocess_config, _, _ = load_training_config(args.config)
+    dual_cfg = preprocess_config.dual_branch
+    dual_enabled = bool(dual_cfg.get("enabled", False)) if isinstance(dual_cfg, dict) else bool(getattr(dual_cfg, "enabled", False))
+    if dual_enabled:
+        expected_channels = int(preprocess_config.num_channels) * 2
+        if model_config.in_channels != expected_channels:
+            logger.warning(
+                "dual_branch enabled, overriding model.in_channels from %s to %s",
+                model_config.in_channels,
+                expected_channels,
+            )
+            model_config.in_channels = expected_channels
     manifest = load_manifest(args.split_manifest)
 
     data_dir = args.data_dir or manifest.data_dir
@@ -79,6 +90,10 @@ def main():
         stft_window_size=preprocess_config.stft_window_size,
         stft_hop_size=preprocess_config.stft_hop_size,
         stft_n_fft=preprocess_config.stft_n_fft,
+        device_sampling_rate=preprocess_config.device_sampling_rate,
+        segment_length=preprocess_config.segment_length,
+        segment_stride=preprocess_config.segment_stride,
+        dual_branch=preprocess_config.dual_branch,
     )
 
     loader = CSVDatasetLoader(
@@ -94,7 +109,9 @@ def main():
     samples, labels, _ = loader.load_all_with_sources()
     if manifest.num_samples and manifest.num_samples != len(samples):
         raise ValueError(
-            f"Manifest sample count mismatch: manifest={manifest.num_samples}, loaded={len(samples)}"
+            "Manifest sample count mismatch: "
+            f"manifest={manifest.num_samples}, loaded={len(samples)}. "
+            "Please evaluate with a manifest generated under the same preprocess settings."
         )
 
     _, _, (test_samples, test_labels) = split_arrays_from_manifest(samples, labels, manifest)

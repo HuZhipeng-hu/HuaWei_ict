@@ -44,6 +44,7 @@ class CSVDatasetLoader:
         self.center_value = center_value
 
         self.decimate_ratio = max(1, device_sampling_rate // target_sampling_rate)
+        self.dual_branch_enabled = bool(getattr(self.preprocess, "dual_branch_enabled", False))
 
         if not self.data_dir.exists():
             raise FileNotFoundError(f"Data directory not found: {self.data_dir}")
@@ -107,16 +108,37 @@ class CSVDatasetLoader:
     def _segment(self, signal: np.ndarray) -> List[np.ndarray]:
         return self.windower.segment(signal)
 
+    def _segment_dual_branch(self, raw_signal: np.ndarray) -> List[np.ndarray]:
+        raw_window = int(getattr(self.preprocess, "high_segment_length", self.segment_length * self.decimate_ratio))
+        raw_stride = int(getattr(self.preprocess, "high_segment_stride", self.segment_stride * self.decimate_ratio))
+        phase_offsets = list(getattr(self.preprocess, "multi_phase_offsets", [0.0, 0.33, 0.66]))
+
+        segments: List[np.ndarray] = []
+        total = raw_signal.shape[0]
+        for phase in phase_offsets:
+            phase_start = int(round(raw_stride * float(phase)))
+            start = max(0, phase_start)
+            while start + raw_window <= total:
+                segments.append(raw_signal[start : start + raw_window])
+                start += raw_stride
+        return segments
+
     def load_file(self, csv_path: Path) -> List[np.ndarray]:
         emg_data = self._read_csv(csv_path)
         if emg_data.shape[0] == 0:
             return []
 
-        decimated = self._decimate(emg_data)
-        if decimated.shape[0] < self.segment_length:
-            return []
+        if self.dual_branch_enabled:
+            min_raw = int(getattr(self.preprocess, "high_segment_length", self.segment_length * self.decimate_ratio))
+            if emg_data.shape[0] < min_raw:
+                return []
+            segments = self._segment_dual_branch(emg_data)
+        else:
+            decimated = self._decimate(emg_data)
+            if decimated.shape[0] < self.segment_length:
+                return []
+            segments = self._segment(decimated)
 
-        segments = self._segment(decimated)
         spectrograms: List[np.ndarray] = []
         for segment in segments:
             try:

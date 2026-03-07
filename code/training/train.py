@@ -232,6 +232,21 @@ def main():
     if train_config.split_mode not in SPLIT_MODES:
         raise ValueError(f"Invalid split_mode={train_config.split_mode!r}, expected one of {SPLIT_MODES}")
 
+    dual_cfg = getattr(preprocess_config, "dual_branch", None)
+    if isinstance(dual_cfg, dict):
+        dual_branch_enabled = bool(dual_cfg.get("enabled", False))
+    else:
+        dual_branch_enabled = bool(getattr(dual_cfg, "enabled", False))
+    if dual_branch_enabled:
+        expected_channels = int(preprocess_config.num_channels) * 2
+        if model_config.in_channels != expected_channels:
+            logger.warning(
+                "dual_branch enabled, overriding model.in_channels from %s to %s",
+                model_config.in_channels,
+                expected_channels,
+            )
+            model_config.in_channels = expected_channels
+
     validate_gesture_definitions()
     logger.info("Gesture definition check passed: %s classes", NUM_CLASSES)
 
@@ -244,6 +259,10 @@ def main():
         stft_window_size=preprocess_config.stft_window_size,
         stft_hop_size=preprocess_config.stft_hop_size,
         stft_n_fft=preprocess_config.stft_n_fft,
+        device_sampling_rate=preprocess_config.device_sampling_rate,
+        segment_length=preprocess_config.segment_length,
+        segment_stride=preprocess_config.segment_stride,
+        dual_branch=preprocess_config.dual_branch,
     )
 
     logger.info("Loading dataset from: %s", args.data_dir)
@@ -275,7 +294,10 @@ def main():
     )
     if manifest.num_samples and manifest.num_samples != len(samples):
         raise ValueError(
-            f"Manifest sample count mismatch: manifest={manifest.num_samples}, loaded={len(samples)}"
+            "Manifest sample count mismatch: "
+            f"manifest={manifest.num_samples}, loaded={len(samples)}. "
+            "This usually means preprocess/split settings changed. "
+            "Please regenerate manifest with --split_manifest_out and retrain."
         )
 
     if manifest.split_mode == "grouped_file":

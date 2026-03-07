@@ -17,6 +17,7 @@ from conversion.export import export_to_mindir
 from conversion.quantize import quantize_model
 from shared.config import ModelConfig, load_config, load_training_config
 from shared.models import count_parameters, create_model
+from shared.preprocessing import PreprocessPipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,16 +32,24 @@ def _derive_expected_input_shape_from_training(training_config_path: Path):
         return None
 
     train_model_cfg, train_pp_cfg, _, _ = load_training_config(str(training_config_path))
-    freq_bins = train_pp_cfg.stft_n_fft // 2 + 1
-    time_frames = max(
-        1,
-        (train_pp_cfg.segment_length - train_pp_cfg.stft_window_size)
-        // train_pp_cfg.stft_hop_size
-        + 1,
+    pipeline = PreprocessPipeline(
+        sampling_rate=train_pp_cfg.sampling_rate,
+        num_channels=train_pp_cfg.num_channels,
+        lowcut=train_pp_cfg.lowcut,
+        highcut=train_pp_cfg.highcut,
+        filter_order=train_pp_cfg.filter_order,
+        stft_window_size=train_pp_cfg.stft_window_size,
+        stft_hop_size=train_pp_cfg.stft_hop_size,
+        stft_n_fft=train_pp_cfg.stft_n_fft,
+        device_sampling_rate=train_pp_cfg.device_sampling_rate,
+        segment_length=train_pp_cfg.segment_length,
+        segment_stride=train_pp_cfg.segment_stride,
+        dual_branch=train_pp_cfg.dual_branch,
     )
+    channels, freq_bins, time_frames = pipeline.get_output_shape()
     return (
         1,
-        train_pp_cfg.num_channels,
+        channels,
         freq_bins,
         time_frames,
         train_model_cfg,
@@ -57,10 +66,37 @@ def _validate_input_shape(input_shape, model_config: ModelConfig) -> None:
             input_shape[0],
         )
     if input_shape[1] != model_config.in_channels:
-        logger.warning(
-            "input_shape channels=%s mismatch model in_channels=%s.",
-            input_shape[1],
-            model_config.in_channels,
+        raise ValueError(
+            "input_shape channels=%s mismatch model in_channels=%s."
+            % (input_shape[1], model_config.in_channels)
+        )
+
+
+def _validate_training_shape_strict(input_shape, model_config: ModelConfig, training_cfg_path: Path) -> None:
+    expected = _derive_expected_input_shape_from_training(training_cfg_path)
+    if expected is None:
+        return
+
+    expected_shape = expected[:4]
+    train_model_cfg = expected[4]
+
+    if expected_shape != input_shape:
+        raise ValueError(
+            "input_shape %s differs from training-derived shape %s from %s. "
+            "Please align conversion config with training preprocess settings."
+            % (input_shape, expected_shape, training_cfg_path)
+        )
+
+    if train_model_cfg.in_channels != model_config.in_channels:
+        raise ValueError(
+            "conversion.model.in_channels=%s differs from training.model.in_channels=%s."
+            % (model_config.in_channels, train_model_cfg.in_channels)
+        )
+
+    if train_model_cfg.num_classes != model_config.num_classes:
+        raise ValueError(
+            "conversion.model.num_classes=%s differs from training.model.num_classes=%s."
+            % (model_config.num_classes, train_model_cfg.num_classes)
         )
 
 
@@ -121,30 +157,8 @@ def main():
 
     # Warn when conversion input shape drifts from training preprocessing.
     training_cfg_path = config_path.parent / "training.yaml"
-    expected = _derive_expected_input_shape_from_training(training_cfg_path)
-    if expected is not None:
-        expected_shape = expected[:4]
-        train_model_cfg = expected[4]
-        if expected_shape != input_shape:
-            logger.warning(
-                "input_shape %s differs from training-derived shape %s from %s. "
-                "This can cause runtime mismatch.",
-                input_shape,
-                expected_shape,
-                training_cfg_path,
-            )
-        if train_model_cfg.in_channels != model_config.in_channels:
-            logger.warning(
-                "conversion.model.in_channels=%s differs from training.model.in_channels=%s.",
-                model_config.in_channels,
-                train_model_cfg.in_channels,
-            )
-        if train_model_cfg.num_classes != model_config.num_classes:
-            logger.warning(
-                "conversion.model.num_classes=%s differs from training.model.num_classes=%s.",
-                model_config.num_classes,
-                train_model_cfg.num_classes,
-            )
+    if training_cfg_path.exists():
+        _validate_training_shape_strict(input_shape, model_config, training_cfg_path)
     else:
         logger.info("No training.yaml found for cross-check, skipping shape consistency check.")
 

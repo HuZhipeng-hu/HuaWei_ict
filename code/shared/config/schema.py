@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import MISSING, asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -35,6 +35,21 @@ class ModelConfig:
 
 
 @dataclass
+class DualBranchConfig:
+    enabled: bool = True
+    fuse_mode: str = "concat_channels"
+    low_rate: int = 200
+    high_rate: int = 1000
+    high_segment_length: int = 420
+    high_segment_stride: int = 210
+    high_stft_window_size: int = 120
+    high_stft_hop_size: int = 60
+    high_stft_n_fft: int = 230
+    high_freq_bins_out: int = 24
+    multi_phase_offsets: list[float] = field(default_factory=lambda: [0.0, 0.33, 0.66])
+
+
+@dataclass
 class PreprocessConfig:
     sampling_rate: float = 200.0
     num_channels: int = 6
@@ -52,6 +67,7 @@ class PreprocessConfig:
 
     segment_length: int = 84
     segment_stride: int = 42
+    dual_branch: DualBranchConfig = field(default_factory=DualBranchConfig)
 
 
 @dataclass
@@ -160,14 +176,25 @@ def _dict_to_dataclass(cls, data: dict):
     if not isinstance(data, dict):
         return data
 
-    field_types = {f.name: f.type for f in cls.__dataclass_fields__.values()}
     kwargs = {}
-    for field_name, field_type in field_types.items():
+    for field_name, field_info in cls.__dataclass_fields__.items():
         if field_name not in data:
             continue
         value = data[field_name]
-        if isinstance(value, dict) and hasattr(field_type, "__dataclass_fields__"):
-            kwargs[field_name] = _dict_to_dataclass(field_type, value)
+        nested_cls = None
+        field_type = field_info.type
+        if hasattr(field_type, "__dataclass_fields__"):
+            nested_cls = field_type
+        elif field_info.default_factory is not MISSING:
+            try:
+                default_instance = field_info.default_factory()
+            except TypeError:
+                default_instance = None
+            if default_instance is not None and hasattr(default_instance, "__dataclass_fields__"):
+                nested_cls = type(default_instance)
+
+        if isinstance(value, dict) and nested_cls is not None:
+            kwargs[field_name] = _dict_to_dataclass(nested_cls, value)
         else:
             kwargs[field_name] = value
     return cls(**kwargs)
@@ -262,10 +289,10 @@ def load_training_config(yaml_path: str):
     training_section = _resolve_training_config_sections(raw)
 
     return (
-        ModelConfig(**raw.get("model", {})),
-        PreprocessConfig(**raw.get("preprocess", {})),
-        TrainingConfig(**training_section),
-        AugmentationConfig(**raw.get("augmentation", {})),
+        _dict_to_dataclass(ModelConfig, raw.get("model", {})),
+        _dict_to_dataclass(PreprocessConfig, raw.get("preprocess", {})),
+        _dict_to_dataclass(TrainingConfig, training_section),
+        _dict_to_dataclass(AugmentationConfig, raw.get("augmentation", {})),
     )
 
 
@@ -283,10 +310,10 @@ def load_runtime_config(yaml_path: str) -> RuntimeConfig:
     infer_rate_hz = runtime_section.get("infer_rate_hz", raw.get("infer_rate_hz", 0.0))
 
     return RuntimeConfig(
-        model=ModelConfig(**raw.get("model", {})),
-        preprocess=PreprocessConfig(**raw.get("preprocess", {})),
-        inference=InferenceConfig(**raw.get("inference", {})),
-        hardware=HardwareConfig(**raw.get("hardware", {})),
+        model=_dict_to_dataclass(ModelConfig, raw.get("model", {})),
+        preprocess=_dict_to_dataclass(PreprocessConfig, raw.get("preprocess", {})),
+        inference=_dict_to_dataclass(InferenceConfig, raw.get("inference", {})),
+        hardware=_dict_to_dataclass(HardwareConfig, raw.get("hardware", {})),
         vote_window_size=raw.get("vote_window_size", 5),
         vote_min_count=raw.get("vote_min_count", 3),
         confidence_threshold=raw.get("confidence_threshold", 0.5),

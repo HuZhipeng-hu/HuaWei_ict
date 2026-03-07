@@ -114,8 +114,48 @@ def test_split():
         assert np.sum(val_l == c) > 0
 
 
+def test_load_all_dual_branch_multi_phase():
+    with _managed_temp_dir() as tmpdir:
+        _create_test_data(tmpdir, num_files=2, num_rows=620)
+
+        pipeline = PreprocessPipeline(
+            sampling_rate=200,
+            num_channels=6,
+            device_sampling_rate=1000,
+            segment_length=84,
+            segment_stride=42,
+            dual_branch={
+                "enabled": True,
+                "fuse_mode": "concat_channels",
+                "low_rate": 200,
+                "high_rate": 1000,
+                "high_segment_length": 420,
+                "high_segment_stride": 210,
+                "high_stft_window_size": 120,
+                "high_stft_hop_size": 60,
+                "high_stft_n_fft": 230,
+                "high_freq_bins_out": 24,
+                "multi_phase_offsets": [0.0, 0.33, 0.66],
+            },
+        )
+        loader = CSVDatasetLoader(
+            data_dir=tmpdir,
+            preprocess=pipeline,
+            num_emg_channels=8,
+            device_sampling_rate=1000,
+            target_sampling_rate=200,
+            segment_length=84,
+            segment_stride=42,
+        )
+
+        samples, labels, source_ids = loader.load_all_with_sources()
+        assert len(samples) == len(labels) == len(source_ids)
+        assert samples.shape[1:] == (12, 24, 6)
+        assert len(samples) > 12  # dual + multi-phase should produce > 1 sample per file on average
+
+
 if __name__ == "__main__":
-    tests = [test_scan_folders, test_load_all, test_split]
+    tests = [test_scan_folders, test_load_all, test_split, test_load_all_dual_branch_multi_phase]
 
     passed = 0
     failed = 0

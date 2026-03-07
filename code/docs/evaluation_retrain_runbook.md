@@ -2,6 +2,10 @@
 
 This runbook defines the trusted workflow for 6-class retraining and deployment.
 
+Note: current default configs use dual-branch fused features with model input
+shape `(1, 12, 24, 6)`. Legacy single-branch `(1, 6, 24, 6)` artifacts are not
+compatible and must be retrained/re-converted.
+
 ## 1) Build/Reuse Split Manifest (no file leakage)
 
 Preferred: create once, then reuse for all model comparisons.

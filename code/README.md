@@ -38,6 +38,10 @@ If `training.split_manifest_path` is configured but the manifest file does not
 exist yet, training will auto-generate it and save it to the configured path
 (or to `--split_manifest_out` if explicitly provided).
 
+Current default training config enables dual-branch features (200Hz + 1000Hz)
+with fused input shape `(12, 24, 6)`. This is a breaking change versus legacy
+single-branch `(6, 24, 6)` models.
+
 Useful split options:
 
 ```bash
@@ -67,11 +71,18 @@ python -m conversion.convert \
   --config configs/conversion.yaml
 ```
 
+`configs/conversion.yaml` now defaults to `input_shape: [1, 12, 24, 6]`.
+Legacy 6-channel checkpoints/mindir are not compatible with this config and
+must be retrained/re-converted.
+
 ## Runtime
 
 ```bash
 python -m runtime.run --config configs/runtime.yaml
 ```
+
+Runtime preprocess is aligned with training dual-branch config. Ensure deployed
+`.mindir` was exported with matching shape `(1, 12, 24, 6)`.
 
 Standalone smoke test:
 

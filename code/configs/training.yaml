@@ -4,7 +4,7 @@
 
 model:
   model_type: "standard"
-  in_channels: 6
+  in_channels: 12
   num_classes: 6
   base_channels: 16
   use_se: true
@@ -23,6 +23,18 @@ preprocess:
   stft_n_fft: 46
   segment_length: 84
   segment_stride: 42
+  dual_branch:
+    enabled: true
+    fuse_mode: "concat_channels"
+    low_rate: 200
+    high_rate: 1000
+    high_segment_length: 420
+    high_segment_stride: 210
+    high_stft_window_size: 120
+    high_stft_hop_size: 60
+    high_stft_n_fft: 230
+    high_freq_bins_out: 24
+    multi_phase_offsets: [0.0, 0.33, 0.66]
 
 training:
   epochs: 80

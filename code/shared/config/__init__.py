@@ -3,6 +3,7 @@
 """
 
 from .schema import (
+    DualBranchConfig,
     ModelConfig,
     PreprocessConfig,
     TrainingConfig,

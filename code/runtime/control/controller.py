@@ -39,8 +39,6 @@ class ProsthesisController:
         self._last_gesture: Optional[GestureType] = None
         self.state_machine = SystemStateMachine()
 
-        self._validate_config_consistency()
-
         pp_cfg = config.preprocess
         self.pipeline = PreprocessPipeline(
             sampling_rate=pp_cfg.sampling_rate,
@@ -51,7 +49,12 @@ class ProsthesisController:
             stft_window_size=pp_cfg.stft_window_size,
             stft_hop_size=pp_cfg.stft_hop_size,
             stft_n_fft=pp_cfg.stft_n_fft,
+            device_sampling_rate=pp_cfg.device_sampling_rate,
+            segment_length=pp_cfg.segment_length,
+            segment_stride=pp_cfg.segment_stride,
+            dual_branch=pp_cfg.dual_branch,
         )
+        self._validate_config_consistency()
 
         inf_cfg = config.inference
         self.engine = InferenceEngine(
@@ -59,6 +62,14 @@ class ProsthesisController:
             device=inf_cfg.device,
             num_threads=inf_cfg.num_threads,
         )
+        expected_shape = self._expected_model_input_shape()
+        engine_shape = self.engine.get_input_shape()
+        if engine_shape is not None and tuple(engine_shape) != tuple(expected_shape):
+            raise ValueError(
+                "Runtime model input shape mismatch: "
+                f"model={engine_shape}, expected={expected_shape}. "
+                "Please re-convert model with current training/runtime preprocess settings."
+            )
 
         self.infer_scheduler = InferenceRateScheduler(config.infer_rate_hz)
 
@@ -73,10 +84,8 @@ class ProsthesisController:
         self.actuator: ActuatorBase = create_actuator(hw_cfg)
 
     def _expected_model_input_shape(self) -> tuple[int, int, int, int]:
-        pp = self.config.preprocess
-        freq_bins = pp.stft_n_fft // 2 + 1
-        time_frames = max(1, (pp.segment_length - pp.stft_window_size) // pp.stft_hop_size + 1)
-        return (1, pp.num_channels, freq_bins, time_frames)
+        channels, freq_bins, time_frames = self.pipeline.get_output_shape()
+        return (1, channels, freq_bins, time_frames)
 
     def _validate_config_consistency(self) -> None:
         cfg = self.config
@@ -116,19 +125,21 @@ class ProsthesisController:
                 pp.segment_length,
             )
 
-        if cfg.model.in_channels != pp.num_channels:
-            logger.warning(
-                "Model in_channels (%s) != preprocess.num_channels (%s). "
-                "This may cause shape mismatch at inference.",
-                cfg.model.in_channels,
-                pp.num_channels,
+        expected_channels = self._expected_model_input_shape()[1]
+        if cfg.model.in_channels != expected_channels:
+            raise ValueError(
+                "Model/preprocess channel mismatch: "
+                f"model.in_channels={cfg.model.in_channels}, "
+                f"expected={expected_channels}. "
+                "Please re-train and re-convert model with the current preprocess config."
             )
 
-        if cfg.hardware.sensor_mode == "armband" and int(pp.sampling_rate) != 200:
+        if cfg.hardware.sensor_mode == "armband" and int(pp.device_sampling_rate) != int(cfg.hardware.armband_sampling_rate):
             logger.warning(
-                "preprocess.sampling_rate=%s, but ArmbandSensor factory currently uses "
-                "target_sampling_rate=200. Keep them aligned to avoid train/runtime drift.",
-                pp.sampling_rate,
+                "preprocess.device_sampling_rate=%s, but hardware.armband_sampling_rate=%s. "
+                "Keep them aligned to avoid train/runtime drift.",
+                pp.device_sampling_rate,
+                cfg.hardware.armband_sampling_rate,
             )
 
         model_path = Path(cfg.inference.model_path)
@@ -204,7 +215,7 @@ class ProsthesisController:
 
     def _main_loop(self, max_cycles: Optional[int] = None) -> None:
         cycle_interval = 1.0 / self.config.control_rate_hz
-        window_size = self.config.preprocess.segment_length
+        window_size = self.pipeline.get_required_window_size()
 
         logger.info(
             "Control loop started (window=%s, interval=%.1fms).",

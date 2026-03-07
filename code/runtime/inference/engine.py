@@ -1,19 +1,14 @@
 """
-MindSpore Lite 推理引擎
-
-加载 .mindir 模型文件，执行实时推理。
-支持性能统计（延迟 P50/P95/P99）。
-
-使用方式:
-    engine = InferenceEngine(model_path="models/neurogrip.mindir")
-    gesture_id, confidence = engine.predict(spectrogram)
+MindSpore Lite inference engine wrapper.
 """
 
-import time
+from __future__ import annotations
+
 import logging
-from pathlib import Path
+import time
 from collections import deque
-from typing import Tuple, Optional, Dict
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
@@ -21,36 +16,15 @@ logger = logging.getLogger(__name__)
 
 try:
     import mindspore_lite as mslite
+
     MSLITE_AVAILABLE = True
 except ImportError:
     MSLITE_AVAILABLE = False
 
 
 class InferenceEngine:
-    """
-    MindSpore Lite 推理引擎
-
-    封装 MindSpore Lite 的模型加载和推理，提供简洁的
-    predict(spectrogram) → (gesture_id, confidence) 接口。
-
-    Args:
-        model_path: .mindir 模型文件路径
-        device: 推理设备 ("CPU" / "GPU" / "Ascend")，兼容别名 "NPU"->"Ascend"
-        num_threads: CPU 推理线程数
-        latency_window: 延迟统计的滑动窗口大小
-    """
-
-    _DEVICE_ALIASES = {
-        "CPU": "CPU",
-        "GPU": "GPU",
-        "ASCEND": "ASCEND",
-        "NPU": "ASCEND",
-    }
-    _TARGET_MAP = {
-        "CPU": "cpu",
-        "GPU": "gpu",
-        "ASCEND": "ascend",
-    }
+    _DEVICE_ALIASES = {"CPU": "CPU", "GPU": "GPU", "ASCEND": "ASCEND", "NPU": "ASCEND"}
+    _TARGET_MAP = {"CPU": "cpu", "GPU": "gpu", "ASCEND": "ascend"}
 
     @classmethod
     def _normalize_device(cls, device: str) -> str:
@@ -58,10 +32,7 @@ class InferenceEngine:
         normalized = cls._DEVICE_ALIASES.get(key)
         if normalized is None:
             supported = ", ".join(sorted(cls._DEVICE_ALIASES))
-            raise ValueError(
-                f"Unsupported inference device: {device!r}. "
-                f"Expected one of: {supported}."
-            )
+            raise ValueError(f"Unsupported inference device: {device!r}. Expected one of: {supported}.")
         return normalized
 
     def __init__(
@@ -72,132 +43,86 @@ class InferenceEngine:
         latency_window: int = 100,
     ):
         self.model_path = model_path
+        self.device = self._normalize_device(device)
         self._latencies = deque(maxlen=latency_window)
         self._inference_count = 0
-        self.device = self._normalize_device(device)
+        self._input_shape: Optional[Tuple[int, ...]] = None
 
         if not MSLITE_AVAILABLE:
-            logger.warning(
-                "MindSpore Lite 未安装，推理引擎将使用模拟模式。"
-                "实际部署请安装 mindspore_lite。"
-            )
+            logger.warning("mindspore_lite not installed, inference engine running in mock mode.")
             self._model = None
             self._mock_mode = True
             return
 
         self._mock_mode = False
-
-        # 加载模型
         model_file = Path(model_path)
         if not model_file.exists():
-            raise FileNotFoundError(f"模型文件不存在: {model_path}")
+            raise FileNotFoundError(f"Model file not found: {model_path}")
 
-        # 构建推理上下文
-        cpu_context = mslite.Context()
-        target = self._TARGET_MAP[self.device]
-        cpu_context.target = [target]
+        context = mslite.Context()
+        context.target = [self._TARGET_MAP[self.device]]
         if self.device == "CPU":
-            cpu_context.cpu.thread_num = num_threads
+            context.cpu.thread_num = int(num_threads)
 
-        # 加载模型
         self._model = mslite.Model()
         try:
-            self._model.build_from_file(str(model_file), mslite.ModelType.MINDIR, cpu_context)
+            self._model.build_from_file(str(model_file), mslite.ModelType.MINDIR, context)
         except Exception as exc:
             raise RuntimeError(
-                "build_from_file failed for "
-                f"model={model_file}, device={self.device} (target={target}). "
-                "Possible causes: unsupported ops in current MindSpore Lite backend "
-                "(for example AdaptiveAvgPool2D on CPU), model/runtime version mismatch, "
-                "or corrupted MINDIR. Try switching device (Ascend/GPU), and re-exporting "
-                "a Lite-compatible model."
+                f"build_from_file failed for model={model_file}, device={self.device}. "
+                "Please confirm model/runtime compatibility and backend support."
             ) from exc
 
-        logger.info(f"推理引擎已就绪: {model_path}")
-        logger.info(f"  设备: {self.device}, 线程数: {num_threads}")
+        inputs = self._model.get_inputs()
+        if inputs:
+            self._input_shape = tuple(int(v) for v in inputs[0].shape)
 
-    def predict(
-        self,
-        spectrogram: np.ndarray,
-    ) -> Tuple[int, float]:
-        """
-        执行一次推理
+        logger.info("Inference engine ready: model=%s, device=%s", model_path, self.device)
 
-        Args:
-            spectrogram: (C, F, T) 或 (1, C, F, T) 时频谱图，float32
+    def get_input_shape(self) -> Optional[Tuple[int, ...]]:
+        return self._input_shape
 
-        Returns:
-            (gesture_id, confidence):
-                gesture_id: 预测的手势类别索引
-                confidence: 预测置信度 (0~1)
-        """
-        # 确保 4D: (1, C, F, T)
+    def predict(self, spectrogram: np.ndarray) -> Tuple[int, float]:
         if spectrogram.ndim == 3:
             spectrogram = spectrogram[np.newaxis, ...]
         spectrogram = spectrogram.astype(np.float32)
 
-        start_time = time.perf_counter()
-
+        start = time.perf_counter()
         if self._mock_mode:
-            # 模拟模式: 返回随机预测
-            probabilities = self._mock_predict(spectrogram)
+            probs = self._mock_predict()
         else:
-            # 真实推理
-            probabilities = self._real_predict(spectrogram)
-
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
+            probs = self._real_predict(spectrogram)
+        elapsed_ms = (time.perf_counter() - start) * 1000
         self._latencies.append(elapsed_ms)
         self._inference_count += 1
 
-        # 取最大概率
-        gesture_id = int(np.argmax(probabilities))
-        confidence = float(probabilities[gesture_id])
-
+        gesture_id = int(np.argmax(probs))
+        confidence = float(probs[gesture_id])
         return gesture_id, confidence
 
     def _real_predict(self, input_data: np.ndarray) -> np.ndarray:
-        """使用 MindSpore Lite 执行真实推理"""
         inputs = self._model.get_inputs()
         inputs[0].set_data_from_numpy(input_data)
-
         outputs = self._model.predict(inputs)
         logits = outputs[0].get_data_to_numpy()
+        return self._softmax(logits[0])
 
-        # Softmax
-        probabilities = self._softmax(logits[0])
-        return probabilities
-
-    def _mock_predict(self, input_data: np.ndarray) -> np.ndarray:
-        """模拟推理（无 MindSpore Lite 时使用）"""
-        # 模拟 ~15ms 推理延迟
-        time.sleep(0.015)
-        # 返回均匀分布 + 噪声
+    @staticmethod
+    def _mock_predict() -> np.ndarray:
         from shared.gestures import NUM_CLASSES
+
+        time.sleep(0.015)
         logits = np.random.randn(NUM_CLASSES).astype(np.float32)
-        return self._softmax(logits)
+        return InferenceEngine._softmax(logits)
 
     @staticmethod
     def _softmax(x: np.ndarray) -> np.ndarray:
-        """数值稳定的 Softmax"""
         exp_x = np.exp(x - np.max(x))
-        return exp_x / exp_x.sum()
+        return exp_x / np.sum(exp_x)
 
     def get_latency_stats(self) -> Dict[str, float]:
-        """
-        获取推理延迟统计
-
-        Returns:
-            {
-                "count": 推理次数,
-                "mean_ms": 平均延迟,
-                "p50_ms": 中位数延迟,
-                "p95_ms": P95 延迟,
-                "p99_ms": P99 延迟,
-            }
-        """
         if not self._latencies:
             return {"count": 0}
-
         latencies = np.array(self._latencies)
         return {
             "count": self._inference_count,

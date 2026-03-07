@@ -22,8 +22,9 @@ def test_config_loading_smoke():
     from shared.config import RuntimeConfig, load_runtime_config, load_training_config
 
     mc, pc, tc, ac = load_training_config("configs/training.yaml")
-    assert mc.in_channels == 6
+    assert mc.in_channels == 12
     assert pc.device_sampling_rate == 1000
+    assert pc.dual_branch.enabled is True
     assert tc.split_mode in {"legacy", "grouped_file"}
     assert 0.0 <= tc.test_ratio < 1.0
     assert ac.enabled in {True, False}
@@ -92,6 +93,55 @@ def test_csv_loader_real_data_smoke():
     samples, labels, source_ids = loader.load_all_with_sources()
     assert len(samples) == len(labels) == len(source_ids)
     assert samples[0].shape == (6, 24, 6)
+
+
+def test_dual_branch_shape_consistency_between_training_runtime_conversion():
+    import yaml
+
+    from shared.config import load_runtime_config, load_training_config
+    from shared.preprocessing import PreprocessPipeline
+
+    _, train_pp, _, _ = load_training_config("configs/training.yaml")
+    runtime_cfg = load_runtime_config("configs/runtime.yaml")
+
+    train_pipeline = PreprocessPipeline(
+        sampling_rate=train_pp.sampling_rate,
+        num_channels=train_pp.num_channels,
+        lowcut=train_pp.lowcut,
+        highcut=train_pp.highcut,
+        filter_order=train_pp.filter_order,
+        stft_window_size=train_pp.stft_window_size,
+        stft_hop_size=train_pp.stft_hop_size,
+        stft_n_fft=train_pp.stft_n_fft,
+        device_sampling_rate=train_pp.device_sampling_rate,
+        segment_length=train_pp.segment_length,
+        segment_stride=train_pp.segment_stride,
+        dual_branch=train_pp.dual_branch,
+    )
+    runtime_pp = runtime_cfg.preprocess
+    runtime_pipeline = PreprocessPipeline(
+        sampling_rate=runtime_pp.sampling_rate,
+        num_channels=runtime_pp.num_channels,
+        lowcut=runtime_pp.lowcut,
+        highcut=runtime_pp.highcut,
+        filter_order=runtime_pp.filter_order,
+        stft_window_size=runtime_pp.stft_window_size,
+        stft_hop_size=runtime_pp.stft_hop_size,
+        stft_n_fft=runtime_pp.stft_n_fft,
+        device_sampling_rate=runtime_pp.device_sampling_rate,
+        segment_length=runtime_pp.segment_length,
+        segment_stride=runtime_pp.segment_stride,
+        dual_branch=runtime_pp.dual_branch,
+    )
+
+    train_shape = (1, *train_pipeline.get_output_shape())
+    runtime_shape = (1, *runtime_pipeline.get_output_shape())
+    assert train_shape == runtime_shape
+
+    with open(Path("configs/conversion.yaml"), "r", encoding="utf-8") as f:
+        conversion_cfg = yaml.safe_load(f)
+    conversion_shape = tuple(int(x) for x in conversion_cfg["export"]["input_shape"])
+    assert conversion_shape == train_shape
 
 
 def test_voter_smoke():

@@ -92,6 +92,33 @@ def test_pipeline_process_window():
     np.testing.assert_array_equal(spec1, spec2)
 
 
+def test_dual_branch_pipeline_output_shape():
+    pipeline = PreprocessPipeline(
+        sampling_rate=200.0,
+        num_channels=6,
+        device_sampling_rate=1000,
+        segment_length=84,
+        segment_stride=42,
+        dual_branch={
+            "enabled": True,
+            "fuse_mode": "concat_channels",
+            "low_rate": 200,
+            "high_rate": 1000,
+            "high_segment_length": 420,
+            "high_segment_stride": 210,
+            "high_stft_window_size": 120,
+            "high_stft_hop_size": 60,
+            "high_stft_n_fft": 230,
+            "high_freq_bins_out": 24,
+            "multi_phase_offsets": [0.0, 0.33, 0.66],
+        },
+    )
+    signal = np.random.randn(420, 8).astype(np.float64)
+    spec = pipeline.process(signal)
+    assert spec.shape == (12, 24, 6)
+    assert spec.dtype == np.float32
+
+
 if __name__ == "__main__":
     tests = [
         test_bandpass_1d,
@@ -104,6 +131,7 @@ if __name__ == "__main__":
         test_stft_short_signal,
         test_pipeline_output_shape,
         test_pipeline_process_window,
+        test_dual_branch_pipeline_output_shape,
     ]
 
     passed = 0
