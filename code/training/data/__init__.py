@@ -14,3 +14,16 @@ from .split_strategy import (
     split_and_optionally_augment,
     split_arrays_from_manifest,
 )
+
+__all__ = [
+    "DataAugmentor",
+    "CSVDatasetLoader",
+    "SplitManifest",
+    "build_manifest",
+    "grouped_kfold_indices",
+    "legacy_kfold_indices",
+    "load_manifest",
+    "save_manifest",
+    "split_and_optionally_augment",
+    "split_arrays_from_manifest",
+]

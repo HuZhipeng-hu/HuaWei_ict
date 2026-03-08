@@ -1,13 +1,6 @@
-﻿"""
-Runtime entrypoint for prosthesis control.
+﻿"""Runtime entrypoint for prosthesis control."""
 
-Examples:
-    python -m runtime.run --config configs/runtime.yaml
-    python -m runtime.run --standalone
-    python -m runtime.run --model models/neurogrip.mindir --port COM3
-    python -m runtime.run --device Ascend
-    python -m runtime.run --standalone --max_cycles 200
-"""
+from __future__ import annotations
 
 import argparse
 import logging
@@ -16,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from runtime.control.controller import ProsthesisController
+from runtime.control import ProsthesisController
 from shared.config import RuntimeConfig, load_runtime_config
 
 logging.basicConfig(
@@ -27,43 +20,19 @@ logging.basicConfig(
 logger = logging.getLogger("runtime")
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="NeuroGrip Pro V2 runtime")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/runtime.yaml",
-        help="Path to runtime YAML config.",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=None,
-        help="Override model path from config.",
-    )
+    parser.add_argument("--config", type=str, default="configs/runtime.yaml", help="Path to runtime YAML config.")
+    parser.add_argument("--model", type=str, default=None, help="Override model path from config.")
     parser.add_argument(
         "--device",
         type=str,
         default=None,
-        help='Override inference device from config ("CPU"/"GPU"/"Ascend", alias "NPU").',
+        help='Override runtime device ("CPU"/"GPU"/"Ascend", alias "NPU").',
     )
-    parser.add_argument(
-        "--port",
-        type=str,
-        default=None,
-        help="Override sensor serial port from config.",
-    )
-    parser.add_argument(
-        "--standalone",
-        action="store_true",
-        help="Use standalone sensor/actuator mocks for debugging.",
-    )
-    parser.add_argument(
-        "--rate",
-        type=float,
-        default=None,
-        help="Override control loop rate in Hz.",
-    )
+    parser.add_argument("--port", type=str, default=None, help="Override sensor serial port from config.")
+    parser.add_argument("--standalone", action="store_true", help="Use standalone sensor/actuator mocks.")
+    parser.add_argument("--rate", type=float, default=None, help="Override control loop rate in Hz.")
     parser.add_argument(
         "--infer_rate_hz",
         type=float,
@@ -74,15 +43,12 @@ def parse_args():
         "--max_cycles",
         type=int,
         default=None,
-        help=(
-            "Maximum control-loop cycles to run, then exit gracefully. "
-            "Default: run indefinitely."
-        ),
+        help="Maximum control-loop cycles to run, then exit gracefully.",
     )
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
 
     logger.info("=" * 60)
@@ -98,16 +64,15 @@ def main():
         config = RuntimeConfig()
 
     if args.model:
-        config.inference.model_path = args.model
+        config.model_path = args.model
     if args.device:
-        config.inference.device = args.device
+        config.device.target = args.device
     if args.port:
         config.hardware.sensor_port = args.port
     if args.rate is not None:
         config.control_rate_hz = args.rate
     if args.infer_rate_hz is not None:
         config.infer_rate_hz = args.infer_rate_hz
-
     if args.standalone:
         config.hardware.sensor_mode = "standalone"
         config.hardware.actuator_mode = "standalone"
@@ -122,3 +87,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

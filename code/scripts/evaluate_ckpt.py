@@ -1,116 +1,90 @@
-﻿"""
-Evaluate a checkpoint against a fixed split manifest.
-
-Example:
-    python scripts/evaluate_ckpt.py \
-      --checkpoint checkpoints/neurogrip_best.ckpt \
-      --split_manifest artifacts/splits/default_manifest.json \
-      --output_dir logs/eval_run_01
-"""
+"""Evaluate checkpoint with fixed split manifest."""
 
 from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import numpy as np
 
-from shared.config import ModelConfig, load_training_config
-from shared.models import create_model
-from shared.preprocessing import PreprocessPipeline
+from shared.config import load_training_config
+from shared.gestures import GESTURE_DEFINITIONS
 from training.data.csv_dataset import CSVDatasetLoader
-from training.data.split_strategy import load_manifest, split_arrays_from_manifest
+from training.data.split_strategy import load_manifest
 from training.evaluate import load_and_evaluate
 from training.reporting import save_classification_report
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger("evaluate_ckpt")
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate checkpoint with split manifest")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to .ckpt file")
-    parser.add_argument("--split_manifest", type=str, required=True, help="Path to split manifest JSON")
-    parser.add_argument("--output_dir", type=str, required=True, help="Output folder for evaluation artifacts")
-
-    parser.add_argument("--config", type=str, default="configs/training.yaml", help="Training YAML for model/preprocess config")
-    parser.add_argument("--data_dir", type=str, default=None, help="Override dataset root (default from manifest)")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate checkpoint on test split")
+    parser.add_argument("--config", default="configs/training.yaml")
+    parser.add_argument("--data_dir", default="../data")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--split_manifest", required=True)
+    parser.add_argument("--output_dir", default="logs/evaluation")
+    parser.add_argument("--device_target", default="CPU", choices=["CPU", "GPU", "Ascend"])
+    parser.add_argument("--device_id", type=int, default=0)
+    parser.add_argument("--eval_protocol", default="same_user_same_day_v1")
     return parser.parse_args()
 
 
-def _create_eval_model(model_config: ModelConfig):
-    return create_model(
-        {
-            "model_type": model_config.model_type,
-            "in_channels": model_config.in_channels,
-            "num_classes": model_config.num_classes,
-            "base_channels": model_config.base_channels,
-            "use_se": model_config.use_se,
-            "dropout_rate": 0.0,
-        }
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
     )
 
-
-def main():
     args = parse_args()
+    logger = logging.getLogger("eval_ckpt")
+    logger.info("Loading config: %s", args.config)
 
-    model_config, preprocess_config, _, _ = load_training_config(args.config)
-    manifest = load_manifest(args.split_manifest)
+    model_cfg, preprocess_cfg, train_cfg, _ = load_training_config(args.config)
+    gesture_to_idx = {g.name: i for i, g in enumerate(GESTURE_DEFINITIONS)}
+    class_names = [g.name for g in GESTURE_DEFINITIONS]
 
-    data_dir = args.data_dir or manifest.data_dir
-    if not data_dir:
-        raise ValueError("data_dir is required when manifest does not include data_dir")
-
-    logger.info("Using dataset: %s", data_dir)
-    logger.info("Using manifest: %s", args.split_manifest)
-
-    pipeline = PreprocessPipeline(
-        sampling_rate=preprocess_config.sampling_rate,
-        num_channels=preprocess_config.num_channels,
-        lowcut=preprocess_config.lowcut,
-        highcut=preprocess_config.highcut,
-        filter_order=preprocess_config.filter_order,
-        stft_window_size=preprocess_config.stft_window_size,
-        stft_hop_size=preprocess_config.stft_hop_size,
-        stft_n_fft=preprocess_config.stft_n_fft,
-    )
+    if preprocess_cfg.dual_branch.enabled and model_cfg.in_channels != 12:
+        logger.warning("dual_branch enabled; overriding model.in_channels=%d -> 12", model_cfg.in_channels)
+        model_cfg.in_channels = 12
 
     loader = CSVDatasetLoader(
-        data_dir=data_dir,
-        preprocess=pipeline,
-        num_emg_channels=preprocess_config.total_channels,
-        device_sampling_rate=preprocess_config.device_sampling_rate,
-        target_sampling_rate=int(preprocess_config.sampling_rate),
-        segment_length=preprocess_config.segment_length,
-        segment_stride=preprocess_config.segment_stride,
+        args.data_dir,
+        gesture_to_idx,
+        preprocess_cfg,
+        quality_filter=train_cfg.quality_filter,
     )
-
-    samples, labels, _ = loader.load_all_with_sources()
-    if manifest.num_samples and manifest.num_samples != len(samples):
+    samples, labels, _, _ = loader.load_all_with_sources(return_metadata=True)
+    manifest = load_manifest(args.split_manifest)
+    if manifest.num_samples != int(samples.shape[0]):
         raise ValueError(
-            f"Manifest sample count mismatch: manifest={manifest.num_samples}, loaded={len(samples)}"
+            f"Manifest sample count mismatch: manifest={manifest.num_samples}, loaded={samples.shape[0]}. "
+            "Regenerate manifest with current preprocess settings."
         )
 
-    _, _, (test_samples, test_labels) = split_arrays_from_manifest(samples, labels, manifest)
-    if len(test_samples) == 0:
-        raise RuntimeError("Test split is empty in manifest")
+    test_idx = np.asarray(manifest.test_indices, dtype=np.int32)
+    test_x = samples[test_idx]
+    test_y = labels[test_idx]
 
-    model = _create_eval_model(model_config)
-    results = load_and_evaluate(model, args.checkpoint, test_samples, test_labels)
-
-    report = results.get("report")
-    if not isinstance(report, dict):
-        raise RuntimeError("Evaluation did not return structured report")
-
-    artifacts = save_classification_report(report, output_dir=args.output_dir, prefix="test")
-    logger.info("Saved artifacts: %s", artifacts)
+    report = load_and_evaluate(
+        ckpt_path=args.checkpoint,
+        samples=test_x,
+        labels=test_y,
+        class_names=class_names,
+        in_channels=model_cfg.in_channels,
+        num_classes=model_cfg.num_classes,
+        dropout_rate=model_cfg.dropout_rate,
+        hidden_dim=model_cfg.hidden_dim,
+        num_layers=model_cfg.num_layers,
+        device_target=args.device_target,
+        device_id=args.device_id,
+    )
+    report["eval_protocol"] = args.eval_protocol
+    report["manifest_path"] = args.split_manifest
+    outputs = save_classification_report(report, out_dir=args.output_dir, prefix="test")
+    logger.info("Saved evaluation report: %s", outputs)
 
 
 if __name__ == "__main__":
     main()
+

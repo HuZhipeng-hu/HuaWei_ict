@@ -1,208 +1,135 @@
-"""
-MindSpore Lite 推理引擎
+"""MindSpore inference engine with strict input-shape validation."""
 
-加载 .mindir 模型文件，执行实时推理。
-支持性能统计（延迟 P50/P95/P99）。
+from __future__ import annotations
 
-使用方式:
-    engine = InferenceEngine(model_path="models/neurogrip.mindir")
-    gesture_id, confidence = engine.predict(spectrogram)
-"""
-
-import time
 import logging
 from pathlib import Path
-from collections import deque
-from typing import Tuple, Optional, Dict
+from typing import Optional, Tuple
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
-
 try:
-    import mindspore_lite as mslite
-    MSLITE_AVAILABLE = True
-except ImportError:
-    MSLITE_AVAILABLE = False
+    import mindspore as ms
+    from mindspore import Tensor, context
+    from mindspore_lite import Model, Context as LiteContext
+except Exception:  # pragma: no cover
+    ms = None  # type: ignore
+    Tensor = None  # type: ignore
+    context = None  # type: ignore
+    Model = None  # type: ignore
+    LiteContext = None  # type: ignore
+
+from shared.gestures import GESTURE_DEFINITIONS
+
+logger = logging.getLogger(__name__)
 
 
 class InferenceEngine:
-    """
-    MindSpore Lite 推理引擎
-
-    封装 MindSpore Lite 的模型加载和推理，提供简洁的
-    predict(spectrogram) → (gesture_id, confidence) 接口。
-
-    Args:
-        model_path: .mindir 模型文件路径
-        device: 推理设备 ("CPU" / "GPU" / "Ascend")，兼容别名 "NPU"->"Ascend"
-        num_threads: CPU 推理线程数
-        latency_window: 延迟统计的滑动窗口大小
-    """
-
-    _DEVICE_ALIASES = {
-        "CPU": "CPU",
-        "GPU": "GPU",
-        "ASCEND": "ASCEND",
-        "NPU": "ASCEND",
-    }
-    _TARGET_MAP = {
-        "CPU": "cpu",
-        "GPU": "gpu",
-        "ASCEND": "ascend",
-    }
-
-    @classmethod
-    def _normalize_device(cls, device: str) -> str:
-        key = str(device).strip().upper()
-        normalized = cls._DEVICE_ALIASES.get(key)
-        if normalized is None:
-            supported = ", ".join(sorted(cls._DEVICE_ALIASES))
-            raise ValueError(
-                f"Unsupported inference device: {device!r}. "
-                f"Expected one of: {supported}."
-            )
-        return normalized
-
     def __init__(
         self,
-        model_path: str,
-        device: str = "CPU",
-        num_threads: int = 4,
-        latency_window: int = 100,
+        model_path: str | Path,
+        *,
+        use_lite: bool = True,
+        device_target: str = "CPU",
+        device_id: int = 0,
+        expected_input_shape: Optional[Tuple[int, int, int, int]] = None,
     ):
-        self.model_path = model_path
-        self._latencies = deque(maxlen=latency_window)
-        self._inference_count = 0
-        self.device = self._normalize_device(device)
+        self.model_path = Path(model_path)
+        self.use_lite = use_lite
+        self.device_target = device_target
+        self.device_id = device_id
+        self.expected_input_shape = expected_input_shape
+        self.num_classes = len(GESTURE_DEFINITIONS)
 
-        if not MSLITE_AVAILABLE:
-            logger.warning(
-                "MindSpore Lite 未安装，推理引擎将使用模拟模式。"
-                "实际部署请安装 mindspore_lite。"
-            )
-            self._model = None
-            self._mock_mode = True
+        self._lite_model = None
+        self._ms_graph = None
+        self._input_shape: Optional[Tuple[int, ...]] = None
+
+    def load(self) -> None:
+        if not self.model_path.exists():
+            logger.warning("Model file not found: %s, fallback to mock mode.", self.model_path)
+            self._lite_model = None
+            self._ms_graph = None
             return
 
-        self._mock_mode = False
+        if self.use_lite and Model is not None:
+            self._load_lite()
+            return
 
-        # 加载模型
-        model_file = Path(model_path)
-        if not model_file.exists():
-            raise FileNotFoundError(f"模型文件不存在: {model_path}")
+        self._load_mindspore_graph()
 
-        # 构建推理上下文
-        cpu_context = mslite.Context()
-        target = self._TARGET_MAP[self.device]
-        cpu_context.target = [target]
-        if self.device == "CPU":
-            cpu_context.cpu.thread_num = num_threads
-
-        # 加载模型
-        self._model = mslite.Model()
+    def _load_lite(self) -> None:
+        assert Model is not None and LiteContext is not None
+        ctx = LiteContext()
+        model = Model()
+        model.build_from_file(str(self.model_path), model_type=0, context=ctx)
+        self._lite_model = model
+        self._ms_graph = None
         try:
-            self._model.build_from_file(str(model_file), mslite.ModelType.MINDIR, cpu_context)
-        except Exception as exc:
-            raise RuntimeError(
-                "build_from_file failed for "
-                f"model={model_file}, device={self.device} (target={target}). "
-                "Possible causes: unsupported ops in current MindSpore Lite backend "
-                "(for example AdaptiveAvgPool2D on CPU), model/runtime version mismatch, "
-                "or corrupted MINDIR. Try switching device (Ascend/GPU), and re-exporting "
-                "a Lite-compatible model."
-            ) from exc
+            input_tensor = self._lite_model.get_inputs()[0]
+            self._input_shape = tuple(int(x) for x in input_tensor.shape)
+        except Exception:
+            self._input_shape = None
+        logger.info("Loaded Lite model: %s", self.model_path)
 
-        logger.info(f"推理引擎已就绪: {model_path}")
-        logger.info(f"  设备: {self.device}, 线程数: {num_threads}")
+    def _load_mindspore_graph(self) -> None:
+        if ms is None:
+            logger.warning("MindSpore unavailable, fallback to mock mode.")
+            self._lite_model = None
+            self._ms_graph = None
+            return
+        context.set_context(mode=context.GRAPH_MODE, device_target=self.device_target)
+        if self.device_target.upper() == "GPU":
+            context.set_context(device_id=self.device_id)
+        graph = ms.load(str(self.model_path))
+        self._ms_graph = graph
+        self._lite_model = None
+        self._input_shape = None
+        logger.info("Loaded MindSpore graph: %s", self.model_path)
 
-    def predict(
-        self,
-        spectrogram: np.ndarray,
-    ) -> Tuple[int, float]:
-        """
-        执行一次推理
+    def get_input_shape(self) -> Optional[Tuple[int, ...]]:
+        if self._input_shape is not None:
+            return tuple(self._input_shape)
+        if self.expected_input_shape is not None:
+            return tuple(self.expected_input_shape)
+        return None
 
-        Args:
-            spectrogram: (C, F, T) 或 (1, C, F, T) 时频谱图，float32
-
-        Returns:
-            (gesture_id, confidence):
-                gesture_id: 预测的手势类别索引
-                confidence: 预测置信度 (0~1)
-        """
-        # 确保 4D: (1, C, F, T)
+    def _validate_input(self, spectrogram: np.ndarray) -> np.ndarray:
         if spectrogram.ndim == 3:
-            spectrogram = spectrogram[np.newaxis, ...]
-        spectrogram = spectrogram.astype(np.float32)
-
-        start_time = time.perf_counter()
-
-        if self._mock_mode:
-            # 模拟模式: 返回随机预测
-            probabilities = self._mock_predict(spectrogram)
+            batched = np.expand_dims(spectrogram, axis=0)
+        elif spectrogram.ndim == 4:
+            batched = spectrogram
         else:
-            # 真实推理
-            probabilities = self._real_predict(spectrogram)
+            raise ValueError(f"Invalid spectrogram ndim={spectrogram.ndim}, expect 3 or 4.")
 
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
-        self._latencies.append(elapsed_ms)
-        self._inference_count += 1
+        expected = self.get_input_shape()
+        if expected is not None and tuple(batched.shape) != tuple(expected):
+            raise ValueError(
+                f"Model input shape mismatch: got {tuple(batched.shape)}, expected {tuple(expected)}. "
+                "Please re-export model with matching preprocess/training settings."
+            )
+        return batched.astype(np.float32)
 
-        # 取最大概率
-        gesture_id = int(np.argmax(probabilities))
-        confidence = float(probabilities[gesture_id])
+    def predict_proba(self, spectrogram: np.ndarray) -> np.ndarray:
+        batched = self._validate_input(spectrogram)
 
+        if self._lite_model is not None:
+            input_tensor = self._lite_model.get_inputs()[0]
+            input_tensor.set_data_from_numpy(batched)
+            outputs = self._lite_model.predict([input_tensor])
+            logits = outputs[0].get_data_to_numpy()
+        elif self._ms_graph is not None and Tensor is not None:
+            logits = self._ms_graph(Tensor(batched)).asnumpy()
+        else:
+            logits = np.random.randn(batched.shape[0], self.num_classes).astype(np.float32)
+
+        logits = logits[0]
+        exp_logits = np.exp(logits - np.max(logits))
+        probs = exp_logits / np.sum(exp_logits)
+        return probs.astype(np.float32)
+
+    def predict(self, spectrogram: np.ndarray) -> Tuple[int, float]:
+        probs = self.predict_proba(spectrogram)
+        gesture_id = int(np.argmax(probs))
+        confidence = float(np.max(probs))
         return gesture_id, confidence
-
-    def _real_predict(self, input_data: np.ndarray) -> np.ndarray:
-        """使用 MindSpore Lite 执行真实推理"""
-        inputs = self._model.get_inputs()
-        inputs[0].set_data_from_numpy(input_data)
-
-        outputs = self._model.predict(inputs)
-        logits = outputs[0].get_data_to_numpy()
-
-        # Softmax
-        probabilities = self._softmax(logits[0])
-        return probabilities
-
-    def _mock_predict(self, input_data: np.ndarray) -> np.ndarray:
-        """模拟推理（无 MindSpore Lite 时使用）"""
-        # 模拟 ~15ms 推理延迟
-        time.sleep(0.015)
-        # 返回均匀分布 + 噪声
-        from shared.gestures import NUM_CLASSES
-        logits = np.random.randn(NUM_CLASSES).astype(np.float32)
-        return self._softmax(logits)
-
-    @staticmethod
-    def _softmax(x: np.ndarray) -> np.ndarray:
-        """数值稳定的 Softmax"""
-        exp_x = np.exp(x - np.max(x))
-        return exp_x / exp_x.sum()
-
-    def get_latency_stats(self) -> Dict[str, float]:
-        """
-        获取推理延迟统计
-
-        Returns:
-            {
-                "count": 推理次数,
-                "mean_ms": 平均延迟,
-                "p50_ms": 中位数延迟,
-                "p95_ms": P95 延迟,
-                "p99_ms": P99 延迟,
-            }
-        """
-        if not self._latencies:
-            return {"count": 0}
-
-        latencies = np.array(self._latencies)
-        return {
-            "count": self._inference_count,
-            "mean_ms": float(np.mean(latencies)),
-            "p50_ms": float(np.percentile(latencies, 50)),
-            "p95_ms": float(np.percentile(latencies, 95)),
-            "p99_ms": float(np.percentile(latencies, 99)),
-        }

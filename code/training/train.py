@@ -1,336 +1,299 @@
-﻿"""
-Training entrypoint.
-
-Examples:
-    python -m training.train --config configs/training.yaml --data_dir ../data
-    python -m training.train --data_dir ../data --split_mode grouped_file --test_ratio 0.2
-"""
+"""Training entrypoint."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
-import sys
+import os
 import time
 from pathlib import Path
+from typing import Optional, Sequence
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+try:
+    import mindspore as ms
+    from mindspore import context
+except Exception:  # pragma: no cover
+    ms = None  # type: ignore
+    context = None  # type: ignore
 
-from shared.config import (  # noqa: E402
-    AugmentationConfig,
-    ModelConfig,
-    PreprocessConfig,
-    TrainingConfig,
-    load_training_config,
-)
-from shared.gestures import NUM_CLASSES, validate_gesture_definitions  # noqa: E402
-from shared.models import count_parameters, create_model  # noqa: E402
-from shared.preprocessing import PreprocessPipeline  # noqa: E402
-from training.data.augmentation import DataAugmentor  # noqa: E402
-from training.data.csv_dataset import CSVDatasetLoader  # noqa: E402
-from training.data.split_strategy import (  # noqa: E402
-    SPLIT_MODES,
-    build_manifest,
-    grouped_kfold_indices,
-    legacy_kfold_indices,
-    load_manifest,
-    save_manifest,
-    split_and_optionally_augment,
-    split_arrays_from_manifest,
-)
-from training.evaluate import load_and_evaluate  # noqa: E402
-from training.reporting import save_classification_report  # noqa: E402
-from training.trainer import Trainer  # noqa: E402
+from shared.config import load_training_config, load_training_data_config
+from shared.gestures import GESTURE_DEFINITIONS
+from shared.preprocessing import PreprocessPipeline
+from training.data.csv_dataset import CSVDatasetLoader
+from training.data.split_strategy import build_manifest, load_manifest, save_manifest
+from training.evaluate import load_and_evaluate
+from training.model import NeuroGripNet
+from training.reporting import save_classification_report
+from training.trainer import Trainer
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
 logger = logging.getLogger("training")
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="NeuroGrip model training",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+def _setup_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
     )
-    parser.add_argument("--config", type=str, default="configs/training.yaml", help="Training YAML path")
-    parser.add_argument("--data_dir", type=str, required=True, help="Dataset root directory")
-    parser.add_argument("--epochs", type=int, default=None, help="Override training epochs")
-    parser.add_argument("--batch_size", type=int, default=None, help="Override training batch size")
-    parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
-        choices=["CPU", "GPU", "Ascend"],
-        help="Override training device",
-    )
-    parser.add_argument("--no_augment", action="store_true", help="Disable data augmentation")
 
-    parser.add_argument(
-        "--split_mode",
-        type=str,
-        default=None,
-        choices=list(SPLIT_MODES),
-        help="Split mode: legacy or grouped_file",
-    )
-    parser.add_argument("--test_ratio", type=float, default=None, help="Test split ratio")
-    parser.add_argument("--split_manifest_in", type=str, default=None, help="Load split manifest from path")
-    parser.add_argument("--split_manifest_out", type=str, default=None, help="Write split manifest to path")
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train NeuroGrip model")
+    parser.add_argument("--config", required=True, help="Path to training config")
+    parser.add_argument("--data_dir", required=True, help="Dataset root folder")
+    parser.add_argument("--device_target", default="CPU", choices=["CPU", "GPU", "Ascend"])
+    parser.add_argument("--device_id", type=int, default=0)
+
+    parser.add_argument("--split_manifest_in", default=None, help="Load split manifest from path")
+    parser.add_argument("--split_manifest_out", default=None, help="Save built split manifest to path")
+    parser.add_argument(
+        "--manifest_strategy",
+        default="v2",
+        choices=["v1", "v2"],
+        help="Manifest build strategy when split is generated",
+    )
+    parser.add_argument("--quality_report_out", default=None, help="Path to save quality filter report JSON")
+    parser.add_argument(
+        "--eval_protocol",
+        default="same_user_same_day_v1",
+        help="Evaluation protocol tag recorded in output reports",
+    )
     return parser.parse_args()
 
 
-def _create_model(model_config: ModelConfig, for_eval: bool = False):
-    return create_model(
-        {
-            "model_type": model_config.model_type,
-            "in_channels": model_config.in_channels,
-            "num_classes": model_config.num_classes,
-            "base_channels": model_config.base_channels,
-            "use_se": model_config.use_se,
-            "dropout_rate": 0.0 if for_eval else model_config.dropout_rate,
-        }
+def _set_device(device_target: str, device_id: int) -> None:
+    if ms is None:
+        raise RuntimeError("MindSpore is not available")
+    context.set_context(mode=context.GRAPH_MODE)
+    context.set_context(device_target=device_target)
+    if device_target == "GPU":
+        context.set_context(device_id=device_id)
+
+
+def _gesture_mappings() -> tuple[dict[str, int], list[str]]:
+    class_names = [g.name for g in GESTURE_DEFINITIONS]
+    gesture_to_idx = {name: i for i, name in enumerate(class_names)}
+    return gesture_to_idx, class_names
+
+
+def _prepare_manifest(
+    *,
+    labels: np.ndarray,
+    source_ids: np.ndarray,
+    source_metadata: Sequence[dict],
+    seed: int,
+    split_mode: str,
+    val_ratio: float,
+    test_ratio: float,
+    class_names: Sequence[str],
+    manifest_in_cli: Optional[str],
+    manifest_in_config: Optional[str],
+    manifest_out_cli: Optional[str],
+    manifest_strategy: str,
+) -> tuple:
+    manifest_out_path = manifest_out_cli or manifest_in_config
+
+    if manifest_in_cli:
+        if not os.path.exists(manifest_in_cli):
+            raise FileNotFoundError(
+                "Explicit --split_manifest_in path does not exist: "
+                f"{manifest_in_cli}. Fix: generate first with --split_manifest_out <path> "
+                "or use an existing --split_manifest_in <path>."
+            )
+        logger.info("Using split manifest from CLI: %s", manifest_in_cli)
+        manifest = load_manifest(manifest_in_cli)
+        return manifest, manifest_in_cli
+
+    if manifest_in_config:
+        if os.path.exists(manifest_in_config):
+            logger.info("Using split manifest from config: %s", manifest_in_config)
+            manifest = load_manifest(manifest_in_config)
+            return manifest, manifest_in_config
+
+        logger.info(
+            "Configured split manifest does not exist (%s). Building one with strategy=%s.",
+            manifest_in_config,
+            manifest_strategy,
+        )
+        manifest = build_manifest(
+            labels,
+            source_ids,
+            seed=seed,
+            split_mode=split_mode,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            num_classes=len(class_names),
+            class_names=class_names,
+            manifest_strategy=manifest_strategy,
+            source_metadata=source_metadata,
+        )
+        saved = save_manifest(manifest, manifest_out_path or manifest_in_config)
+        logger.info("Auto-generated split manifest at %s", saved)
+        return manifest, str(saved)
+
+    manifest = build_manifest(
+        labels,
+        source_ids,
+        seed=seed,
+        split_mode=split_mode,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        num_classes=len(class_names),
+        class_names=class_names,
+        manifest_strategy=manifest_strategy,
+        source_metadata=source_metadata,
+    )
+    saved_path = None
+    if manifest_out_path:
+        saved = save_manifest(manifest, manifest_out_path)
+        logger.info("Saved split manifest: %s", saved)
+        saved_path = str(saved)
+    return manifest, saved_path
+
+
+def _save_history(history: dict, out_csv: str | Path) -> None:
+    out = Path(out_csv)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    keys = list(history.keys())
+    rows = zip(*(history[k] for k in keys))
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(keys)
+        writer.writerows(rows)
+
+
+def _split_by_manifest(
+    samples: np.ndarray,
+    labels: np.ndarray,
+    manifest,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    train_idx = np.asarray(manifest.train_indices, dtype=np.int32)
+    val_idx = np.asarray(manifest.val_indices, dtype=np.int32)
+    test_idx = np.asarray(manifest.test_indices, dtype=np.int32)
+    return (
+        samples[train_idx],
+        labels[train_idx],
+        samples[val_idx],
+        labels[val_idx],
+        samples[test_idx],
+        labels[test_idx],
     )
 
 
-def _build_augmentor_if_enabled(aug_config: AugmentationConfig):
-    if not aug_config.enabled:
-        return None
-    return DataAugmentor(
-        time_warp_rate=aug_config.time_warp_rate,
-        amplitude_scale=aug_config.amplitude_scale,
-        noise_std=aug_config.noise_std,
-        mixup_alpha=getattr(aug_config, "mixup_alpha", 0.2),
-    )
-
-
-def _log_split_summary(split_name: str, labels: np.ndarray) -> None:
-    counts = [int(np.sum(labels == class_id)) for class_id in range(NUM_CLASSES)]
-    logger.info("%s split: %s samples, class_counts=%s", split_name, len(labels), counts)
-
-
-def main():
+def main() -> None:
     args = parse_args()
-    start_time = time.time()
+    _setup_logging()
+    start = time.time()
 
-    logger.info("=" * 64)
+    logger.info("================================================================")
     logger.info("NeuroGrip model training")
-    logger.info("=" * 64)
+    logger.info("================================================================")
+    logger.info("Loading config: %s", args.config)
 
-    config_path = Path(args.config)
-    if config_path.exists():
-        logger.info("Loading config: %s", config_path)
-        model_config, preprocess_config, train_config, aug_config = load_training_config(str(config_path))
-    else:
-        logger.info("Config not found, using default config.")
-        model_config = ModelConfig()
-        preprocess_config = PreprocessConfig()
-        train_config = TrainingConfig()
-        aug_config = AugmentationConfig()
+    if ms is None:
+        raise RuntimeError("MindSpore is not installed")
 
-    if args.epochs is not None:
-        train_config.epochs = args.epochs
-    if args.batch_size is not None:
-        train_config.batch_size = args.batch_size
-    if args.device is not None:
-        train_config.device = args.device
-    if args.no_augment:
-        aug_config.enabled = False
-    if args.split_mode is not None:
-        train_config.split_mode = args.split_mode
-    if args.test_ratio is not None:
-        train_config.test_ratio = args.test_ratio
+    _set_device(args.device_target, args.device_id)
 
-    if train_config.split_mode not in SPLIT_MODES:
-        raise ValueError(f"Invalid split_mode={train_config.split_mode!r}, expected one of {SPLIT_MODES}")
+    model_cfg, preprocess_cfg, train_cfg, _ = load_training_config(args.config)
+    data_cfg = load_training_data_config(args.config)
+    gesture_to_idx, class_names = _gesture_mappings()
+    if len(class_names) != model_cfg.num_classes:
+        raise ValueError(f"num_classes mismatch: model={model_cfg.num_classes}, gestures={len(class_names)}")
+    logger.info("Gesture definition check passed: %d classes", len(class_names))
 
-    validate_gesture_definitions()
-    logger.info("Gesture definition check passed: %s classes", NUM_CLASSES)
-
-    pipeline = PreprocessPipeline(
-        sampling_rate=preprocess_config.sampling_rate,
-        num_channels=preprocess_config.num_channels,
-        lowcut=preprocess_config.lowcut,
-        highcut=preprocess_config.highcut,
-        filter_order=preprocess_config.filter_order,
-        stft_window_size=preprocess_config.stft_window_size,
-        stft_hop_size=preprocess_config.stft_hop_size,
-        stft_n_fft=preprocess_config.stft_n_fft,
-    )
+    if preprocess_cfg.dual_branch.enabled and model_cfg.in_channels != 12:
+        logger.warning(
+            "dual_branch.enabled=true requires in_channels=12. Overriding model.in_channels from %d to 12.",
+            model_cfg.in_channels,
+        )
+        model_cfg.in_channels = 12
 
     logger.info("Loading dataset from: %s", args.data_dir)
     loader = CSVDatasetLoader(
-        data_dir=args.data_dir,
-        preprocess=pipeline,
-        num_emg_channels=preprocess_config.total_channels,
-        device_sampling_rate=preprocess_config.device_sampling_rate,
-        target_sampling_rate=int(preprocess_config.sampling_rate),
-        segment_length=preprocess_config.segment_length,
-        segment_stride=preprocess_config.segment_stride,
+        args.data_dir,
+        gesture_to_idx,
+        preprocess_cfg,
+        quality_filter=train_cfg.quality_filter,
     )
+    dataset_stats = loader.get_stats()
+    logger.info("Dataset stats: %s", dataset_stats)
+    samples, labels, source_ids, source_meta = loader.load_all_with_sources(return_metadata=True)
+    logger.info("Loaded samples: %d, shape=%s", samples.shape[0], tuple(samples.shape))
 
-    logger.info("Dataset stats: %s", loader.get_stats())
-    samples, labels, source_ids = loader.load_all_with_sources()
-    logger.info("Loaded samples: %s, shape=%s", len(samples), samples.shape)
+    quality_report_path = args.quality_report_out or "logs/quality/quality_report.json"
+    q_path = loader.save_quality_report(quality_report_path)
+    logger.info("Saved quality report: %s", q_path)
 
-    manifest_in = args.split_manifest_in or train_config.split_manifest_path
-    manifest_out = args.split_manifest_out or train_config.split_manifest_path
-
-    if manifest_in:
-        manifest = load_manifest(manifest_in)
-        logger.info("Using split manifest from: %s", manifest_in)
-        if manifest.num_samples and manifest.num_samples != len(samples):
-            raise ValueError(
-                f"Manifest sample count mismatch: manifest={manifest.num_samples}, loaded={len(samples)}"
-            )
-    else:
-        manifest = build_manifest(
-            labels=labels,
-            source_ids=source_ids,
-            split_mode=train_config.split_mode,
-            val_ratio=train_config.val_ratio,
-            test_ratio=train_config.test_ratio,
-            seed=train_config.split_seed,
-            data_dir=str(Path(args.data_dir).resolve()),
-        )
-        logger.info(
-            "Built split manifest mode=%s seed=%s val_ratio=%.3f test_ratio=%.3f",
-            manifest.split_mode,
-            manifest.seed,
-            manifest.val_ratio,
-            manifest.test_ratio,
-        )
-
-    if manifest_out:
-        save_manifest(manifest, manifest_out)
-
-    if manifest.split_mode == "grouped_file":
-        train_src = set(manifest.train_sources)
-        val_src = set(manifest.val_sources)
-        test_src = set(manifest.test_sources)
-        if train_src & val_src or train_src & test_src or val_src & test_src:
-            raise RuntimeError("Grouped split source leakage detected in manifest")
-
-    augmentor = _build_augmentor_if_enabled(aug_config)
-    use_mixup = getattr(aug_config, "use_mixup", False)
-    augment_factor = int(getattr(aug_config, "augment_factor", 1))
-
-    (train_samples, train_labels), (val_samples, val_labels), (test_samples, test_labels) = split_and_optionally_augment(
-        samples=samples,
+    manifest, manifest_path = _prepare_manifest(
         labels=labels,
-        manifest=manifest,
-        augmentor=augmentor,
-        augment_factor=augment_factor,
-        use_mixup=use_mixup,
+        source_ids=source_ids,
+        source_metadata=source_meta,
+        seed=train_cfg.split_seed,
+        split_mode=data_cfg.split_mode,
+        val_ratio=train_cfg.val_ratio,
+        test_ratio=train_cfg.test_ratio,
+        class_names=class_names,
+        manifest_in_cli=args.split_manifest_in,
+        manifest_in_config=data_cfg.split_manifest_path,
+        manifest_out_cli=args.split_manifest_out,
+        manifest_strategy=args.manifest_strategy,
     )
 
-    if len(train_samples) == 0:
-        raise RuntimeError("Train split is empty after split")
-    if len(val_samples) == 0:
-        raise RuntimeError("Validation split is empty after split")
-    if len(test_samples) == 0:
-        raise RuntimeError("Test split is empty after split")
-
-    _log_split_summary("Train", train_labels)
-    _log_split_summary("Val", val_labels)
-    _log_split_summary("Test", test_labels)
-
-    if train_config.kfold > 1:
-        logger.info("=" * 64)
-        logger.info("Running KFold validation: k=%s (with fixed independent test split)", train_config.kfold)
-        logger.info("=" * 64)
-
-        dev_indices = np.asarray(manifest.train_indices + manifest.val_indices, dtype=np.int64)
-        if manifest.split_mode == "grouped_file":
-            fold_iterator = grouped_kfold_indices(
-                labels=labels,
-                source_ids=source_ids,
-                base_indices=dev_indices,
-                k=train_config.kfold,
-                seed=train_config.split_seed,
-            )
-        else:
-            fold_iterator = legacy_kfold_indices(
-                labels=labels,
-                base_indices=dev_indices,
-                k=train_config.kfold,
-                seed=train_config.split_seed,
-            )
-
-        fold_val_accs = []
-        for fold_idx, fold_train_idx, fold_val_idx in fold_iterator:
-            logger.info("Fold %s/%s", fold_idx + 1, train_config.kfold)
-            fold_train_samples = samples[fold_train_idx]
-            fold_train_labels = labels[fold_train_idx]
-            fold_val_samples = samples[fold_val_idx]
-            fold_val_labels = labels[fold_val_idx]
-
-            if augmentor is not None and (augment_factor > 1 or use_mixup):
-                fold_train_samples, fold_train_labels = augmentor.augment_batch(
-                    fold_train_samples,
-                    fold_train_labels,
-                    factor=augment_factor,
-                    use_mixup=use_mixup,
-                )
-
-            fold_model = _create_model(model_config, for_eval=False)
-            fold_trainer = Trainer(fold_model, train_config)
-            fold_trainer.train(
-                train_data=(fold_train_samples, fold_train_labels),
-                val_data=(fold_val_samples, fold_val_labels),
-            )
-            fold_val_accs.append(float(fold_trainer.best_val_acc))
-            logger.info("Fold %s best val acc: %.4f", fold_idx + 1, fold_trainer.best_val_acc)
-
-        logger.info(
-            "KFold done: mean=%.4f std=%.4f values=%s",
-            float(np.mean(fold_val_accs)),
-            float(np.std(fold_val_accs)),
-            [f"{v:.4f}" for v in fold_val_accs],
+    if manifest.num_samples != int(samples.shape[0]):
+        raise ValueError(
+            "Manifest sample count mismatch: "
+            f"manifest={manifest.num_samples}, loaded={samples.shape[0]}. "
+            "This usually means preprocess/split settings changed. "
+            "Please regenerate manifest with --split_manifest_out and retrain."
         )
 
-    model = _create_model(model_config, for_eval=False)
-    logger.info(
-        "Model created: type=%s params=%s",
-        model_config.model_type,
-        f"{count_parameters(model):,}",
+    train_x, train_y, val_x, val_y, test_x, test_y = _split_by_manifest(samples, labels, manifest)
+    logger.info("Split sizes => train=%d, val=%d, test=%d", len(train_y), len(val_y), len(test_y))
+
+    model = NeuroGripNet(
+        in_channels=model_cfg.in_channels,
+        num_classes=model_cfg.num_classes,
+        dropout_rate=model_cfg.dropout_rate,
+        hidden_dim=model_cfg.hidden_dim,
+        num_layers=model_cfg.num_layers,
     )
 
-    trainer = Trainer(model, train_config)
-    trainer.train(
-        train_data=(train_samples, train_labels),
-        val_data=(val_samples, val_labels),
-    )
+    trainer = Trainer(model, train_cfg, class_names, output_dir=".")
+    history = trainer.train(train_x, train_y, val_x, val_y)
+    _save_history(history, "logs/training_history.csv")
+    logger.info("训练历史已保存: logs/training_history.csv")
 
-    logger.info("\n" + "=" * 64)
+    logger.info("")
+    logger.info("================================================================")
     logger.info("Final evaluation on test split")
-    logger.info("=" * 64)
-
-    best_ckpt = Path(train_config.checkpoint_dir) / "neurogrip_best.ckpt"
-    if not best_ckpt.exists():
-        raise FileNotFoundError(f"Best checkpoint not found: {best_ckpt}")
-
-    eval_model = _create_model(model_config, for_eval=True)
-    test_results = load_and_evaluate(
-        eval_model,
-        str(best_ckpt),
-        test_samples,
-        test_labels,
+    logger.info("================================================================")
+    report = load_and_evaluate(
+        ckpt_path="checkpoints/neurogrip_best.ckpt",
+        samples=test_x,
+        labels=test_y,
+        class_names=class_names,
+        in_channels=model_cfg.in_channels,
+        num_classes=model_cfg.num_classes,
+        dropout_rate=model_cfg.dropout_rate,
+        hidden_dim=model_cfg.hidden_dim,
+        num_layers=model_cfg.num_layers,
+        device_target=args.device_target,
+        device_id=args.device_id,
     )
 
-    report = test_results.get("report")
-    if isinstance(report, dict):
-        output_dir = Path(train_config.log_dir) / "evaluation"
-        artifacts = save_classification_report(report, output_dir=output_dir, prefix="test")
-        logger.info("Saved evaluation report: %s", artifacts)
+    report["eval_protocol"] = args.eval_protocol
+    report["manifest_path"] = manifest_path
+    report_paths = save_classification_report(report, out_dir="logs/evaluation", prefix="test")
+    logger.info("Saved evaluation report: %s", report_paths)
 
-    elapsed = time.time() - start_time
-    logger.info("Training finished in %.1f min", elapsed / 60.0)
+    elapsed_min = (time.time() - start) / 60.0
+    logger.info("Training finished in %.1f min", elapsed_min)
 
 
 if __name__ == "__main__":
     main()
+

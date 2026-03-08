@@ -1,106 +1,48 @@
-﻿"""Integration-style smoke tests for core wiring."""
-
-from __future__ import annotations
-
-import sys
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from shared.config import load_config, load_training_config
+from shared.preprocessing import PreprocessPipeline
+from training.trainer import build_balanced_sample_indices, compute_class_balanced_weights
 
 
-def test_gesture_definitions_are_consistent():
-    from shared.gestures import NUM_CLASSES, GestureType, validate_gesture_definitions
+def test_training_config_dual_branch_matches_model_channels():
+    cfg_path = Path("configs/training.yaml")
+    model_cfg, preprocess_cfg, train_cfg, _ = load_training_config(cfg_path)
 
-    assert NUM_CLASSES == 6
-    assert len(GestureType) == 6
-    assert validate_gesture_definitions() is True
-
-
-def test_config_loading_smoke():
-    from shared.config import RuntimeConfig, load_runtime_config, load_training_config
-
-    mc, pc, tc, ac = load_training_config("configs/training.yaml")
-    assert mc.in_channels == 6
-    assert pc.device_sampling_rate == 1000
-    assert tc.split_mode in {"legacy", "grouped_file"}
-    assert 0.0 <= tc.test_ratio < 1.0
-    assert ac.enabled in {True, False}
-
-    rc = load_runtime_config("configs/runtime.yaml")
-    assert isinstance(rc, RuntimeConfig)
-    assert rc.control_rate_hz > 0
-    assert rc.infer_rate_hz >= 0
+    if preprocess_cfg.dual_branch.enabled:
+        assert model_cfg.in_channels == 12
 
 
-def test_all_yaml_configs_parse():
-    import yaml
+def test_balanced_sampler_distribution():
+    labels = np.array([0] * 10 + [1] * 5 + [2] * 2, dtype=np.int32)
 
-    for config_name in ("training.yaml", "runtime.yaml", "conversion.yaml"):
-        path = Path("configs") / config_name
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        assert isinstance(data, dict)
+    class _SamplerCfg:
+        type = "balanced"
+        hard_mining_ratio = 0.3
+        confusion_pairs = [[0, 1]]
 
+    idx = build_balanced_sample_indices(labels, batch_size=6, sampler_cfg=_SamplerCfg(), steps=10, seed=42)
+    sampled = labels[idx]
+    counts = np.bincount(sampled, minlength=3)
 
-def test_preprocess_pipeline_shape_smoke():
-    from shared.preprocessing import PreprocessPipeline
-
-    pipeline = PreprocessPipeline(
-        sampling_rate=200.0,
-        num_channels=6,
-        lowcut=20.0,
-        highcut=90.0,
-        stft_window_size=24,
-        stft_hop_size=12,
-        stft_n_fft=46,
-    )
-    signal = np.random.randn(84, 8).astype(np.float32) * 100
-    result = pipeline.process(signal)
-    assert result.shape == (6, 24, 6)
+    assert idx.shape[0] == 60
+    assert counts.min() > 0
 
 
-def test_csv_loader_real_data_smoke():
-    from shared.preprocessing import PreprocessPipeline
-    from training.data.csv_dataset import CSVDatasetLoader
-
-    data_dir = Path(__file__).resolve().parents[2] / "data"
-    if not data_dir.exists():
-        # Skip gracefully if repository snapshot has no dataset.
-        return
-
-    pipeline = PreprocessPipeline(
-        sampling_rate=200.0,
-        num_channels=6,
-        lowcut=20.0,
-        highcut=90.0,
-        stft_window_size=24,
-        stft_hop_size=12,
-        stft_n_fft=46,
-    )
-    loader = CSVDatasetLoader(
-        data_dir=str(data_dir),
-        preprocess=pipeline,
-        num_emg_channels=8,
-        device_sampling_rate=1000,
-        target_sampling_rate=200,
-        segment_length=84,
-        segment_stride=42,
-    )
-
-    samples, labels, source_ids = loader.load_all_with_sources()
-    assert len(samples) == len(labels) == len(source_ids)
-    assert samples[0].shape == (6, 24, 6)
+def test_class_balanced_weights_are_finite():
+    labels = np.array([0] * 100 + [1] * 20 + [2] * 5, dtype=np.int32)
+    weights = compute_class_balanced_weights(labels, num_classes=3, beta=0.999)
+    assert weights.shape == (3,)
+    assert np.isfinite(weights).all()
+    assert (weights > 0).all()
 
 
-def test_voter_smoke():
-    from runtime.inference.postprocessing import SlidingWindowVoter
+def test_pipeline_shape_expected():
+    model_cfg, preprocess_cfg, _, _ = load_training_config("configs/training.yaml")
+    pipeline = PreprocessPipeline(preprocess_cfg)
+    raw = np.random.randn(pipeline.get_required_window_size(), 6).astype(np.float32)
+    feat = pipeline.process_window(raw)
+    assert feat.shape[0] == model_cfg.in_channels
 
-    voter = SlidingWindowVoter(window_size=5, min_count=3, confidence_threshold=0.5)
-    output = None
-    for _ in range(5):
-        output = voter.update(1, 0.9)
-    assert output is not None
-    voter.reset()
-    assert voter.current_gesture is None

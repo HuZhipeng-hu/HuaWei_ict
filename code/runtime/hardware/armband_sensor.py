@@ -75,7 +75,7 @@ class ArmbandSensor(SensorBase):
         self._baudrate = baudrate
         self._device_rate = device_sampling_rate
         self._target_rate = target_sampling_rate
-        self._decimate_ratio = max(1, int(device_sampling_rate // target_sampling_rate))
+        self._decimate_ratio = max(1, int(device_sampling_rate // max(target_sampling_rate, 1)))
         self._center_value = center_value
 
         self._serial = None
@@ -280,9 +280,6 @@ class ArmbandSensor(SensorBase):
 
     def _ingest_emg_sample(self, emg_raw: np.ndarray) -> None:
         self._sample_counter += 1
-        if self._sample_counter % self._decimate_ratio != 0:
-            return
-
         emg_centered = emg_raw - self._center_value
         with self._lock:
             self._buffer.append(emg_centered)

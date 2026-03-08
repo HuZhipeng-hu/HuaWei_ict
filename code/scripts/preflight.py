@@ -21,6 +21,11 @@ except ImportError:  # pragma: no cover - script exits early if missing.
     yaml = None
 
 
+CODE_ROOT = Path(__file__).resolve().parents[1]
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
+
+
 @dataclass
 class Check:
     level: str  # "ERROR" | "WARN" | "INFO"
@@ -41,6 +46,13 @@ def normalize_runtime_device(raw_device: str) -> str:
     }
     key = str(raw_device).strip().upper()
     return aliases.get(key, key)
+
+
+def _resolve_under_root(code_root: Path, raw_path: str) -> Path:
+    path = Path(raw_path)
+    if path.is_absolute():
+        return path
+    return code_root / path
 
 
 def check_mindir_loadability(model_path: Path, device: str, strict: bool) -> Check:
@@ -121,13 +133,6 @@ def collect_dependency_checks(mode: str) -> list[Check]:
     return checks
 
 
-def read_yaml(path: Path):
-    if yaml is None:
-        raise RuntimeError("PyYAML is required for preflight checks.")
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
 def collect_file_checks(code_root: Path, data_root: Path) -> list[Check]:
     checks: list[Check] = []
     required_files = [
@@ -163,20 +168,49 @@ def collect_file_checks(code_root: Path, data_root: Path) -> list[Check]:
     return checks
 
 
+def _derive_expected_input_shape(preprocess_config) -> tuple[int, int, int, int]:
+    from shared.preprocessing import PreprocessPipeline
+
+    pipeline = PreprocessPipeline(preprocess_config)
+    return (1,) + tuple(pipeline.get_output_shape())
+
+
+def _append_data_checks(checks: list[Check], data_root: Path) -> None:
+    from shared.gestures import FOLDER_TO_GESTURE
+
+    if not data_root.exists():
+        return
+
+    dirs = {p.name.lower(): p for p in data_root.iterdir() if p.is_dir()}
+    for gesture in FOLDER_TO_GESTURE:
+        folder = dirs.get(gesture)
+        if folder is None:
+            checks.append(Check("ERROR", f"data.{gesture}", "missing folder"))
+            continue
+        csv_count = len(list(folder.glob("*.csv")))
+        if csv_count == 0:
+            checks.append(Check("ERROR", f"data.{gesture}", "no csv files"))
+        else:
+            checks.append(Check("INFO", f"data.{gesture}", f"{csv_count} csv files"))
+
+
 def collect_config_checks(code_root: Path, data_root: Path, mode: str) -> list[Check]:
+    from shared.config import load_conversion_config, load_runtime_config, load_training_config
+
     checks: list[Check] = []
 
-    runtime_cfg = read_yaml(code_root / "configs" / "runtime.yaml")
-    conversion_cfg = read_yaml(code_root / "configs" / "conversion.yaml")
-    inference_cfg = runtime_cfg.get("inference", {})
-    runtime_device_raw = inference_cfg.get("device", "CPU")
+    runtime_cfg = load_runtime_config(code_root / "configs" / "runtime.yaml")
+    conversion_cfg = load_conversion_config(code_root / "configs" / "conversion.yaml")
+    train_model_cfg, train_pp_cfg, _, _ = load_training_config(code_root / "configs" / "training.yaml")
+
+    runtime_device_raw = runtime_cfg.device.target
     runtime_device = normalize_runtime_device(runtime_device_raw)
 
     if runtime_device not in {"CPU", "GPU", "ASCEND"}:
         checks.append(
             Check(
                 "ERROR",
-                "runtime.inference.device",
+                "runtime.device.target",
                 (
                     f"unsupported value {runtime_device_raw!r}. "
                     "Expected one of CPU/GPU/Ascend (alias NPU)."
@@ -184,24 +218,27 @@ def collect_config_checks(code_root: Path, data_root: Path, mode: str) -> list[C
             )
         )
     else:
-        checks.append(Check("INFO", "runtime.inference.device", f"{runtime_device}"))
+        checks.append(Check("INFO", "runtime.device.target", runtime_device))
         if mode == "ascend" and runtime_device == "CPU":
             checks.append(
                 Check(
                     "ERROR",
-                    "runtime.inference.device",
-                    "mode=ascend does not allow runtime.inference.device=CPU. "
-                    "Set configs/runtime.yaml inference.device to Ascend (or use --device).",
+                    "runtime.device.target",
+                    "mode=ascend does not allow runtime.device.target=CPU. "
+                    "Set configs/runtime.yaml device.target to Ascend (or use --device).",
                 )
             )
 
-    model_path = code_root / inference_cfg.get("model_path", "models/neurogrip.mindir")
-    if model_path.exists():
-        checks.append(Check("INFO", "runtime.model_path", f"found: {model_path}"))
+    runtime_model_path = _resolve_under_root(code_root, runtime_cfg.model_path)
+    conversion_output_path = _resolve_under_root(code_root, conversion_cfg.output_path)
+    checkpoint_path = _resolve_under_root(code_root, conversion_cfg.checkpoint_path)
+
+    if runtime_model_path.exists():
+        checks.append(Check("INFO", "runtime.model_path", f"found: {runtime_model_path}"))
         if runtime_device in {"CPU", "GPU", "ASCEND"}:
             checks.append(
                 check_mindir_loadability(
-                    model_path=model_path,
+                    model_path=runtime_model_path,
                     device=runtime_device,
                     strict=(mode == "ascend"),
                 )
@@ -211,59 +248,86 @@ def collect_config_checks(code_root: Path, data_root: Path, mode: str) -> list[C
             Check(
                 "WARN",
                 "runtime.model_path",
-                f"not found: {model_path} (expected before conversion)",
+                f"not found: {runtime_model_path} (expected before runtime deployment)",
             )
         )
 
-    ckpt_path = code_root / conversion_cfg.get("export", {}).get("checkpoint", "checkpoints/neurogrip_best.ckpt")
-    if ckpt_path.exists():
-        checks.append(Check("INFO", "conversion.export.checkpoint", f"found: {ckpt_path}"))
+    if runtime_model_path == conversion_output_path:
+        checks.append(Check("INFO", "runtime.model_alignment", "runtime model path matches conversion output"))
     else:
         checks.append(
             Check(
                 "WARN",
-                "conversion.export.checkpoint",
-                f"not found: {ckpt_path} (expected before training)",
+                "runtime.model_alignment",
+                f"runtime model path {runtime_model_path} != conversion output {conversion_output_path}",
             )
         )
 
-    if data_root.exists():
-        expected_gestures = ("relax", "fist", "pinch", "ok", "ye", "sidegrip")
-        dirs = {p.name.lower(): p for p in data_root.iterdir() if p.is_dir()}
-        for gesture in expected_gestures:
-            folder = dirs.get(gesture)
-            if folder is None:
-                checks.append(Check("ERROR", f"data.{gesture}", "missing folder"))
-                continue
-            csv_count = len(list(folder.glob("*.csv")))
-            if csv_count == 0:
-                checks.append(Check("ERROR", f"data.{gesture}", "no csv files"))
-            else:
-                checks.append(Check("INFO", f"data.{gesture}", f"{csv_count} csv files"))
-
-    pp = runtime_cfg.get("preprocess", {})
-    model = runtime_cfg.get("model", {})
-    expected_freq_bins = int(pp.get("stft_n_fft", 46)) // 2 + 1
-    segment_length = int(pp.get("segment_length", 84))
-    window_size = int(pp.get("stft_window_size", 24))
-    hop_size = int(pp.get("stft_hop_size", 12))
-    expected_time_frames = max(1, (segment_length - window_size) // hop_size + 1)
-    expected_shape = (1, int(pp.get("num_channels", 6)), expected_freq_bins, expected_time_frames)
-    checks.append(Check("INFO", "runtime.expected_input_shape", str(expected_shape)))
-
-    model_in = int(model.get("in_channels", 6))
-    pp_ch = int(pp.get("num_channels", 6))
-    if model_in != pp_ch:
+    if checkpoint_path.exists():
+        checks.append(Check("INFO", "conversion.checkpoint_path", f"found: {checkpoint_path}"))
+    else:
         checks.append(
             Check(
                 "WARN",
-                "runtime.channel_consistency",
-                f"model.in_channels={model_in} != preprocess.num_channels={pp_ch}",
+                "conversion.checkpoint_path",
+                f"not found: {checkpoint_path} (expected before training/export)",
             )
         )
-    else:
-        checks.append(Check("INFO", "runtime.channel_consistency", "model and preprocess channels match"))
 
+    try:
+        runtime_expected_shape = _derive_expected_input_shape(runtime_cfg.preprocess)
+        checks.append(Check("INFO", "runtime.expected_input_shape", str(runtime_expected_shape)))
+    except Exception as exc:
+        runtime_expected_shape = None
+        checks.append(Check("ERROR", "runtime.expected_input_shape", f"failed to derive shape: {exc}"))
+
+    try:
+        training_expected_shape = _derive_expected_input_shape(train_pp_cfg)
+        checks.append(Check("INFO", "training.expected_input_shape", str(training_expected_shape)))
+    except Exception as exc:
+        training_expected_shape = None
+        checks.append(Check("ERROR", "training.expected_input_shape", f"failed to derive shape: {exc}"))
+
+    conversion_input_shape = tuple(int(x) for x in conversion_cfg.input_shape)
+    checks.append(Check("INFO", "conversion.input_shape", str(conversion_input_shape)))
+
+    if runtime_expected_shape is not None and training_expected_shape is not None:
+        if runtime_expected_shape == training_expected_shape:
+            checks.append(Check("INFO", "runtime.training_shape_consistency", "runtime and training shapes match"))
+        else:
+            checks.append(
+                Check(
+                    "ERROR",
+                    "runtime.training_shape_consistency",
+                    f"runtime {runtime_expected_shape} != training {training_expected_shape}",
+                )
+            )
+
+    if runtime_expected_shape is not None:
+        if runtime_expected_shape == conversion_input_shape:
+            checks.append(Check("INFO", "runtime.conversion_shape_consistency", "runtime and conversion shapes match"))
+        else:
+            checks.append(
+                Check(
+                    "ERROR",
+                    "runtime.conversion_shape_consistency",
+                    f"runtime {runtime_expected_shape} != conversion {conversion_input_shape}",
+                )
+            )
+
+        runtime_channels = runtime_expected_shape[1]
+        if train_model_cfg.in_channels == runtime_channels:
+            checks.append(Check("INFO", "training.model_channels", "model.in_channels matches preprocess output"))
+        else:
+            checks.append(
+                Check(
+                    "ERROR",
+                    "training.model_channels",
+                    f"training.model.in_channels={train_model_cfg.in_channels} != preprocess output channels={runtime_channels}",
+                )
+            )
+
+    _append_data_checks(checks, data_root)
     return checks
 
 
@@ -282,7 +346,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    code_root = Path(__file__).resolve().parents[1]
+    code_root = CODE_ROOT
     data_root = code_root.parent / "data"
 
     checks: list[Check] = []

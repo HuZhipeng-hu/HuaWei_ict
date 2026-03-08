@@ -2,9 +2,17 @@
 
 This runbook defines the trusted workflow for 6-class retraining and deployment.
 
+Note: current default configs use dual-branch fused features with model input
+shape `(1, 12, 24, 6)`. Legacy single-branch `(1, 6, 24, 6)` artifacts are not
+compatible and must be retrained/re-converted.
+
 ## 1) Build/Reuse Split Manifest (no file leakage)
 
 Preferred: create once, then reuse for all model comparisons.
+
+On first run, if `training/data.split_manifest_path` is configured but missing,
+`training.train` will auto-generate and persist a manifest at that path
+(or at `--split_manifest_out` if provided).
 
 ```bash
 python -m training.train \
