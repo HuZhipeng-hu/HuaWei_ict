@@ -112,7 +112,7 @@ class PreprocessPipeline:
         cfg.update(kwargs)
 
         self.sampling_rate = float(cfg.get("sampling_rate", 200.0))
-        self.num_channels = int(cfg.get("num_channels", 6))
+        self.num_channels = int(cfg.get("num_channels", PreprocessConfig().num_channels))
         self.lowcut = float(cfg.get("lowcut", 20.0))
         self.highcut = float(cfg.get("highcut", 90.0))
         self.filter_order = int(cfg.get("filter_order", 4))
@@ -219,6 +219,10 @@ class PreprocessPipeline:
     def _to_2d_channels(self, signal: np.ndarray) -> np.ndarray:
         if signal.ndim == 1:
             signal = signal.reshape(-1, 1)
+        if signal.shape[1] < self.num_channels:
+            raise ValueError(
+                f"Expected at least {self.num_channels} EMG channels, got {signal.shape[1]}"
+            )
         if signal.shape[1] > self.num_channels:
             signal = signal[:, : self.num_channels]
         return signal.astype(np.float64)

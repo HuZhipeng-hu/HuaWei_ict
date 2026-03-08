@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from shared.config import PreprocessConfig, QualityFilterConfig
+from shared.config import PreprocessConfig, QualityFilterConfig, get_protocol_num_channels
 from shared.preprocessing import PreprocessPipeline, SignalWindower
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ class CSVDatasetLoader:
         self.gesture_to_idx = gesture_to_idx
         self.preprocess = PreprocessPipeline(preprocess_config)
         self._uses_dual_branch = bool(preprocess_config.dual_branch.enabled)
+        self._num_channels = get_protocol_num_channels(preprocess_config)
 
         if quality_filter is None:
             quality_filter = QualityFilterConfig(enabled=False)
@@ -42,6 +43,7 @@ class CSVDatasetLoader:
         self._recordings_manifest = self._load_recordings_manifest(self.recordings_manifest_path)
         self._recording_meta: Dict[str, Dict[str, Any]] = {}
         self._quality_stats: Dict[str, Any] = self._init_quality_stats()
+        self._load_errors: List[str] = []
 
     def _resolve_recordings_manifest_path(self, value: Optional[str | Path]) -> Optional[Path]:
         candidates: List[Path] = []
@@ -152,13 +154,15 @@ class CSVDatasetLoader:
 
     def _resolve_channel_fields(self, fieldnames: Sequence[str]) -> List[str]:
         lowered = {name.lower(): name for name in fieldnames}
-        emg_fields = [lowered.get(f"emg{i}") for i in range(1, 7)]
+        emg_fields = [lowered.get(f"emg{i}") for i in range(1, self._num_channels + 1)]
         if all(emg_fields):
             return emg_fields  # type: ignore[return-value]
-        ch_fields = [lowered.get(f"ch{i}") for i in range(1, 7)]
+        ch_fields = [lowered.get(f"ch{i}") for i in range(1, self._num_channels + 1)]
         if all(ch_fields):
             return ch_fields  # type: ignore[return-value]
-        raise ValueError(f"Unsupported CSV headers: {fieldnames}")
+        raise ValueError(
+            f"Unsupported CSV headers for {self._num_channels}-channel protocol: {fieldnames}"
+        )
 
     def _read_csv(self, csv_path: Path) -> np.ndarray:
         rows: List[List[float]] = []
@@ -248,6 +252,7 @@ class CSVDatasetLoader:
                 try:
                     signal = self._read_csv(csv_path)
                 except Exception as exc:
+                    self._load_errors.append(f"{csv_path}: {exc}")
                     logger.warning("Skip file %s: %s", csv_path.name, exc)
                     continue
 
@@ -267,6 +272,7 @@ class CSVDatasetLoader:
 
         self._quality_stats = self._init_quality_stats()
         self._recording_meta = {}
+        self._load_errors = []
 
         class_samples = defaultdict(int)
         for gesture, class_id, signal, metadata in self.iter_recordings():
@@ -306,7 +312,8 @@ class CSVDatasetLoader:
             logger.info("[%s] loaded %d samples", gesture, class_samples[gesture])
 
         if not all_samples:
-            raise RuntimeError("No samples loaded from dataset")
+            detail = f" First load error: {self._load_errors[0]}" if self._load_errors else ""
+            raise RuntimeError(f"No samples loaded from dataset.{detail}")
 
         samples = np.stack(all_samples, axis=0).astype(np.float32)
         labels = np.asarray(all_labels, dtype=np.int32)

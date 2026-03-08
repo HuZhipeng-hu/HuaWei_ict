@@ -169,10 +169,9 @@ def collect_file_checks(code_root: Path, data_root: Path) -> list[Check]:
 
 
 def _derive_expected_input_shape(preprocess_config) -> tuple[int, int, int, int]:
-    from shared.preprocessing import PreprocessPipeline
+    from shared.config import get_protocol_input_shape
 
-    pipeline = PreprocessPipeline(preprocess_config)
-    return (1,) + tuple(pipeline.get_output_shape())
+    return get_protocol_input_shape(preprocess_config)
 
 
 def _append_data_checks(checks: list[Check], data_root: Path) -> None:

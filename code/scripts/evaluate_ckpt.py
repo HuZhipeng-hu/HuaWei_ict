@@ -13,7 +13,7 @@ CODE_ROOT = Path(__file__).resolve().parent.parent
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from shared.config import load_training_config, load_training_data_config
+from shared.config import load_training_config, load_training_data_config, normalize_model_config_channels
 from shared.gestures import GESTURE_DEFINITIONS
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, ensure_run_dir
 from training.data.csv_dataset import CSVDatasetLoader
@@ -52,12 +52,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def _normalize_model_config(model_cfg, preprocess_cfg):
-    if preprocess_cfg.dual_branch.enabled and model_cfg.in_channels != 12:
-        logging.getLogger("eval_ckpt").warning(
-            "dual_branch enabled; overriding model.in_channels=%d -> 12", model_cfg.in_channels
-        )
-        model_cfg.in_channels = 12
-    return model_cfg
+    return normalize_model_config_channels(
+        model_cfg,
+        preprocess_cfg,
+        logger=logging.getLogger("eval_ckpt"),
+        context="evaluation dual-branch protocol",
+    )
 
 
 def _top_confusion_pair_text(report: dict) -> str:

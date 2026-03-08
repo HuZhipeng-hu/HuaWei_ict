@@ -29,7 +29,7 @@ def export_to_mindir(
     model,
     checkpoint_path: str,
     output_path: str,
-    input_shape: Tuple[int, ...] = (1, 12, 24, 6),
+    input_shape: Tuple[int, ...] = (1, 16, 24, 6),
 ) -> str:
     """
     将 .ckpt 模型导出为 .mindir 格式

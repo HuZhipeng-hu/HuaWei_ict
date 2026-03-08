@@ -10,6 +10,7 @@ inference:
 
 preprocess:
   sampling_rate: 200
+  num_channels: 8
   target_length: 420
   overlap: 0.5
   stft_window: 120

@@ -11,7 +11,7 @@ import numpy as np
 
 from runtime.hardware.factory import create_actuator, create_sensor
 from runtime.inference import InferenceEngine, PredictionScheduler, TemporalVoter
-from shared.config import RuntimeConfig
+from shared.config import RuntimeConfig, get_protocol_input_shape, get_protocol_num_channels
 from shared.gestures import GestureType
 from shared.preprocessing import PreprocessPipeline
 
@@ -29,7 +29,7 @@ class RuntimeController:
     ):
         self.config = config
         self.preprocess = preprocess or PreprocessPipeline(config.preprocess)
-        expected_shape = (1,) + tuple(self.preprocess.get_output_shape())
+        expected_shape = get_protocol_input_shape(config.preprocess)
         self.engine = engine or InferenceEngine(
             model_path=config.model_path,
             use_lite=config.inference.use_lite,
@@ -51,7 +51,7 @@ class RuntimeController:
         )
 
         self._tta_offsets = list(self.config.inference.tta_offsets or [0.0])
-        self._num_channels = int(self.config.preprocess.num_channels)
+        self._num_channels = get_protocol_num_channels(self.config.preprocess)
         self._base_window_size = self.preprocess.get_required_window_size()
         self._stride = self.preprocess.get_required_window_stride()
         self._read_window_size = self._calc_read_window_size(self._base_window_size, self._stride, self._tta_offsets)
@@ -83,8 +83,7 @@ class RuntimeController:
 
     def _validate_model_shape(self) -> None:
         dummy = np.zeros((self._base_window_size, self._num_channels), dtype=np.float32)
-        expected_feature_shape = self.preprocess.process_window(dummy).shape
-        expected_input_shape = (1,) + tuple(expected_feature_shape)
+        expected_input_shape = get_protocol_input_shape(self.config.preprocess)
         model_shape = self.engine.get_input_shape()
         if model_shape is not None and tuple(model_shape) != expected_input_shape:
             raise ValueError(

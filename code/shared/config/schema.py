@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Type, TypeVar, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
+from shared.gestures import NUM_EMG_CHANNELS
+
 T = TypeVar("T")
+
+DEFAULT_TRAINING_EMG_CHANNELS = NUM_EMG_CHANNELS
+DEFAULT_DUAL_BRANCH_MULTIPLIER = 2
+DEFAULT_DUAL_BRANCH_INPUT_CHANNELS = DEFAULT_TRAINING_EMG_CHANNELS * DEFAULT_DUAL_BRANCH_MULTIPLIER
+DEFAULT_PROTOCOL_FEATURE_SHAPE = (DEFAULT_DUAL_BRANCH_INPUT_CHANNELS, 24, 6)
+DEFAULT_PROTOCOL_INPUT_SHAPE = (1,) + DEFAULT_PROTOCOL_FEATURE_SHAPE
 
 
 @dataclass
 class ModelConfig:
     model_type: str = "standard"
-    in_channels: int = 12
+    in_channels: int = DEFAULT_DUAL_BRANCH_INPUT_CHANNELS
     num_classes: int = 6
     base_channels: int = 16
     use_se: bool = True
@@ -49,7 +58,7 @@ class DualBranchConfig:
 @dataclass
 class PreprocessConfig:
     sampling_rate: int = 200
-    num_channels: int = 6
+    num_channels: int = DEFAULT_TRAINING_EMG_CHANNELS
     lowcut: float = 20.0
     highcut: float = 90.0
     filter_order: int = 4
@@ -226,8 +235,101 @@ class RuntimeConfig:
 class ConversionConfig:
     checkpoint_path: str = "checkpoints/neurogrip_best.ckpt"
     output_path: str = "models/neurogrip_6g.mindir"
-    input_shape: List[int] = field(default_factory=lambda: [1, 12, 24, 6])
+    input_shape: List[int] = field(default_factory=lambda: list(DEFAULT_PROTOCOL_INPUT_SHAPE))
     mindir_version: str = "latest"
+
+
+def _protocol_error_details(preprocess_config: PreprocessConfig) -> str:
+    issues: list[str] = []
+    if int(preprocess_config.num_channels) != DEFAULT_TRAINING_EMG_CHANNELS:
+        issues.append(
+            f"preprocess.num_channels={preprocess_config.num_channels} "
+            f"(expected {DEFAULT_TRAINING_EMG_CHANNELS})"
+        )
+
+    dual_branch = preprocess_config.dual_branch
+    if not bool(dual_branch.enabled):
+        issues.append("preprocess.dual_branch.enabled=False (expected True)")
+
+    if str(dual_branch.fuse_mode) != "concat_channels":
+        issues.append(
+            f"preprocess.dual_branch.fuse_mode={dual_branch.fuse_mode!r} "
+            "(expected 'concat_channels')"
+        )
+
+    return "; ".join(issues)
+
+
+def validate_current_protocol(
+    preprocess_config: PreprocessConfig,
+    *,
+    context: str = "NeuroGrip protocol",
+) -> PreprocessConfig:
+    details = _protocol_error_details(preprocess_config)
+    if not details:
+        from shared.preprocessing import PreprocessPipeline
+
+        feature_shape = tuple(int(x) for x in PreprocessPipeline(preprocess_config).get_output_shape())
+        if feature_shape != DEFAULT_PROTOCOL_FEATURE_SHAPE:
+            details = (
+                f"preprocess output shape={feature_shape} "
+                f"(expected {DEFAULT_PROTOCOL_FEATURE_SHAPE})"
+            )
+    if details:
+        raise ValueError(
+            f"{context} only supports the fixed 8-channel dual-branch 16x24x6 protocol. {details}"
+        )
+    return preprocess_config
+
+
+def get_protocol_num_channels(preprocess_config: PreprocessConfig) -> int:
+    validate_current_protocol(preprocess_config, context="training/runtime preprocess config")
+    return int(preprocess_config.num_channels)
+
+
+def get_protocol_model_in_channels(preprocess_config: PreprocessConfig) -> int:
+    num_channels = get_protocol_num_channels(preprocess_config)
+    return int(num_channels * DEFAULT_DUAL_BRANCH_MULTIPLIER)
+
+
+def get_protocol_feature_shape(preprocess_config: PreprocessConfig) -> Tuple[int, int, int]:
+    from shared.preprocessing import PreprocessPipeline
+
+    validate_current_protocol(preprocess_config, context="feature-shape inference")
+    pipeline = PreprocessPipeline(preprocess_config)
+    feature_shape = tuple(int(x) for x in pipeline.get_output_shape())
+    if feature_shape != DEFAULT_PROTOCOL_FEATURE_SHAPE:
+        raise ValueError(
+            "Current NeuroGrip protocol requires feature shape "
+            f"{DEFAULT_PROTOCOL_FEATURE_SHAPE}, got {feature_shape}. "
+            "Update configs instead of reviving legacy preprocess shapes."
+        )
+    return feature_shape
+
+
+def get_protocol_input_shape(preprocess_config: PreprocessConfig) -> Tuple[int, int, int, int]:
+    return DEFAULT_PROTOCOL_INPUT_SHAPE[:1] + get_protocol_feature_shape(preprocess_config)
+
+
+def normalize_model_config_channels(
+    model_config: ModelConfig,
+    preprocess_config: PreprocessConfig,
+    *,
+    logger: logging.Logger | None = None,
+    context: str = "protocol",
+) -> ModelConfig:
+    expected_channels = get_protocol_model_in_channels(preprocess_config)
+    if model_config.in_channels != expected_channels:
+        if logger is not None:
+            logger.warning(
+                "%s requires model.in_channels=%d. Overriding model.in_channels from %d to %d.",
+                context,
+                expected_channels,
+                model_config.in_channels,
+                expected_channels,
+            )
+        model_config.in_channels = expected_channels
+    return model_config
 
 
 def load_config(path: Union[str, Path]) -> Dict[str, Any]:
@@ -374,3 +476,7 @@ def load_runtime_config(path: Union[str, Path]) -> RuntimeConfig:
 def load_conversion_config(path: Union[str, Path]) -> ConversionConfig:
     data = load_config(path)
     return _dict_to_dataclass(data, ConversionConfig)
+
+
+
+

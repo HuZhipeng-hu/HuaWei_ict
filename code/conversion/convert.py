@@ -12,12 +12,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from conversion.export import export_to_mindir
 from conversion.quantize import quantize_model
-from shared.config import ConversionConfig, ModelConfig, load_config, load_conversion_config, load_training_config
+from shared.config import (
+    ConversionConfig,
+    ModelConfig,
+    get_protocol_input_shape,
+    normalize_model_config_channels,
+    load_config,
+    load_conversion_config,
+    load_training_config,
+)
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, ensure_run_dir
 from shared.models import count_parameters
 from training.model import build_model_from_config
-from shared.preprocessing import PreprocessPipeline
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -44,8 +50,8 @@ def _derive_training_protocol(
         return None
 
     train_model_cfg, train_pp_cfg, _, _ = load_training_config(str(training_config_path))
-    pipeline = PreprocessPipeline(train_pp_cfg)
-    expected_shape = (1,) + tuple(pipeline.get_output_shape())
+    train_model_cfg = normalize_model_config_channels(train_model_cfg, train_pp_cfg)
+    expected_shape = get_protocol_input_shape(train_pp_cfg)
     return expected_shape, train_model_cfg
 
 

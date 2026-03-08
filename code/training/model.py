@@ -13,7 +13,7 @@ from shared.models import count_parameters, create_model
 class NeuroGripNet(_SharedNeuroGripNet):
     def __init__(
         self,
-        in_channels: int = 12,
+        in_channels: int = 16,
         num_classes: int = 6,
         dropout_rate: float = 0.3,
         hidden_dim: int = 64,

@@ -1,6 +1,6 @@
 model:
   model_type: standard
-  in_channels: 12
+  in_channels: 16
   num_classes: 6
   base_channels: 16
   use_se: true
@@ -10,6 +10,7 @@ model:
 
 preprocess:
   sampling_rate: 200
+  num_channels: 8
   target_length: 420
   overlap: 0.5
   stft_window: 120

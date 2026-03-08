@@ -3,7 +3,8 @@
 This runbook defines the trusted workflow for 6-class retraining and deployment.
 
 Note: current default configs use dual-branch fused features with model input
-shape `(1, 12, 24, 6)`. Legacy single-branch `(1, 6, 24, 6)` artifacts are not
+shape `(1, 16, 24, 6)`. Legacy single-branch `(1, 6, 24, 6)` and legacy
+dual-branch `(1, 12, 24, 6)` artifacts are not
 compatible and must be retrained/re-converted.
 
 ## 1) Build/Reuse Split Manifest (no file leakage)
@@ -72,10 +73,12 @@ Deploy `models/neurogrip.mindir` and runtime config to Orange Pi.
 
 ## 5) Realtime Retest on Orange Pi (CPU)
 
-Baseline retest at 20Hz:
+Baseline manual retest at 20Hz (acceptance still uses the trusted realtime benchmark):
 
 ```bash
 python scripts/realtime_ckpt.py \
+  --runtime_config configs/runtime.yaml \
+  --training_config configs/training.yaml \
   --port /dev/ttyUSB0 \
   --device CPU \
   --ckpt checkpoints/neurogrip_best.ckpt \
@@ -110,3 +113,5 @@ Optional fallback:
 Notes:
 - `infer_rate_hz=0` means no rate limit (backward-compatible behavior).
 - Keep threshold/voting tunable in config/CLI; do not hard-code in logic.
+
+

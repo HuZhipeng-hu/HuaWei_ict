@@ -82,7 +82,7 @@ class StandaloneActuator(ActuatorBase):
 
 def create_sensor(config: HardwareConfig) -> SensorBase:
     if config.sensor_mode == "standalone":
-        return StandaloneSensor(num_channels=6)
+        return StandaloneSensor(num_channels=NUM_EMG_CHANNELS)
 
     return ArmbandSensor(
         port=config.sensor_port,

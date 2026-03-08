@@ -1,4 +1,4 @@
-"""
+﻿"""
 NeuroGripNet — EMG 手势识别卷积神经网络
 
 提供两种变体：
@@ -8,7 +8,7 @@ NeuroGripNet — EMG 手势识别卷积神经网络
 两者接收相同的输入格式 (batch, channels, freq_bins, time_frames)，
 输出 (batch, num_classes) 的 logits。
 
-典型输入形状: (N, 6, 24, 13) — 6通道EMG, 24频率bin, 13时间帧
+典型输入形状: (N, 16, 24, 6) — dual-branch 融合后的 8 通道 EMG 特征
 """
 
 from typing import Optional, Dict, Any
@@ -50,7 +50,7 @@ if MINDSPORE_AVAILABLE:
             → Dense                → (B, num_classes)
 
         Args:
-            in_channels: 输入 EMG 通道数（默认 6）
+            in_channels: 输入特征通道数（默认 16，对应 8 路 EMG 双分支融合）
             num_classes: 分类类别数（默认从 gestures.py 获取）
             base_channels: 基础通道数，控制模型宽度
             use_se: 是否使用 SE 注意力
@@ -59,7 +59,7 @@ if MINDSPORE_AVAILABLE:
 
         def __init__(
             self,
-            in_channels: int = 6,
+            in_channels: int = 16,
             num_classes: int = NUM_CLASSES,
             base_channels: int = 16,
             use_se: bool = True,
@@ -96,13 +96,13 @@ if MINDSPORE_AVAILABLE:
 
             Args:
                 x: (batch, in_channels, freq_bins, time_frames)
-                   典型形状: (N, 6, 24, 13)
+                   典型形状: (N, 16, 24, 6)
             Returns:
                 logits: (batch, num_classes)
             """
-            x = self.block1(x)          # (B, 48, 24, 13)
-            x = self.pool(x)            # (B, 48, 12, 6)
-            x = self.block2(x)          # (B, 96, 12, 6)
+            x = self.block1(x)          # (B, 48, 24, 6)
+            x = self.pool(x)            # (B, 48, 12, 3)
+            x = self.block2(x)          # (B, 96, 12, 3)
             x = self.global_pool(x)     # (B, 96, 1, 1)
             x = self.flatten(x)         # (B, 96)
             x = self.dropout(x)
@@ -130,7 +130,7 @@ if MINDSPORE_AVAILABLE:
 
         def __init__(
             self,
-            in_channels: int = 6,
+            in_channels: int = 16,
             num_classes: int = NUM_CLASSES,
             base_channels: int = 16,
             dropout_rate: float = 0.3,
@@ -211,7 +211,7 @@ def create_model(config: Dict[str, Any]) -> Any:
 
     model_type = config.get("model_type", "standard")
     kwargs = {
-        "in_channels": config.get("in_channels", 6),
+        "in_channels": config.get("in_channels", 16),
         "num_classes": config.get("num_classes", NUM_CLASSES),
         "base_channels": config.get("base_channels", 16),
         "dropout_rate": config.get("dropout_rate", 0.3),
@@ -241,3 +241,4 @@ def count_parameters(model) -> int:
     for param in model.trainable_params():
         total += param.size
     return total
+

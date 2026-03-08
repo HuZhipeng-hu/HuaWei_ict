@@ -27,7 +27,13 @@ except Exception:  # pragma: no cover
 
 from runtime.control.controller import RuntimeController
 from runtime.inference import InferenceRateScheduler, TemporalVoter
-from shared.config import load_runtime_config, load_training_config, load_training_data_config
+from shared.config import (
+    get_protocol_input_shape,
+    normalize_model_config_channels,
+    load_runtime_config,
+    load_training_config,
+    load_training_data_config,
+)
 from shared.gestures import GESTURE_DEFINITIONS, GestureType
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, ensure_run_dir
 from training.data.csv_dataset import CSVDatasetLoader
@@ -113,10 +119,12 @@ def _set_device(device_target: str, device_id: int) -> None:
 
 
 def _normalize_model_config(model_cfg, preprocess_cfg):
-    if preprocess_cfg.dual_branch.enabled and model_cfg.in_channels != 12:
-        logger.warning("dual_branch enabled; overriding model.in_channels=%d -> 12", model_cfg.in_channels)
-        model_cfg.in_channels = 12
-    return model_cfg
+    return normalize_model_config_channels(
+        model_cfg,
+        preprocess_cfg,
+        logger=logger,
+        context="realtime benchmark dual-branch protocol",
+    )
 
 
 def build_runtime_benchmark_plan(runtime_cfg) -> Dict[str, int | tuple[int, int, int, int]]:
@@ -135,7 +143,7 @@ def build_runtime_benchmark_plan(runtime_cfg) -> Dict[str, int | tuple[int, int,
         "stride": stride,
         "read_window_size": read_window_size,
         "cycle_step_samples": cycle_step_samples,
-        "expected_input_shape": (1,) + tuple(preprocess.get_output_shape()),
+        "expected_input_shape": get_protocol_input_shape(runtime_cfg.preprocess),
     }
 
 

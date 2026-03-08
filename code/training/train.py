@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover
     ms = None  # type: ignore
     context = None  # type: ignore
 
-from shared.config import load_training_config, load_training_data_config
+from shared.config import load_training_config, load_training_data_config, normalize_model_config_channels
 from shared.gestures import GESTURE_DEFINITIONS
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, dump_yaml, ensure_run_dir
 from training.data import CSVDatasetLoader, DataAugmentor, split_and_optionally_augment
@@ -131,13 +131,12 @@ def _gesture_mappings() -> tuple[dict[str, int], list[str]]:
 
 
 def _normalize_model_config(model_cfg, preprocess_cfg):
-    if preprocess_cfg.dual_branch.enabled and model_cfg.in_channels != 12:
-        logger.warning(
-            "dual_branch.enabled=true requires in_channels=12. Overriding model.in_channels from %d to 12.",
-            model_cfg.in_channels,
-        )
-        model_cfg.in_channels = 12
-    return model_cfg
+    return normalize_model_config_channels(
+        model_cfg,
+        preprocess_cfg,
+        logger=logger,
+        context="training dual-branch protocol",
+    )
 
 
 def _apply_cli_overrides(args: argparse.Namespace, model_cfg, train_cfg, augmentation_cfg):

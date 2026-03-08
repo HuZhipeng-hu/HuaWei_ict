@@ -1,8 +1,14 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 import numpy as np
+import pytest
 
-from shared.config import load_config, load_training_config
+from shared.config import (
+    get_protocol_input_shape,
+    get_protocol_model_in_channels,
+    load_config,
+    load_training_config,
+)
 from shared.preprocessing import PreprocessPipeline
 from training.trainer import build_balanced_sample_indices, compute_class_balanced_weights
 
@@ -12,7 +18,8 @@ def test_training_config_dual_branch_matches_model_channels():
     model_cfg, preprocess_cfg, train_cfg, _ = load_training_config(cfg_path)
 
     if preprocess_cfg.dual_branch.enabled:
-        assert model_cfg.in_channels == 12
+        assert model_cfg.in_channels == 16
+        assert model_cfg.in_channels == get_protocol_model_in_channels(preprocess_cfg)
 
 
 def test_balanced_sampler_distribution():
@@ -42,7 +49,23 @@ def test_class_balanced_weights_are_finite():
 def test_pipeline_shape_expected():
     model_cfg, preprocess_cfg, _, _ = load_training_config("configs/training.yaml")
     pipeline = PreprocessPipeline(preprocess_cfg)
-    raw = np.random.randn(pipeline.get_required_window_size(), 6).astype(np.float32)
+    raw = np.random.randn(pipeline.get_required_window_size(), 8).astype(np.float32)
     feat = pipeline.process_window(raw)
     assert feat.shape[0] == model_cfg.in_channels
+    assert (1,) + tuple(feat.shape) == get_protocol_input_shape(preprocess_cfg)
 
+
+def test_protocol_helpers_reject_legacy_6_channel_config():
+    _, preprocess_cfg, _, _ = load_training_config("configs/training.yaml")
+    preprocess_cfg.num_channels = 6
+
+    with pytest.raises(ValueError, match="8-channel dual-branch 16x24x6 protocol"):
+        get_protocol_input_shape(preprocess_cfg)
+
+
+def test_protocol_helpers_reject_single_branch_config():
+    _, preprocess_cfg, _, _ = load_training_config("configs/training.yaml")
+    preprocess_cfg.dual_branch.enabled = False
+
+    with pytest.raises(ValueError, match="8-channel dual-branch 16x24x6 protocol"):
+        get_protocol_model_in_channels(preprocess_cfg)

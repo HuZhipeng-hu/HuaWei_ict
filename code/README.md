@@ -41,9 +41,10 @@ If `data.split_manifest_path` is configured but the manifest file does not
 exist yet, training will auto-generate it and save it to the configured path.
 Default path: `artifacts/splits/default_split_manifest.json`.
 
-Current default training config enables dual-branch features (200Hz + 1000Hz)
-with fused input shape `(12, 24, 6)`. This is a breaking change versus legacy
-single-branch `(6, 24, 6)` models.
+Current default training config enables 8-channel dual-branch features
+(200Hz + 1000Hz) with fused input shape `(16, 24, 6)`. This is a breaking
+change versus legacy single-branch `(6, 24, 6)` models and legacy dual-branch
+`(12, 24, 6)` models.
 
 Useful experiment overrides:
 
@@ -86,9 +87,9 @@ python -m conversion.convert \
   --config configs/conversion.yaml
 ```
 
-`configs/conversion.yaml` now defaults to `input_shape: [1, 12, 24, 6]`.
-Legacy 6-channel checkpoints/mindir are not compatible with this config and
-must be retrained/re-converted.
+`configs/conversion.yaml` now defaults to `input_shape: [1, 16, 24, 6]`.
+Legacy 6-channel checkpoints/mindir and legacy `12x24x6` dual-branch artifacts
+are not compatible with this config and must be retrained/re-converted.
 
 ## Runtime
 
@@ -97,7 +98,7 @@ python -m runtime.run --config configs/runtime.yaml
 ```
 
 Runtime preprocess is aligned with training dual-branch config. Ensure deployed
-`.mindir` was exported with matching shape `(1, 12, 24, 6)`.
+`.mindir` was exported with matching shape `(1, 16, 24, 6)`.
 
 Standalone smoke test:
 
@@ -131,7 +132,7 @@ python scripts/benchmark_realtime_ckpt.py \
   --run_id local_benchmark_smoke
 ```
 
-## Legacy Realtime Checkpoint Debug (Armband)
+## Manual Realtime Checkpoint Debug (Armband)
 
 ```bash
 python scripts/realtime_ckpt.py \
@@ -143,7 +144,7 @@ python scripts/realtime_ckpt.py \
 ```
 
 `infer_rate_hz=0` keeps old behavior (no inference rate limit).
-This script is for manual debugging only; it is not the trusted benchmark path.
+This script follows the current 8-channel protocol for manual debugging only; it is not the trusted benchmark path.
 
 ## Experiment Matrix
 
@@ -166,3 +167,4 @@ python -m pytest -q
 
 See [docs/evaluation_retrain_runbook.md](docs/evaluation_retrain_runbook.md) for
 full retrain -> conversion -> deployment -> realtime retest procedure.
+
