@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import time
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -22,7 +24,7 @@ from shared.config import load_training_config, load_training_data_config
 from shared.gestures import GESTURE_DEFINITIONS
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, dump_yaml, ensure_run_dir
 from training.data import CSVDatasetLoader, DataAugmentor, split_and_optionally_augment
-from training.data.split_strategy import build_manifest, load_manifest, save_manifest
+from training.data.split_strategy import SplitManifest, build_manifest, load_manifest, save_manifest
 from training.evaluate import load_and_evaluate
 from training.model import build_model_from_config
 from training.reporting import save_classification_report
@@ -47,6 +49,13 @@ OFFLINE_SUMMARY_FIELDS = [
     "test_macro_recall",
     "top_confusion_pair",
 ]
+
+
+class _ManifestLoadIssue(ValueError):
+    """Raised when a manifest cannot be safely reused for the current training run."""
+
+
+_MANIFEST_FIELD_NAMES = {item.name for item in dataclass_fields(SplitManifest)}
 
 
 def _setup_logging() -> None:
@@ -153,6 +162,62 @@ def _apply_cli_overrides(args: argparse.Namespace, model_cfg, train_cfg, augment
     return model_cfg, train_cfg, augmentation_cfg
 
 
+def _build_current_manifest(
+    *,
+    labels: np.ndarray,
+    source_ids: np.ndarray,
+    source_metadata: Sequence[dict],
+    seed: int,
+    split_mode: str,
+    val_ratio: float,
+    test_ratio: float,
+    class_names: Sequence[str],
+    manifest_strategy: str,
+) -> SplitManifest:
+    return build_manifest(
+        labels,
+        source_ids,
+        seed=seed,
+        split_mode=split_mode,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        num_classes=len(class_names),
+        class_names=class_names,
+        manifest_strategy=manifest_strategy,
+        source_metadata=source_metadata,
+    )
+
+
+def _read_manifest_json(in_path: str) -> dict:
+    try:
+        with open(in_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise _ManifestLoadIssue(f"manifest is not valid JSON: {exc.msg}") from exc
+
+    if not isinstance(payload, dict):
+        raise _ManifestLoadIssue("manifest root must be a JSON object")
+    return payload
+
+
+def _load_manifest_for_training(in_path: str, *, current_num_samples: int) -> SplitManifest:
+    payload = _read_manifest_json(in_path)
+    unknown_fields = sorted(key for key in payload.keys() if key not in _MANIFEST_FIELD_NAMES)
+    if unknown_fields:
+        raise _ManifestLoadIssue(f"unsupported legacy fields: {', '.join(unknown_fields)}")
+
+    try:
+        manifest = load_manifest(in_path)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise _ManifestLoadIssue(f"failed validation: {exc}") from exc
+
+    if manifest.num_samples != current_num_samples:
+        raise _ManifestLoadIssue(
+            f"sample count mismatch: manifest={manifest.num_samples}, loaded={current_num_samples}"
+        )
+    return manifest
+
+
 def _prepare_manifest(
     *,
     labels: np.ndarray,
@@ -168,6 +233,7 @@ def _prepare_manifest(
     manifest_out_cli: Optional[str],
     manifest_strategy: str,
 ) -> tuple:
+    current_num_samples = int(labels.shape[0])
     manifest_out_path = manifest_out_cli or manifest_in_config
 
     if manifest_in_cli:
@@ -177,14 +243,42 @@ def _prepare_manifest(
                 f"{manifest_in_cli}. Fix: generate first with --split_manifest_out <path> "
                 "or use an existing --split_manifest_in <path>."
             )
+        try:
+            manifest = _load_manifest_for_training(manifest_in_cli, current_num_samples=current_num_samples)
+        except _ManifestLoadIssue as exc:
+            raise ValueError(
+                "Explicit --split_manifest_in is not compatible with the current dataset: "
+                f"{manifest_in_cli} ({exc}). Fix: regenerate it with --split_manifest_out <path> and retry."
+            ) from exc
         logger.info("Using split manifest from CLI: %s", manifest_in_cli)
-        manifest = load_manifest(manifest_in_cli)
         return manifest, manifest_in_cli
 
     if manifest_in_config:
         if Path(manifest_in_config).exists():
+            try:
+                manifest = _load_manifest_for_training(manifest_in_config, current_num_samples=current_num_samples)
+            except _ManifestLoadIssue as exc:
+                logger.warning(
+                    "Configured split manifest at %s is legacy/stale/invalid (%s). Rebuilding with strategy=%s.",
+                    manifest_in_config,
+                    exc,
+                    manifest_strategy,
+                )
+                manifest = _build_current_manifest(
+                    labels=labels,
+                    source_ids=source_ids,
+                    source_metadata=source_metadata,
+                    seed=seed,
+                    split_mode=split_mode,
+                    val_ratio=val_ratio,
+                    test_ratio=test_ratio,
+                    class_names=class_names,
+                    manifest_strategy=manifest_strategy,
+                )
+                saved = save_manifest(manifest, manifest_in_config)
+                logger.info("Rebuilt split manifest at %s", saved)
+                return manifest, str(saved)
             logger.info("Using split manifest from config: %s", manifest_in_config)
-            manifest = load_manifest(manifest_in_config)
             return manifest, manifest_in_config
 
         logger.info(
@@ -192,33 +286,31 @@ def _prepare_manifest(
             manifest_in_config,
             manifest_strategy,
         )
-        manifest = build_manifest(
-            labels,
-            source_ids,
+        manifest = _build_current_manifest(
+            labels=labels,
+            source_ids=source_ids,
+            source_metadata=source_metadata,
             seed=seed,
             split_mode=split_mode,
             val_ratio=val_ratio,
             test_ratio=test_ratio,
-            num_classes=len(class_names),
             class_names=class_names,
             manifest_strategy=manifest_strategy,
-            source_metadata=source_metadata,
         )
         saved = save_manifest(manifest, manifest_out_path or manifest_in_config)
         logger.info("Auto-generated split manifest at %s", saved)
         return manifest, str(saved)
 
-    manifest = build_manifest(
-        labels,
-        source_ids,
+    manifest = _build_current_manifest(
+        labels=labels,
+        source_ids=source_ids,
+        source_metadata=source_metadata,
         seed=seed,
         split_mode=split_mode,
         val_ratio=val_ratio,
         test_ratio=test_ratio,
-        num_classes=len(class_names),
         class_names=class_names,
         manifest_strategy=manifest_strategy,
-        source_metadata=source_metadata,
     )
     saved_path = None
     if manifest_out_path:

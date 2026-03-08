@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Dict, Iterator, Optional, Sequence
 
@@ -37,13 +37,14 @@ class SplitManifest:
 
     @classmethod
     def from_dict(cls, data: Dict) -> "SplitManifest":
+        valid_fields = {item.name for item in fields(cls)}
         defaults = {
             "manifest_strategy": "v1",
             "group_keys_train": [],
             "group_keys_val": [],
             "group_keys_test": [],
         }
-        payload = {**defaults, **data}
+        payload = {key: value for key, value in {**defaults, **data}.items() if key in valid_fields}
         return cls(**payload)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -10,7 +11,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from training.data.split_strategy import (
+    SplitManifest,
     build_manifest,
+    load_manifest,
     split_and_optionally_augment,
     split_arrays_from_manifest,
 )
@@ -145,3 +148,47 @@ def test_manifest_v2_group_key_separates_same_session_recording_across_users():
     all_group_keys = set(manifest.group_keys_train + manifest.group_keys_val + manifest.group_keys_test)
     assert "u1::s1::shared" in all_group_keys
     assert "u2::s1::shared" in all_group_keys
+
+
+def test_split_manifest_from_dict_ignores_legacy_version_field():
+    manifest = SplitManifest.from_dict(
+        {
+            "train_indices": [],
+            "val_indices": [],
+            "test_indices": [],
+            "train_sources": [],
+            "val_sources": [],
+            "test_sources": [],
+            "seed": 42,
+            "split_mode": "grouped_file",
+            "version": "legacy-v1",
+        }
+    )
+
+    assert manifest.split_mode == "grouped_file"
+    assert manifest.manifest_strategy == "v1"
+
+
+def test_load_manifest_accepts_legacy_version_field(tmp_path: Path):
+    manifest_path = tmp_path / "legacy_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "train_indices": [],
+                "val_indices": [],
+                "test_indices": [],
+                "train_sources": [],
+                "val_sources": [],
+                "test_sources": [],
+                "seed": 42,
+                "split_mode": "grouped_file",
+                "version": "legacy-v1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = load_manifest(str(manifest_path))
+
+    assert manifest.seed == 42
+    assert manifest.split_mode == "grouped_file"

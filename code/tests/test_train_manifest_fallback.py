@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import numpy as np
 import pytest
@@ -113,3 +114,161 @@ def test_existing_manifest_loads_without_rebuild(tmp_path: Path):
     assert loaded.val_indices == manifest.val_indices
     assert loaded.test_indices == manifest.test_indices
 
+
+def test_config_legacy_manifest_auto_rebuilds(tmp_path: Path):
+    labels, source_ids, metadata = _fake_data()
+    class_names = ["RELAX", "FIST", "PINCH"]
+    manifest = build_manifest(
+        labels,
+        source_ids,
+        seed=42,
+        split_mode="grouped_file",
+        val_ratio=0.2,
+        test_ratio=0.2,
+        num_classes=len(class_names),
+        class_names=class_names,
+        manifest_strategy="v2",
+        source_metadata=metadata,
+    )
+    manifest_path = tmp_path / "legacy_manifest.json"
+    save_manifest(manifest, str(manifest_path))
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["version"] = "legacy-v1"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    rebuilt, chosen = _prepare_manifest(
+        labels=labels,
+        source_ids=source_ids,
+        source_metadata=metadata,
+        seed=42,
+        split_mode="grouped_file",
+        val_ratio=0.2,
+        test_ratio=0.2,
+        class_names=class_names,
+        manifest_in_cli=None,
+        manifest_in_config=str(manifest_path),
+        manifest_out_cli=None,
+        manifest_strategy="v2",
+    )
+
+    rewritten = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert chosen == str(manifest_path)
+    assert rebuilt.num_samples == len(labels)
+    assert "version" not in rewritten
+
+
+def test_config_stale_manifest_auto_rebuilds(tmp_path: Path):
+    labels, source_ids, metadata = _fake_data()
+    class_names = ["RELAX", "FIST", "PINCH"]
+    manifest = build_manifest(
+        labels,
+        source_ids,
+        seed=42,
+        split_mode="grouped_file",
+        val_ratio=0.2,
+        test_ratio=0.2,
+        num_classes=len(class_names),
+        class_names=class_names,
+        manifest_strategy="v2",
+        source_metadata=metadata,
+    )
+    manifest_path = tmp_path / "stale_manifest.json"
+    save_manifest(manifest, str(manifest_path))
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["num_samples"] = 999
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    rebuilt, _ = _prepare_manifest(
+        labels=labels,
+        source_ids=source_ids,
+        source_metadata=metadata,
+        seed=42,
+        split_mode="grouped_file",
+        val_ratio=0.2,
+        test_ratio=0.2,
+        class_names=class_names,
+        manifest_in_cli=None,
+        manifest_in_config=str(manifest_path),
+        manifest_out_cli=None,
+        manifest_strategy="v2",
+    )
+
+    rewritten = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert rebuilt.num_samples == len(labels)
+    assert rewritten["num_samples"] == len(labels)
+
+
+def test_explicit_legacy_manifest_raises_clear_error(tmp_path: Path):
+    labels, source_ids, metadata = _fake_data()
+    class_names = ["RELAX", "FIST", "PINCH"]
+    manifest = build_manifest(
+        labels,
+        source_ids,
+        seed=42,
+        split_mode="grouped_file",
+        val_ratio=0.2,
+        test_ratio=0.2,
+        num_classes=len(class_names),
+        class_names=class_names,
+        manifest_strategy="v2",
+        source_metadata=metadata,
+    )
+    manifest_path = tmp_path / "legacy_manifest.json"
+    save_manifest(manifest, str(manifest_path))
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["version"] = "legacy-v1"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsupported legacy fields"):
+        _prepare_manifest(
+            labels=labels,
+            source_ids=source_ids,
+            source_metadata=metadata,
+            seed=42,
+            split_mode="grouped_file",
+            val_ratio=0.2,
+            test_ratio=0.2,
+            class_names=class_names,
+            manifest_in_cli=str(manifest_path),
+            manifest_in_config=None,
+            manifest_out_cli=None,
+            manifest_strategy="v2",
+        )
+
+
+def test_explicit_stale_manifest_raises_clear_error(tmp_path: Path):
+    labels, source_ids, metadata = _fake_data()
+    class_names = ["RELAX", "FIST", "PINCH"]
+    manifest = build_manifest(
+        labels,
+        source_ids,
+        seed=42,
+        split_mode="grouped_file",
+        val_ratio=0.2,
+        test_ratio=0.2,
+        num_classes=len(class_names),
+        class_names=class_names,
+        manifest_strategy="v2",
+        source_metadata=metadata,
+    )
+    manifest_path = tmp_path / "stale_manifest.json"
+    save_manifest(manifest, str(manifest_path))
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["num_samples"] = 999
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="sample count mismatch"):
+        _prepare_manifest(
+            labels=labels,
+            source_ids=source_ids,
+            source_metadata=metadata,
+            seed=42,
+            split_mode="grouped_file",
+            val_ratio=0.2,
+            test_ratio=0.2,
+            class_names=class_names,
+            manifest_in_cli=str(manifest_path),
+            manifest_in_config=None,
+            manifest_out_cli=None,
+            manifest_strategy="v2",
+        )
