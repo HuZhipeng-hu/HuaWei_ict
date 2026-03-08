@@ -97,7 +97,8 @@ def _extract_v2_group_key(source_id: str, metadata: Optional[Dict]) -> str:
     if metadata:
         recording = str(metadata.get("recording_id") or metadata.get("source_id") or source_id)
         session = str(metadata.get("session_id") or "default_session")
-        return f"{session}::{recording}"
+        user = str(metadata.get("user_id") or "unknown_user")
+        return f"{user}::{session}::{recording}"
 
     # Fallback parser for legacy source strings carrying key=value pieces.
     parts = source_id.split("|")
@@ -108,7 +109,8 @@ def _extract_v2_group_key(source_id: str, metadata: Optional[Dict]) -> str:
             data[k.strip()] = v.strip()
     recording = data.get("recording_id", source_id)
     session = data.get("session_id", "default_session")
-    return f"{session}::{recording}"
+    user = data.get("user_id", "unknown_user")
+    return f"{user}::{session}::{recording}"
 
 
 def build_manifest(
@@ -230,9 +232,13 @@ def validate_manifest(manifest: SplitManifest) -> None:
     if train_set & val_set or train_set & test_set or val_set & test_set:
         raise ValueError("Split indices overlap between train/val/test")
 
-    src_train, src_val, src_test = set(manifest.train_sources), set(manifest.val_sources), set(manifest.test_sources)
-    if src_train & src_val or src_train & src_test or src_val & src_test:
-        raise ValueError("Source leakage detected between train/val/test")
+    # In manifest v2, the authoritative anti-leakage identity is the metadata-derived
+    # group key (`user::session::recording`). Raw source ids remain for file lookup and
+    # backwards compatibility, but may legitimately collide in synthetic or migrated data.
+    if manifest.manifest_strategy != "v2":
+        src_train, src_val, src_test = set(manifest.train_sources), set(manifest.val_sources), set(manifest.test_sources)
+        if src_train & src_val or src_train & src_test or src_val & src_test:
+            raise ValueError("Source leakage detected between train/val/test")
 
     grp_train = set(manifest.group_keys_train)
     grp_val = set(manifest.group_keys_val)

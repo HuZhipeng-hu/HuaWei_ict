@@ -4,9 +4,11 @@ input_shape: [1, 12, 24, 6]
 mindir_version: latest
 
 model:
+  model_type: standard
   in_channels: 12
   num_classes: 6
+  base_channels: 16
+  use_se: true
   hidden_dim: 64
   num_layers: 2
   dropout_rate: 0.0
-

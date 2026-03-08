@@ -381,10 +381,14 @@ def run_realtime(args):
     vote_window = args.vote_window if args.vote_window is not None else yaml_cfg.get("vote_window_size", DEFAULT_VOTE_WINDOW)
     vote_min = args.vote_min if args.vote_min is not None else yaml_cfg.get("vote_min_count", DEFAULT_VOTE_MIN_COUNT)
 
+    inference_cfg = yaml_cfg.get("inference", {}) if isinstance(yaml_cfg.get("inference", {}), dict) else {}
     infer_rate_hz = (
         args.infer_rate_hz
         if args.infer_rate_hz is not None
-        else runtime_cfg.get("infer_rate_hz", yaml_cfg.get("infer_rate_hz", DEFAULT_INFER_RATE_HZ))
+        else inference_cfg.get(
+            "infer_rate_hz",
+            runtime_cfg.get("infer_rate_hz", yaml_cfg.get("infer_rate_hz", DEFAULT_INFER_RATE_HZ)),
+        )
     )
 
     port = args.port

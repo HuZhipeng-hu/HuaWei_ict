@@ -1,10 +1,4 @@
-"""
-Model conversion entrypoint.
-
-Examples:
-    python -m conversion.convert --checkpoint checkpoints/neurogrip_best.ckpt --output models/neurogrip
-    python -m conversion.convert --config configs/conversion.yaml
-"""
+"""Model conversion entrypoint."""
 
 from __future__ import annotations
 
@@ -19,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from conversion.export import export_to_mindir
 from conversion.quantize import quantize_model
 from shared.config import ConversionConfig, ModelConfig, load_config, load_conversion_config, load_training_config
-from shared.models import count_parameters, create_model
+from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, ensure_run_dir
+from shared.models import count_parameters
+from training.model import build_model_from_config
 from shared.preprocessing import PreprocessPipeline
 
 logging.basicConfig(
@@ -28,6 +24,17 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("conversion")
+
+CONVERSION_SUMMARY_FIELDS = [
+    "run_id",
+    "checkpoint_path",
+    "output_path",
+    "input_shape",
+    "model_type",
+    "base_channels",
+    "use_se",
+    "quantized_output",
+]
 
 
 def _derive_training_protocol(
@@ -90,24 +97,11 @@ def _validate_training_shape_strict(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="NeuroGrip Pro V2 model conversion")
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=None,
-        help="Path to .ckpt model file. Defaults to conversion.checkpoint_path.",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Output path stem (extension .mindir added automatically). Defaults to conversion.output_path.",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/conversion.yaml",
-        help="Path to conversion YAML config.",
-    )
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to .ckpt model file.")
+    parser.add_argument("--output", type=str, default=None, help="Output path stem (extension .mindir added automatically).")
+    parser.add_argument("--config", type=str, default="configs/conversion.yaml", help="Path to conversion YAML config.")
+    parser.add_argument("--run_id", default=None, help="Stable experiment run id")
+    parser.add_argument("--run_root", default="artifacts/runs", help="Base directory for run artifacts")
     parser.add_argument("--quantize", action="store_true", help="Enable INT8 post-training quantization.")
     parser.add_argument(
         "--input_shape",
@@ -125,10 +119,12 @@ def main() -> None:
     logger.info("NeuroGrip Pro V2 - Model Conversion")
     logger.info("=" * 60)
 
+    run_id, run_dir = ensure_run_dir(args.run_root, args.run_id, default_tag="convert")
     config_path = Path(args.config)
     if config_path.exists():
         conversion_cfg = load_conversion_config(str(config_path))
         raw_config = load_config(str(config_path))
+        copy_config_snapshot(config_path, run_dir / "config_snapshots" / config_path.name)
     else:
         logger.warning("Config not found: %s. Using default ConversionConfig.", config_path)
         conversion_cfg = ConversionConfig()
@@ -136,6 +132,8 @@ def main() -> None:
 
     training_cfg_path = config_path.parent / "training.yaml"
     training_protocol = _derive_training_protocol(training_cfg_path)
+    if training_cfg_path.exists():
+        copy_config_snapshot(training_cfg_path, run_dir / "config_snapshots" / training_cfg_path.name)
 
     model_section = raw_config.get("model", {})
     if model_section:
@@ -146,11 +144,13 @@ def main() -> None:
         model_config = ModelConfig()
 
     checkpoint_path = args.checkpoint or conversion_cfg.checkpoint_path
-    output_path = args.output or conversion_cfg.output_path
+    if args.output:
+        output_path = args.output
+    else:
+        default_name = Path(conversion_cfg.output_path).with_suffix("").name
+        output_path = str(run_dir / "conversion" / default_name)
     if not checkpoint_path:
         raise ValueError("checkpoint path is required via --checkpoint or conversion.checkpoint_path")
-    if not output_path:
-        raise ValueError("output path is required via --output or conversion.output_path")
 
     if args.input_shape:
         input_shape = tuple(int(x.strip()) for x in args.input_shape.split(","))
@@ -164,21 +164,13 @@ def main() -> None:
     quantize_enabled = args.quantize or bool(quant_section.get("enabled", False))
     quantize_bit_num = int(quant_section.get("bit_num", 8))
 
+    logger.info("Run ID: %s", run_id)
     logger.info("Checkpoint: %s", checkpoint_path)
     logger.info("Output: %s", output_path)
     logger.info("Using input shape: %s", input_shape)
     logger.info("Quantization: %s (bit_num=%s)", "enabled" if quantize_enabled else "disabled", quantize_bit_num)
 
-    model = create_model(
-        {
-            "model_type": model_config.model_type,
-            "in_channels": model_config.in_channels,
-            "num_classes": model_config.num_classes,
-            "base_channels": model_config.base_channels,
-            "use_se": model_config.use_se,
-            "dropout_rate": 0.0,
-        }
-    )
+    model = build_model_from_config(model_config, dropout_rate=0.0)
     logger.info("Model parameters: %s", f"{count_parameters(model):,}")
 
     mindir_path = export_to_mindir(
@@ -188,6 +180,7 @@ def main() -> None:
         input_shape=input_shape,
     )
 
+    quantized_path = None
     if quantize_enabled:
         quantized_output = str(Path(output_path).with_suffix("")) + "_int8"
         quantized_path = quantize_model(
@@ -197,6 +190,19 @@ def main() -> None:
             bit_num=quantize_bit_num,
         )
         logger.info("Quantized model saved: %s", quantized_path)
+
+    summary = {
+        "run_id": run_id,
+        "checkpoint_path": checkpoint_path,
+        "output_path": mindir_path,
+        "input_shape": list(input_shape),
+        "model_type": model_config.model_type,
+        "base_channels": model_config.base_channels,
+        "use_se": model_config.use_se,
+        "quantized_output": quantized_path or "",
+    }
+    dump_json(run_dir / "conversion" / "conversion_summary.json", summary)
+    append_csv_row(Path(args.run_root) / "conversion_results.csv", CONVERSION_SUMMARY_FIELDS, summary)
 
     logger.info("Conversion completed.")
 

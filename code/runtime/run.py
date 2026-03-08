@@ -72,6 +72,7 @@ def main() -> None:
     if args.rate is not None:
         config.control_rate_hz = args.rate
     if args.infer_rate_hz is not None:
+        config.inference.infer_rate_hz = args.infer_rate_hz
         config.infer_rate_hz = args.infer_rate_hz
     if args.standalone:
         config.hardware.sensor_mode = "standalone"

@@ -1,0 +1,197 @@
+{
+  "num_samples": 21,
+  "accuracy": 0.23809523809523808,
+  "macro_precision": 0.03968253968253968,
+  "macro_recall": 0.16666666666666666,
+  "macro_f1": 0.0641025641025641,
+  "per_class": {
+    "RELAX": {
+      "class_id": 0,
+      "class_name": "RELAX",
+      "precision": 0.23809523809523808,
+      "recall": 1.0,
+      "f1": 0.3846153846153846,
+      "support": 5
+    },
+    "FIST": {
+      "class_id": 1,
+      "class_name": "FIST",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 11
+    },
+    "PINCH": {
+      "class_id": 2,
+      "class_name": "PINCH",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 0
+    },
+    "OK": {
+      "class_id": 3,
+      "class_name": "OK",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 0
+    },
+    "YE": {
+      "class_id": 4,
+      "class_name": "YE",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 2
+    },
+    "SIDEGRIP": {
+      "class_id": 5,
+      "class_name": "SIDEGRIP",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 3
+    }
+  },
+  "per_class_rows": [
+    {
+      "class_id": 0,
+      "class_name": "RELAX",
+      "precision": 0.23809523809523808,
+      "recall": 1.0,
+      "f1": 0.3846153846153846,
+      "support": 5
+    },
+    {
+      "class_id": 1,
+      "class_name": "FIST",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 11
+    },
+    {
+      "class_id": 2,
+      "class_name": "PINCH",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 0
+    },
+    {
+      "class_id": 3,
+      "class_name": "OK",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 0
+    },
+    {
+      "class_id": 4,
+      "class_name": "YE",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 2
+    },
+    {
+      "class_id": 5,
+      "class_name": "SIDEGRIP",
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "support": 3
+    }
+  ],
+  "confusion_matrix": [
+    [
+      5,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      11,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      2,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      3,
+      0,
+      0,
+      0,
+      0,
+      0
+    ]
+  ],
+  "top_confusion_pairs": [
+    {
+      "pair": [
+        "RELAX",
+        "FIST"
+      ],
+      "count": 11,
+      "a_to_b": 0,
+      "b_to_a": 11
+    },
+    {
+      "pair": [
+        "RELAX",
+        "SIDEGRIP"
+      ],
+      "count": 3,
+      "a_to_b": 0,
+      "b_to_a": 3
+    },
+    {
+      "pair": [
+        "RELAX",
+        "YE"
+      ],
+      "count": 2,
+      "a_to_b": 0,
+      "b_to_a": 2
+    }
+  ],
+  "run_id": "local_benchmark_smoke",
+  "checkpoint_path": "checkpoints/neurogrip_best.ckpt",
+  "manifest_path": "artifacts/splits/default_split_manifest.json",
+  "threshold": 0.8,
+  "hysteresis_count": 3,
+  "infer_rate_hz": 20.0,
+  "decision_count": 21,
+  "hit_rate": 0.0,
+  "false_trigger_rate": 0.0,
+  "latency_p50_ms": 5.669600009918213,
+  "latency_p95_ms": 8.484000205993652
+}

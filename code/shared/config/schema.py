@@ -146,6 +146,7 @@ class TrainingConfig:
 class DataConfig:
     split_mode: str = "grouped_file"
     split_manifest_path: str = "artifacts/splits/default_split_manifest.json"
+    recordings_manifest_path: Optional[str] = None
     quality_filter: QualityFilterConfig = field(default_factory=QualityFilterConfig)
 
 
@@ -167,6 +168,7 @@ class InferenceConfig:
     smoothing_window_ms: int = 400
     hysteresis_count: int = 3
     tta_offsets: List[float] = field(default_factory=lambda: [0.0, 0.33, 0.66])
+    infer_rate_hz: float = 20.0
     use_lite: bool = True
 
 
@@ -207,6 +209,15 @@ class RuntimeConfig:
     infer_rate_hz: float = 20.0
 
     def __post_init__(self) -> None:
+        default_infer_rate = InferenceConfig().infer_rate_hz
+        if self.inference.infer_rate_hz != default_infer_rate:
+            effective_infer_rate = float(self.inference.infer_rate_hz)
+        elif self.infer_rate_hz != default_infer_rate:
+            effective_infer_rate = float(self.infer_rate_hz)
+        else:
+            effective_infer_rate = float(default_infer_rate)
+        self.inference.infer_rate_hz = effective_infer_rate
+        self.infer_rate_hz = effective_infer_rate
         self.hardware.armband_sampling_rate = int(self.device.sampling_rate)
         self.hardware.target_sampling_rate = int(self.preprocess.sampling_rate)
 
@@ -322,6 +333,11 @@ def _resolve_runtime_config_sections(data: Dict[str, Any]) -> Dict[str, Any]:
     if "sampling_rate" in device_section and "armband_sampling_rate" not in hardware_section:
         hardware_section["armband_sampling_rate"] = device_section["sampling_rate"]
 
+    if "infer_rate_hz" in root and "infer_rate_hz" not in inference_section:
+        inference_section["infer_rate_hz"] = root["infer_rate_hz"]
+
+    effective_infer_rate = inference_section.get("infer_rate_hz", root.get("infer_rate_hz", 20.0))
+
     return {
         "model_path": root.get("model_path", "models/neurogrip_6g.mindir"),
         "gestures_path": root.get("gestures_path", "gestures.yaml"),
@@ -330,7 +346,7 @@ def _resolve_runtime_config_sections(data: Dict[str, Any]) -> Dict[str, Any]:
         "device": device_section,
         "hardware": hardware_section,
         "control_rate_hz": root.get("control_rate_hz", 50.0),
-        "infer_rate_hz": root.get("infer_rate_hz", 20.0),
+        "infer_rate_hz": effective_infer_rate,
     }
 
 

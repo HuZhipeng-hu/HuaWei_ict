@@ -8,6 +8,8 @@ from typing import Dict, Sequence
 
 import numpy as np
 
+from shared.config import ModelConfig
+
 try:
     import mindspore as ms
     from mindspore import Tensor, context, load_checkpoint, load_param_into_net
@@ -18,7 +20,7 @@ except Exception:  # pragma: no cover
     load_checkpoint = None  # type: ignore
     load_param_into_net = None  # type: ignore
 
-from training.model import NeuroGripNet
+from training.model import build_model_from_config
 from training.reporting import compute_classification_report
 
 logger = logging.getLogger(__name__)
@@ -36,22 +38,13 @@ def _set_device(mode: str = "graph", target: str = "CPU", device_id: int = 0) ->
 
 def load_model_from_checkpoint(
     ckpt_path: str | Path,
-    in_channels: int,
-    num_classes: int,
-    dropout_rate: float,
-    hidden_dim: int = 64,
-    num_layers: int = 2,
-) -> NeuroGripNet:
+    model_config: ModelConfig,
+    dropout_rate: float | None = None,
+):
     if ms is None:
         raise RuntimeError("MindSpore is not available")
 
-    model = NeuroGripNet(
-        in_channels=in_channels,
-        num_classes=num_classes,
-        dropout_rate=dropout_rate,
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
-    )
+    model = build_model_from_config(model_config, dropout_rate=dropout_rate)
     params = load_checkpoint(str(ckpt_path))
     load_param_into_net(model, params)
     model.set_train(False)
@@ -59,7 +52,7 @@ def load_model_from_checkpoint(
 
 
 def evaluate_model(
-    model: NeuroGripNet,
+    model,
     samples: np.ndarray,
     labels: np.ndarray,
     class_names: Sequence[str],
@@ -78,22 +71,16 @@ def load_and_evaluate(
     labels: np.ndarray,
     class_names: Sequence[str],
     *,
-    in_channels: int,
-    num_classes: int,
-    dropout_rate: float,
-    hidden_dim: int = 64,
-    num_layers: int = 2,
+    model_config: ModelConfig,
+    dropout_rate: float | None = None,
     device_target: str = "CPU",
     device_id: int = 0,
 ) -> Dict:
     _set_device(target=device_target, device_id=device_id)
     model = load_model_from_checkpoint(
         ckpt_path=ckpt_path,
-        in_channels=in_channels,
-        num_classes=num_classes,
+        model_config=model_config,
         dropout_rate=dropout_rate,
-        hidden_dim=hidden_dim,
-        num_layers=num_layers,
     )
     logger.info("Loaded checkpoint: %s", ckpt_path)
     report = evaluate_model(model, samples, labels, class_names)

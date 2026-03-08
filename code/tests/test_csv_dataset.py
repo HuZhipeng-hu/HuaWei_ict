@@ -63,3 +63,40 @@ def test_multi_phase_expands_samples(tmp_path: Path):
     assert labels.shape[0] == samples.shape[0]
     assert source_ids.shape[0] == samples.shape[0]
 
+
+def test_recordings_manifest_overrides_filename_metadata(tmp_path: Path):
+    gestures = {"RELAX": 0}
+    cfg = PreprocessConfig()
+    cfg.dual_branch.enabled = True
+    qf = QualityFilterConfig(enabled=False)
+
+    sig = _make_signal(700, 20.0)
+    rel_path = Path("RELAX") / "1772246123.csv"
+    _write_csv(tmp_path / rel_path, sig)
+
+    manifest_path = tmp_path / "recordings_manifest.csv"
+    manifest_path.write_text(
+        "\n".join(
+            [
+                "relative_path,gesture,user_id,session_id,device_id,timestamp,wearing_state",
+                "RELAX/1772246123.csv,RELAX,user_a,sess_03,dev_x,20260308T101500,offset",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    loader = CSVDatasetLoader(
+        tmp_path,
+        gestures,
+        cfg,
+        quality_filter=qf,
+        recordings_manifest_path=manifest_path,
+    )
+    samples, labels, source_ids, metadata = loader.load_all_with_sources(return_metadata=True)
+
+    assert samples.shape[0] > 0
+    assert set(source_ids.tolist()) == {"RELAX/1772246123.csv"}
+    assert all(item["user_id"] == "user_a" for item in metadata)
+    assert all(item["session_id"] == "sess_03" for item in metadata)
+    assert all(item["wearing_state"] == "offset" for item in metadata)

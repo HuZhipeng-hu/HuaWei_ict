@@ -119,3 +119,29 @@ def test_augmentation_only_applies_to_train_split():
     np.testing.assert_array_equal(val_labels_after, val_labels_raw)
     np.testing.assert_array_equal(test_after, test_raw)
     np.testing.assert_array_equal(test_labels_after, test_labels_raw)
+
+
+def test_manifest_v2_group_key_separates_same_session_recording_across_users():
+    labels = np.array([0, 0], dtype=np.int32)
+    source_ids = np.array(["RELAX/shared.csv", "RELAX/shared.csv"], dtype=object)
+    metadata = [
+        {"recording_id": "shared", "session_id": "s1", "user_id": "u1"},
+        {"recording_id": "shared", "session_id": "s1", "user_id": "u2"},
+    ]
+
+    manifest = build_manifest(
+        labels=labels,
+        source_ids=source_ids,
+        split_mode="grouped_file",
+        val_ratio=0.0,
+        test_ratio=0.5,
+        seed=5,
+        manifest_strategy="v2",
+        source_metadata=metadata,
+        num_classes=1,
+        class_names=["RELAX"],
+    )
+
+    all_group_keys = set(manifest.group_keys_train + manifest.group_keys_val + manifest.group_keys_test)
+    assert "u1::s1::shared" in all_group_keys
+    assert "u2::s1::shared" in all_group_keys

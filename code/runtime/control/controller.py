@@ -42,7 +42,8 @@ class RuntimeController:
 
         self._stop = False
         self._recent_predictions: Deque[tuple[float, int, float]] = deque(maxlen=100)
-        interval_ms = 0 if config.infer_rate_hz <= 0 else int(round(1000.0 / float(config.infer_rate_hz)))
+        infer_rate_hz = float(config.inference.infer_rate_hz)
+        interval_ms = 0 if infer_rate_hz <= 0 else int(round(1000.0 / infer_rate_hz))
         self.scheduler = PredictionScheduler(inference_interval_ms=interval_ms)
         self.voter = TemporalVoter(
             history_window_ms=self.config.inference.smoothing_window_ms,
