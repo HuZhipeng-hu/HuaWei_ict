@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shared.gestures import (
     FOLDER_TO_GESTURE,
+    GESTURE_DEFINITIONS,
     GESTURE_FINGER_MAP,
     GESTURE_LABEL_MAP,
     LABEL_NAME_MAP,
@@ -28,6 +29,10 @@ def test_gesture_count():
 def test_gesture_values():
     values = [g.value for g in GestureType]
     assert values == list(range(NUM_CLASSES)), f"unexpected enum values: {values}"
+
+
+def test_gesture_definitions_order_matches_enum():
+    assert GESTURE_DEFINITIONS == tuple(GestureType)
 
 
 def test_finger_map_complete():
@@ -80,6 +85,7 @@ if __name__ == "__main__":
     tests = [
         test_gesture_count,
         test_gesture_values,
+        test_gesture_definitions_order_matches_enum,
         test_finger_map_complete,
         test_folder_map_complete,
         test_label_maps_consistent,

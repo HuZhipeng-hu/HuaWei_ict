@@ -1,6 +1,4 @@
-"""
-Hardware factory helpers.
-"""
+﻿"""Hardware factory helpers."""
 
 from __future__ import annotations
 
@@ -84,13 +82,13 @@ class StandaloneActuator(ActuatorBase):
 
 def create_sensor(config: HardwareConfig) -> SensorBase:
     if config.sensor_mode == "standalone":
-        return StandaloneSensor()
+        return StandaloneSensor(num_channels=6)
 
     return ArmbandSensor(
         port=config.sensor_port,
         baudrate=config.sensor_baudrate,
         device_sampling_rate=config.armband_sampling_rate,
-        target_sampling_rate=config.armband_sampling_rate,
+        target_sampling_rate=config.target_sampling_rate,
         buffer_size=config.sensor_buffer_size,
     )
 
@@ -106,4 +104,5 @@ def create_actuator(config: HardwareConfig) -> ActuatorBase:
         angle_open=config.servo_angle_open,
         angle_half=config.servo_angle_half,
         angle_closed=config.servo_angle_closed,
+        channels=config.actuator_channels,
     )

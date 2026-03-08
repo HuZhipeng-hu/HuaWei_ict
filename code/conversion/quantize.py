@@ -33,7 +33,7 @@ def quantize_model(
     output_path: str,
     calibration_data: Optional[np.ndarray] = None,
     num_calibration_samples: int = 100,
-    input_shape: Tuple[int, ...] = (1, 6, 24, 6),
+    input_shape: Tuple[int, ...] = (1, 12, 24, 6),
     bit_num: int = 8,
 ) -> str:
     """

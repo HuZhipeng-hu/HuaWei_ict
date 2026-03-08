@@ -1,9 +1,4 @@
-﻿"""
-Evaluation reporting layer.
-
-Computes and exports reproducible classification metrics independent from training
-loop internals.
-"""
+"""Training/evaluation reporting helpers."""
 
 from __future__ import annotations
 
@@ -14,140 +9,129 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
-from shared.gestures import GestureType, NUM_CLASSES
+
+def confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> np.ndarray:
+    cm = np.zeros((num_classes, num_classes), dtype=int)
+    for t, p in zip(y_true, y_pred):
+        cm[int(t), int(p)] += 1
+    return cm
 
 
-def _safe_divide(numerator: float, denominator: float) -> float:
-    if denominator == 0:
-        return 0.0
-    return float(numerator / denominator)
+def _safe_div(a: float, b: float) -> float:
+    return a / b if b > 0 else 0.0
 
 
-def compute_confusion_matrix(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    num_classes: int,
-) -> np.ndarray:
-    matrix = np.zeros((num_classes, num_classes), dtype=np.int64)
-    for true_label, pred_label in zip(y_true, y_pred):
-        if 0 <= int(true_label) < num_classes and 0 <= int(pred_label) < num_classes:
-            matrix[int(true_label), int(pred_label)] += 1
-    return matrix
+def per_class_metrics(cm: np.ndarray, class_names: Sequence[str]) -> List[Dict]:
+    metrics = []
+    for i, name in enumerate(class_names):
+        tp = float(cm[i, i])
+        fn = float(cm[i, :].sum() - tp)
+        fp = float(cm[:, i].sum() - tp)
+        precision = _safe_div(tp, tp + fp)
+        recall = _safe_div(tp, tp + fn)
+        f1 = _safe_div(2 * precision * recall, precision + recall)
+        support = int(cm[i, :].sum())
+        metrics.append(
+            {
+                "class_id": i,
+                "class_name": name,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+                "support": support,
+            }
+        )
+    return metrics
 
 
-def _default_class_names(num_classes: int) -> List[str]:
-    if num_classes == NUM_CLASSES:
-        return [g.name for g in GestureType]
-    return [f"class_{idx}" for idx in range(num_classes)]
+def _top_confusion_pairs(cm: np.ndarray, class_names: Sequence[str], top_k: int = 3) -> List[Dict]:
+    pairs: List[Dict] = []
+    n = cm.shape[0]
+    for i in range(n):
+        for j in range(i + 1, n):
+            count = int(cm[i, j] + cm[j, i])
+            if count <= 0:
+                continue
+            pairs.append(
+                {
+                    "pair": [class_names[i], class_names[j]],
+                    "count": count,
+                    "a_to_b": int(cm[i, j]),
+                    "b_to_a": int(cm[j, i]),
+                }
+            )
+    pairs.sort(key=lambda x: x["count"], reverse=True)
+    return pairs[:top_k]
 
 
 def compute_classification_report(
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    num_classes: int | None = None,
     class_names: Sequence[str] | None = None,
+    num_classes: int | None = None,
+    top_k_confusions: int = 3,
 ) -> Dict:
-    y_true = np.asarray(y_true, dtype=np.int64)
-    y_pred = np.asarray(y_pred, dtype=np.int64)
-
-    if y_true.shape != y_pred.shape:
-        raise ValueError("y_true and y_pred must have the same shape")
-
-    if num_classes is None:
-        max_true = int(np.max(y_true)) if y_true.size > 0 else 0
-        max_pred = int(np.max(y_pred)) if y_pred.size > 0 else 0
-        num_classes = max(max_true, max_pred) + 1
-
     if class_names is None:
-        class_names = _default_class_names(num_classes)
+        if num_classes is None:
+            raise ValueError("Either class_names or num_classes must be provided.")
+        class_names = [f"class_{i}" for i in range(num_classes)]
+    class_names = list(class_names)
+    if num_classes is None:
+        num_classes = len(class_names)
     if len(class_names) != num_classes:
-        raise ValueError("class_names length must match num_classes")
+        raise ValueError("num_classes must match len(class_names)")
 
-    confusion = compute_confusion_matrix(y_true, y_pred, num_classes=num_classes)
-    num_samples = int(y_true.size)
-    accuracy = _safe_divide(float(np.sum(np.diag(confusion))), float(num_samples))
+    cm = confusion_matrix(y_true, y_pred, num_classes)
+    per_class_rows = per_class_metrics(cm, class_names)
+    per_class_map = {row["class_name"]: row for row in per_class_rows}
+    acc = float((y_true == y_pred).mean())
+    macro_p = float(np.mean([m["precision"] for m in per_class_rows])) if per_class_rows else 0.0
+    macro_r = float(np.mean([m["recall"] for m in per_class_rows])) if per_class_rows else 0.0
+    macro_f1 = float(np.mean([m["f1"] for m in per_class_rows])) if per_class_rows else 0.0
 
-    per_class: Dict[str, Dict[str, float | int]] = {}
-    precisions: List[float] = []
-    recalls: List[float] = []
-    f1s: List[float] = []
-    supports: List[int] = []
-
-    for class_idx, class_name in enumerate(class_names):
-        tp = float(confusion[class_idx, class_idx])
-        fp = float(np.sum(confusion[:, class_idx]) - tp)
-        fn = float(np.sum(confusion[class_idx, :]) - tp)
-        support = int(np.sum(confusion[class_idx, :]))
-
-        precision = _safe_divide(tp, tp + fp)
-        recall = _safe_divide(tp, tp + fn)
-        f1 = _safe_divide(2.0 * precision * recall, precision + recall)
-
-        per_class[class_name] = {
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "support": support,
-        }
-        precisions.append(precision)
-        recalls.append(recall)
-        f1s.append(f1)
-        supports.append(support)
-
-    support_total = float(np.sum(supports)) if supports else 0.0
-    weighted_precision = _safe_divide(float(np.dot(precisions, supports)), support_total)
-    weighted_recall = _safe_divide(float(np.dot(recalls, supports)), support_total)
-    weighted_f1 = _safe_divide(float(np.dot(f1s, supports)), support_total)
-
-    report = {
-        "num_samples": num_samples,
-        "num_classes": int(num_classes),
-        "class_names": list(class_names),
-        "accuracy": accuracy,
-        "macro_precision": float(np.mean(precisions)) if precisions else 0.0,
-        "macro_recall": float(np.mean(recalls)) if recalls else 0.0,
-        "macro_f1": float(np.mean(f1s)) if f1s else 0.0,
-        "weighted_precision": weighted_precision,
-        "weighted_recall": weighted_recall,
-        "weighted_f1": weighted_f1,
-        "per_class": per_class,
-        "confusion_matrix": confusion.tolist(),
+    return {
+        "num_samples": int(len(y_true)),
+        "accuracy": acc,
+        "macro_precision": macro_p,
+        "macro_recall": macro_r,
+        "macro_f1": macro_f1,
+        "per_class": per_class_map,
+        "per_class_rows": per_class_rows,
+        "confusion_matrix": cm.tolist(),
+        "top_confusion_pairs": _top_confusion_pairs(cm, class_names, top_k=top_k_confusions),
     }
-    return report
 
 
-def save_classification_report(report: Dict, output_dir: str | Path, prefix: str = "test") -> Dict[str, str]:
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def save_classification_report(report: Dict, out_dir: str | Path, prefix: str = "test") -> Dict[str, str]:
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
 
-    metrics_json = out_dir / f"{prefix}_metrics.json"
-    per_class_csv = out_dir / f"{prefix}_per_class_metrics.csv"
-    confusion_csv = out_dir / f"{prefix}_confusion_matrix.csv"
-
+    metrics_json = out / f"{prefix}_metrics.json"
     with open(metrics_json, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
-    with open(per_class_csv, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["class", "precision", "recall", "f1", "support"])
-        for class_name in report["class_names"]:
-            metrics = report["per_class"][class_name]
-            writer.writerow(
-                [
-                    class_name,
-                    f"{metrics['precision']:.6f}",
-                    f"{metrics['recall']:.6f}",
-                    f"{metrics['f1']:.6f}",
-                    int(metrics["support"]),
-                ]
-            )
+    rows = report.get("per_class_rows")
+    if rows is None:
+        raw_per_class = report.get("per_class", {})
+        rows = list(raw_per_class.values()) if isinstance(raw_per_class, dict) else list(raw_per_class)
 
-    confusion = np.asarray(report["confusion_matrix"], dtype=np.int64)
+    per_class_csv = out / f"{prefix}_per_class_metrics.csv"
+    with open(per_class_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=["class_id", "class_name", "precision", "recall", "f1", "support"]
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    confusion_csv = out / f"{prefix}_confusion_matrix.csv"
     with open(confusion_csv, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["true\\pred", *report["class_names"]])
-        for row_idx, class_name in enumerate(report["class_names"]):
-            writer.writerow([class_name, *confusion[row_idx].tolist()])
+        class_names = [row["class_name"] for row in rows]
+        writer.writerow(["true\\pred"] + class_names)
+        cm = np.asarray(report.get("confusion_matrix", []), dtype=int)
+        for i, name in enumerate(class_names):
+            writer.writerow([name] + cm[i].tolist())
 
     return {
         "metrics_json": str(metrics_json),

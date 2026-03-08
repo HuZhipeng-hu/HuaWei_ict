@@ -38,3 +38,11 @@ class InferenceRateScheduler:
             self._last_infer_ts = ts
             return True
         return False
+
+
+class PredictionScheduler(InferenceRateScheduler):
+    """Compatibility wrapper that accepts interval in milliseconds."""
+
+    def __init__(self, inference_interval_ms: int = 0):
+        infer_rate_hz = 0.0 if inference_interval_ms <= 0 else 1000.0 / float(inference_interval_ms)
+        super().__init__(infer_rate_hz=infer_rate_hz)

@@ -1,18 +1,10 @@
-"""
-滑动窗口多数投票后处理
+﻿"""Inference post-processing helpers."""
 
-将连续的单次推理结果通过多数投票平滑，过滤偶发误判。
-配合置信度阈值，实现"宁可不动也不做错"的稳健控制。
-
-原理:
-    最近 N 次推理结果: [FIST, FIST, OK, FIST, FIST]
-    多数投票结果:       FIST (4/5 票)
-    如果最高票数 < min_count: 输出 None（不确定，保持上一状态）
-"""
+from __future__ import annotations
 
 import logging
-from collections import deque, Counter
-from typing import Optional, Tuple
+from collections import Counter, deque
+from typing import Optional
 
 from shared.gestures import GestureType, NUM_CLASSES
 
@@ -20,16 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class SlidingWindowVoter:
-    """
-    滑动窗口多数投票器
-
-    对连续推理结果进行平滑过滤，输出稳定的手势预测。
-
-    Args:
-        window_size: 投票窗口大小（保留最近 N 次推理结果）
-        min_count: 最小投票数（最高票数 >= min_count 才输出结果）
-        confidence_threshold: 置信度阈值（单次推理置信度 < 阈值则丢弃）
-    """
+    """Majority vote smoother kept for backward compatibility."""
 
     def __init__(
         self,
@@ -38,84 +21,65 @@ class SlidingWindowVoter:
         confidence_threshold: float = 0.5,
     ):
         if min_count > window_size:
-            raise ValueError(
-                f"min_count ({min_count}) 不能大于 "
-                f"window_size ({window_size})"
-            )
-
-        self.window_size = window_size
-        self.min_count = min_count
-        self.confidence_threshold = confidence_threshold
-
-        self._window: deque = deque(maxlen=window_size)
+            raise ValueError(f"min_count ({min_count}) cannot exceed window_size ({window_size})")
+        self.window_size = int(window_size)
+        self.min_count = int(min_count)
+        self.confidence_threshold = float(confidence_threshold)
+        self._window: deque[int] = deque(maxlen=window_size)
         self._last_output: Optional[GestureType] = None
 
-    def update(
-        self,
-        gesture_id: int,
-        confidence: float,
-    ) -> Optional[GestureType]:
-        """
-        输入一次推理结果，输出投票后的稳定结果
-
-        Args:
-            gesture_id: 单次推理的手势ID
-            confidence: 对应的置信度
-
-        Returns:
-            投票通过的手势类型，或 None（不确定时保持上一状态）
-        """
-        # 置信度过低则不纳入投票
+    def update(self, gesture_id: int, confidence: float) -> Optional[GestureType]:
         if confidence < self.confidence_threshold:
-            logger.debug(
-                f"置信度过低 ({confidence:.3f} < {self.confidence_threshold})，"
-                f"不纳入投票"
-            )
-            # 仍然返回上一结果以保持稳定
             return self._last_output
-
-        # 加入投票窗口
-        self._window.append(gesture_id)
-
-        # 窗口未满时，仅当所有结果一致才输出
+        self._window.append(int(gesture_id))
         if len(self._window) < self.window_size:
             if len(set(self._window)) == 1:
-                self._last_output = GestureType(gesture_id)
-                return self._last_output
+                self._last_output = GestureType(int(gesture_id))
             return self._last_output
-
-        # 多数投票
         counter = Counter(self._window)
         most_common_id, most_common_count = counter.most_common(1)[0]
-
         if most_common_count >= self.min_count:
-            result = GestureType(most_common_id)
-            if result != self._last_output:
-                logger.info(
-                    f"手势切换: {self._last_output} → {result} "
-                    f"(票数: {most_common_count}/{self.window_size})"
-                )
-            self._last_output = result
-            return result
-        else:
-            # 票数不足，保持上一状态
-            logger.debug(
-                f"票数不足: {most_common_id}={most_common_count} "
-                f"< {self.min_count}，保持 {self._last_output}"
-            )
-            return self._last_output
+            self._last_output = GestureType(int(most_common_id))
+        return self._last_output
 
     def reset(self) -> None:
-        """重置投票窗口和状态"""
         self._window.clear()
         self._last_output = None
 
     @property
     def current_gesture(self) -> Optional[GestureType]:
-        """当前输出的手势"""
         return self._last_output
 
     @property
-    def window_state(self) -> list:
-        """当前窗口内容"""
+    def window_state(self) -> list[int]:
         return list(self._window)
+
+
+class TemporalVoter:
+    """Time-window voter used by the new runtime controller."""
+
+    def __init__(
+        self,
+        history_window_ms: int = 400,
+        hysteresis_count: int = 3,
+        num_classes: int = NUM_CLASSES,
+    ):
+        del num_classes
+        self.history_window_sec = max(0.0, float(history_window_ms) / 1000.0)
+        self.hysteresis_count = max(1, int(hysteresis_count))
+        self._window: deque[tuple[float, int]] = deque()
+        self._last_output: Optional[int] = None
+
+    def update(self, gesture_id: int, confidence: float, now: float) -> Optional[int]:
+        del confidence
+        self._window.append((float(now), int(gesture_id)))
+        cutoff = float(now) - self.history_window_sec
+        while self._window and self._window[0][0] < cutoff:
+            self._window.popleft()
+        if not self._window:
+            return self._last_output
+        counts = Counter(label for _, label in self._window)
+        most_common_id, most_common_count = counts.most_common(1)[0]
+        if most_common_count >= self.hysteresis_count:
+            self._last_output = int(most_common_id)
+        return self._last_output

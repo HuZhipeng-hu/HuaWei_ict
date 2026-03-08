@@ -1,172 +1,65 @@
-"""
-Unit tests for CSV dataset loader.
-"""
-
-import os
-import shutil
-import sys
-import uuid
-from contextlib import contextmanager
+import csv
 from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from shared.preprocessing.stft import PreprocessPipeline
+from shared.config import PreprocessConfig, QualityFilterConfig
 from training.data.csv_dataset import CSVDatasetLoader
 
 
-TEST_TMP_ROOT = Path(__file__).resolve().parent / ".tmp_testdata"
+def _write_csv(path: Path, arr: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["ch1", "ch2", "ch3", "ch4", "ch5", "ch6"])
+        for row in arr:
+            writer.writerow([float(x) for x in row])
 
 
-@contextmanager
-def _managed_temp_dir(prefix: str = "csv_loader_"):
-    """
-    Create test temp directories inside the workspace.
-    This avoids system-temp permission issues seen on some Windows setups.
-    """
-    TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    tmp_path = TEST_TMP_ROOT / f"{prefix}{os.getpid()}_{uuid.uuid4().hex[:8]}"
-    tmp_path.mkdir(parents=True, exist_ok=False)
-    try:
-        yield str(tmp_path)
-    finally:
-        shutil.rmtree(tmp_path, ignore_errors=True)
-        if TEST_TMP_ROOT.exists() and not any(TEST_TMP_ROOT.iterdir()):
-            TEST_TMP_ROOT.rmdir()
+def _make_signal(length: int, amp: float) -> np.ndarray:
+    t = np.linspace(0, 2 * np.pi, length, dtype=np.float32)
+    sig = np.stack([amp * np.sin(t + i) for i in range(6)], axis=1)
+    return sig.astype(np.float32)
 
 
-def _create_test_data(tmpdir: str, num_files: int = 3, num_rows: int = 600):
-    gestures = ["Relax", "fist", "Pinch", "ok", "ye", "Sidegrip"]
+def test_quality_filter_removes_low_energy_windows(tmp_path: Path):
+    gestures = {"RELAX": 0, "FIST": 1}
+    cfg = PreprocessConfig()
+    cfg.dual_branch.enabled = True
 
-    for gesture in gestures:
-        gesture_dir = os.path.join(tmpdir, gesture)
-        os.makedirs(gesture_dir, exist_ok=True)
+    weak = np.zeros((420, 6), dtype=np.float32)
+    strong = _make_signal(420, 30.0)
 
-        for i in range(num_files):
-            csv_path = os.path.join(gesture_dir, f"test_{i}.csv")
-            with open(csv_path, "w", encoding="utf-8") as f:
-                f.write(
-                    "emg1,emg2,emg3,emg4,emg5,emg6,emg7,emg8,"
-                    "acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z\n"
-                )
-                for _ in range(num_rows):
-                    emg = np.random.randint(100, 160, size=8)
-                    imu = np.random.randn(6) * 100
-                    values = list(emg) + list(imu.astype(int))
-                    f.write(",".join(str(v) for v in values) + "\n")
+    _write_csv(tmp_path / "RELAX" / "user1_session1_20260101.csv", weak)
+    _write_csv(tmp_path / "FIST" / "user1_session1_20260101.csv", strong)
 
+    qf = QualityFilterConfig(enabled=True, energy_min=2.0, clip_ratio_max=0.5, static_std_max=0.1)
+    loader = CSVDatasetLoader(tmp_path, gestures, cfg, quality_filter=qf)
+    samples, labels, source_ids, metadata = loader.load_all_with_sources(return_metadata=True)
 
-def test_scan_folders():
-    with _managed_temp_dir() as tmpdir:
-        _create_test_data(tmpdir, num_files=2)
+    assert samples.ndim == 4
+    assert len(labels) > 0
+    assert all(m["recording_id"] for m in metadata)
 
-        pipeline = PreprocessPipeline(sampling_rate=200, num_channels=6)
-        loader = CSVDatasetLoader(
-            data_dir=tmpdir,
-            preprocess=pipeline,
-            num_emg_channels=8,
-        )
-
-        stats = loader.get_stats()
-        assert stats["total_files"] == 12, f"expected 12 files, got {stats}"
-        assert len(loader.gesture_folders) == 6
+    report = loader.get_quality_report()
+    assert report["quality"]["filtered_total"] >= 1
+    assert report["quality"]["kept_windows"] == len(labels)
 
 
-def test_load_all():
-    with _managed_temp_dir() as tmpdir:
-        _create_test_data(tmpdir, num_files=2, num_rows=600)
+def test_multi_phase_expands_samples(tmp_path: Path):
+    gestures = {"RELAX": 0}
+    cfg = PreprocessConfig()
+    cfg.dual_branch.enabled = True
+    cfg.dual_branch.multi_phase_offsets = [0.0, 0.5]
+    qf = QualityFilterConfig(enabled=False)
 
-        pipeline = PreprocessPipeline(sampling_rate=200, num_channels=6)
-        loader = CSVDatasetLoader(
-            data_dir=tmpdir,
-            preprocess=pipeline,
-            num_emg_channels=8,
-            device_sampling_rate=1000,
-            target_sampling_rate=200,
-            segment_length=100,
-            segment_stride=50,
-        )
+    sig = _make_signal(700, 20.0)
+    _write_csv(tmp_path / "RELAX" / "user1_session2_20260102.csv", sig)
 
-        samples, labels = loader.load_all()
-        assert samples.ndim == 4
-        assert samples.shape[1] == 6
-        assert labels.ndim == 1
-        assert len(samples) == len(labels)
-        assert len(np.unique(labels)) == 6, "expected 6 classes"
+    loader = CSVDatasetLoader(tmp_path, gestures, cfg, quality_filter=qf)
+    samples, labels, source_ids = loader.load_all_with_sources()
+    assert samples.shape[0] >= 2
+    assert samples.shape[1:] == (12, 24, 6)
+    assert labels.shape[0] == samples.shape[0]
+    assert source_ids.shape[0] == samples.shape[0]
 
-        print(f"  loaded {len(samples)} samples, shape={samples.shape}")
-
-
-def test_split():
-    samples = np.random.randn(100, 6, 24, 13).astype(np.float32)
-    labels = np.array([i % 6 for i in range(100)], dtype=np.int32)
-
-    (train_s, train_l), (val_s, val_l) = CSVDatasetLoader.split(
-        samples, labels, val_ratio=0.2
-    )
-
-    assert len(train_s) + len(val_s) == 100
-    assert len(train_l) + len(val_l) == 100
-    for c in range(6):
-        assert np.sum(train_l == c) > 0
-        assert np.sum(val_l == c) > 0
-
-
-def test_load_all_dual_branch_multi_phase():
-    with _managed_temp_dir() as tmpdir:
-        _create_test_data(tmpdir, num_files=2, num_rows=620)
-
-        pipeline = PreprocessPipeline(
-            sampling_rate=200,
-            num_channels=6,
-            device_sampling_rate=1000,
-            segment_length=84,
-            segment_stride=42,
-            dual_branch={
-                "enabled": True,
-                "fuse_mode": "concat_channels",
-                "low_rate": 200,
-                "high_rate": 1000,
-                "high_segment_length": 420,
-                "high_segment_stride": 210,
-                "high_stft_window_size": 120,
-                "high_stft_hop_size": 60,
-                "high_stft_n_fft": 230,
-                "high_freq_bins_out": 24,
-                "multi_phase_offsets": [0.0, 0.33, 0.66],
-            },
-        )
-        loader = CSVDatasetLoader(
-            data_dir=tmpdir,
-            preprocess=pipeline,
-            num_emg_channels=8,
-            device_sampling_rate=1000,
-            target_sampling_rate=200,
-            segment_length=84,
-            segment_stride=42,
-        )
-
-        samples, labels, source_ids = loader.load_all_with_sources()
-        assert len(samples) == len(labels) == len(source_ids)
-        assert samples.shape[1:] == (12, 24, 6)
-        assert len(samples) > 12  # dual + multi-phase should produce > 1 sample per file on average
-
-
-if __name__ == "__main__":
-    tests = [test_scan_folders, test_load_all, test_split, test_load_all_dual_branch_multi_phase]
-
-    passed = 0
-    failed = 0
-    for test in tests:
-        try:
-            test()
-            print(f"  [PASS] {test.__name__}")
-            passed += 1
-        except Exception as exc:
-            print(f"  [FAIL] {test.__name__}: {exc}")
-            failed += 1
-
-    print(f"\nResult: {passed} passed, {failed} failed")
-    sys.exit(1 if failed else 0)

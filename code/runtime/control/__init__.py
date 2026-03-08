@@ -1,6 +1,8 @@
-"""
-控制子模块
-"""
+﻿"""Control package exports."""
 
-from .controller import ProsthesisController
-from .state_machine import SystemStateMachine, SystemState
+from .controller import RuntimeController
+from .state_machine import SystemState, SystemStateMachine
+
+ProsthesisController = RuntimeController
+
+__all__ = ["RuntimeController", "ProsthesisController", "SystemStateMachine", "SystemState"]

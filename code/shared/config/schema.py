@@ -1,37 +1,26 @@
-﻿"""
-Typed configuration schema and YAML loading helpers.
-"""
+﻿"""Configuration schema and loaders used by training/runtime/conversion."""
 
 from __future__ import annotations
 
-import logging
-import os
-from dataclasses import MISSING, asdict, dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Type, TypeVar, Union, get_args, get_origin, get_type_hints
 
-yaml: Any = None
+import yaml
 
-try:
-    import yaml
-
-    YAML_AVAILABLE = True
-except ImportError:
-    YAML_AVAILABLE = False
-
-from ..gestures import NUM_CLASSES
-
-logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 @dataclass
 class ModelConfig:
     model_type: str = "standard"
-    in_channels: int = 6
-    num_classes: int = NUM_CLASSES
+    in_channels: int = 12
+    num_classes: int = 6
     base_channels: int = 16
     use_se: bool = True
     dropout_rate: float = 0.3
+    hidden_dim: int = 64
+    num_layers: int = 2
 
 
 @dataclass
@@ -42,43 +31,95 @@ class DualBranchConfig:
     high_rate: int = 1000
     high_segment_length: int = 420
     high_segment_stride: int = 210
-    high_stft_window_size: int = 120
-    high_stft_hop_size: int = 60
+    high_stft_window: int = 120
+    high_stft_hop: int = 60
     high_stft_n_fft: int = 230
     high_freq_bins_out: int = 24
-    multi_phase_offsets: list[float] = field(default_factory=lambda: [0.0, 0.33, 0.66])
+    multi_phase_offsets: List[float] = field(default_factory=lambda: [0.0, 0.33, 0.66])
+
+    @property
+    def high_stft_window_size(self) -> int:
+        return int(self.high_stft_window)
+
+    @property
+    def high_stft_hop_size(self) -> int:
+        return int(self.high_stft_hop)
 
 
 @dataclass
 class PreprocessConfig:
-    sampling_rate: float = 200.0
+    sampling_rate: int = 200
     num_channels: int = 6
-    total_channels: int = 8
-
-    device_sampling_rate: int = 1000
-
     lowcut: float = 20.0
     highcut: float = 90.0
     filter_order: int = 4
-
-    stft_window_size: int = 24
-    stft_hop_size: int = 12
-    stft_n_fft: int = 46
-
-    segment_length: int = 84
-    segment_stride: int = 42
+    device_sampling_rate: int = 1000
+    target_length: int = 420
+    overlap: float = 0.5
+    stft_window: int = 120
+    stft_hop: int = 60
+    n_fft: int = 230
+    freq_bins_out: int = 24
+    normalize: str = "log"
+    clip_min: float = 0.0
+    clip_max: float = 10.0
     dual_branch: DualBranchConfig = field(default_factory=DualBranchConfig)
+
+    @property
+    def segment_length(self) -> int:
+        return int(self.target_length)
+
+    @property
+    def segment_stride(self) -> int:
+        stride = int(round(self.target_length * max(0.0, 1.0 - float(self.overlap))))
+        return max(1, stride)
+
+    @property
+    def stft_window_size(self) -> int:
+        return int(self.stft_window)
+
+    @property
+    def stft_hop_size(self) -> int:
+        return int(self.stft_hop)
+
+    @property
+    def stft_n_fft(self) -> int:
+        return int(self.n_fft)
+
+    @property
+    def total_channels(self) -> int:
+        return int(self.num_channels)
 
 
 @dataclass
-class AugmentationConfig:
+class LossConfig:
+    type: str = "cb_focal"
+    focal_gamma: float = 1.5
+    class_balance_beta: float = 0.999
+
+
+@dataclass
+class SamplerConfig:
+    type: str = "balanced"
+    hard_mining_ratio: float = 0.3
+    confusion_pairs: List[List[Union[str, int]]] = field(
+        default_factory=lambda: [["FIST", "PINCH"], ["YE", "SIDEGRIP"], ["OK", "RELAX"]]
+    )
+
+
+@dataclass
+class EMAConfig:
     enabled: bool = True
-    time_warp_rate: float = 0.1
-    amplitude_scale: float = 0.15
-    noise_std: float = 0.05
-    augment_factor: int = 5
-    use_mixup: bool = True
-    mixup_alpha: float = 0.2
+    decay: float = 0.999
+
+
+@dataclass
+class QualityFilterConfig:
+    enabled: bool = True
+    energy_min: float = 2.5
+    clip_ratio_max: float = 0.08
+    saturation_abs: float = 126.0
+    static_std_max: float = 0.5
 
 
 @dataclass
@@ -87,49 +128,68 @@ class TrainingConfig:
     batch_size: int = 16
     learning_rate: float = 0.001
     weight_decay: float = 1e-4
-
-    lr_scheduler: str = "cosine"
-    warmup_epochs: int = 3
-    lr_step_size: int = 10
-    lr_gamma: float = 0.5
-
-    gradient_clip: float = 1.0
     label_smoothing: float = 0.1
-    early_stop_patience: int = 12
-
+    warmup_epochs: int = 5
+    early_stopping_patience: int = 12
+    split_seed: int = 42
     val_ratio: float = 0.2
     test_ratio: float = 0.2
-    split_mode: str = "grouped_file"  # legacy | grouped_file
-    split_manifest_path: Optional[str] = None
-    split_seed: int = 42
-    kfold: int = 0
+    kfold: Optional[int] = None
+    num_workers: int = 2
+    loss: LossConfig = field(default_factory=LossConfig)
+    sampler: SamplerConfig = field(default_factory=SamplerConfig)
+    ema: EMAConfig = field(default_factory=EMAConfig)
+    quality_filter: QualityFilterConfig = field(default_factory=QualityFilterConfig)
 
-    device: str = "CPU"
 
-    checkpoint_dir: str = "checkpoints"
-    log_dir: str = "logs"
+@dataclass
+class DataConfig:
+    split_mode: str = "grouped_file"
+    split_manifest_path: str = "artifacts/splits/default_split_manifest.json"
+    quality_filter: QualityFilterConfig = field(default_factory=QualityFilterConfig)
+
+
+@dataclass
+class AugmentationConfig:
+    enabled: bool = True
+    augment_factor: int = 5
+    noise_std: float = 0.02
+    temporal_shift_max: int = 2
+    scale_min: float = 0.9
+    scale_max: float = 1.1
+    use_mixup: bool = True
+    mixup_alpha: float = 0.2
 
 
 @dataclass
 class InferenceConfig:
-    model_path: str = "models/neurogrip.mindir"
-    device: str = "CPU"
-    num_threads: int = 4
+    confidence_threshold: float = 0.8
+    smoothing_window_ms: int = 400
+    hysteresis_count: int = 3
+    tta_offsets: List[float] = field(default_factory=lambda: [0.0, 0.33, 0.66])
+    use_lite: bool = True
+
+
+@dataclass
+class DeviceConfig:
+    target: str = "CPU"
+    id: int = 0
+    sampling_rate: int = 1000
 
 
 @dataclass
 class HardwareConfig:
     sensor_mode: str = "armband"
+    actuator_mode: str = "pca9685"
     sensor_port: Optional[str] = None
     sensor_baudrate: int = 115200
-    armband_sampling_rate: int = 1000
     sensor_buffer_size: int = 2000
-
-    actuator_mode: str = "standalone"
+    armband_sampling_rate: int = 1000
+    target_sampling_rate: int = 200
     actuator_i2c_bus: int = 1
     actuator_i2c_address: int = 0x40
     actuator_frequency: int = 50
-
+    actuator_channels: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
     servo_angle_open: float = 0.0
     servo_angle_half: float = 90.0
     servo_angle_closed: float = 180.0
@@ -137,186 +197,164 @@ class HardwareConfig:
 
 @dataclass
 class RuntimeConfig:
-    model: ModelConfig = field(default_factory=ModelConfig)
+    model_path: str = "models/neurogrip_6g.mindir"
+    gestures_path: str = "gestures.yaml"
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
+    device: DeviceConfig = field(default_factory=DeviceConfig)
     hardware: HardwareConfig = field(default_factory=HardwareConfig)
+    control_rate_hz: float = 50.0
+    infer_rate_hz: float = 20.0
 
-    vote_window_size: int = 5
-    vote_min_count: int = 3
-    confidence_threshold: float = 0.5
-
-    control_rate_hz: float = 30.0
-    infer_rate_hz: float = 0.0
-
-
-def _merge_dict(base: dict, override: dict) -> dict:
-    result = base.copy()
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _merge_dict(result[key], value)
-        else:
-            result[key] = value
-    return result
+    def __post_init__(self) -> None:
+        self.hardware.armband_sampling_rate = int(self.device.sampling_rate)
+        self.hardware.target_sampling_rate = int(self.preprocess.sampling_rate)
 
 
-def _apply_env_vars(config_dict: dict) -> dict:
-    result = {}
-    for key, value in config_dict.items():
+@dataclass
+class ConversionConfig:
+    checkpoint_path: str = "checkpoints/neurogrip_best.ckpt"
+    output_path: str = "models/neurogrip_6g.mindir"
+    input_shape: List[int] = field(default_factory=lambda: [1, 12, 24, 6])
+    mindir_version: str = "latest"
+
+
+def load_config(path: Union[str, Path]) -> Dict[str, Any]:
+    """Load a YAML file into a plain dictionary."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data or {}
+
+
+def _coerce_scalar(value: Any, expected_type: Type[Any]) -> Any:
+    if expected_type is bool and isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+    try:
+        return expected_type(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _convert_value(value: Any, annotation: Any) -> Any:
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    if annotation is Any:
+        return value
+
+    if origin is Union:
+        non_none = [arg for arg in args if arg is not type(None)]
+        if value is None and len(non_none) < len(args):
+            return None
+        if non_none:
+            return _convert_value(value, non_none[0])
+        return value
+
+    if is_dataclass(annotation):
+        if isinstance(value, annotation):
+            return value
         if isinstance(value, dict):
-            result[key] = _apply_env_vars(value)
-        elif isinstance(value, str) and value.startswith("$"):
-            result[key] = os.environ.get(value[1:], None)
-        else:
-            result[key] = value
-    return result
+            return _dict_to_dataclass(value, annotation)
+        return annotation()  # type: ignore[misc]
+
+    if origin in (list, List, Sequence, tuple, Tuple):
+        inner = args[0] if args else Any
+        if not isinstance(value, (list, tuple)):
+            return []
+        converted = [_convert_value(v, inner) for v in value]
+        if origin in (tuple, Tuple):
+            return tuple(converted)
+        return converted
+
+    if annotation in (int, float, str, bool):
+        return _coerce_scalar(value, annotation)
+
+    return value
 
 
-def _dict_to_dataclass(cls, data: dict):
-    if not isinstance(data, dict):
-        return data
-
-    kwargs = {}
-    for field_name, field_info in cls.__dataclass_fields__.items():
-        if field_name not in data:
+def _dict_to_dataclass(data: Dict[str, Any], cls: Type[T]) -> T:
+    type_hints = get_type_hints(cls)
+    kwargs: Dict[str, Any] = {}
+    for f in fields(cls):
+        if f.name not in data:
             continue
-        value = data[field_name]
-        nested_cls = None
-        field_type = field_info.type
-        if hasattr(field_type, "__dataclass_fields__"):
-            nested_cls = field_type
-        elif field_info.default_factory is not MISSING:
-            try:
-                default_instance = field_info.default_factory()
-            except TypeError:
-                default_instance = None
-            if default_instance is not None and hasattr(default_instance, "__dataclass_fields__"):
-                nested_cls = type(default_instance)
-
-        if isinstance(value, dict) and nested_cls is not None:
-            kwargs[field_name] = _dict_to_dataclass(nested_cls, value)
-        else:
-            kwargs[field_name] = value
+        annotation = type_hints.get(f.name, f.type)
+        kwargs[f.name] = _convert_value(data[f.name], annotation)
     return cls(**kwargs)
 
 
-def load_config(yaml_path: str, config_class=None) -> Any:
-    if not YAML_AVAILABLE:
-        raise ImportError("PyYAML is not installed. Run: pip install pyyaml")
-    assert yaml is not None
-
-    path = Path(yaml_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {yaml_path}")
-
-    with open(path, "r", encoding="utf-8") as f:
-        raw_config = yaml.safe_load(f) or {}
-
-    config_dict = _apply_env_vars(raw_config)
-    if config_class is None:
-        return config_dict
-    return _dict_to_dataclass(config_class, config_dict)
-
-
-def save_config(config, yaml_path: str) -> None:
-    if not YAML_AVAILABLE:
-        raise ImportError("PyYAML is not installed. Run: pip install pyyaml")
-    assert yaml is not None
-
-    if hasattr(config, "__dataclass_fields__"):
-        config_dict = asdict(config)
-    else:
-        config_dict = dict(config)
-
-    config_dict = _filter_sensitive(config_dict)
-
-    path = Path(yaml_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.dump(
-            config_dict,
-            f,
-            default_flow_style=False,
-            allow_unicode=True,
-            sort_keys=False,
-        )
-
-
-def _filter_sensitive(d: dict) -> dict:
-    sensitive_keywords = {"key", "secret", "password", "token", "credential"}
-    result = {}
-    for key, value in d.items():
-        if any(kw in key.lower() for kw in sensitive_keywords):
-            result[key] = "***FILTERED***"
-        elif isinstance(value, dict):
-            result[key] = _filter_sensitive(value)
-        else:
-            result[key] = value
-    return result
-
-
-def _resolve_training_config_sections(raw: Dict[str, Any]) -> Dict[str, Any]:
-    training_section = dict(raw.get("training", {}))
-    data_section = dict(raw.get("data", {}))
-
-    # New canonical location: data.*
-    # Keep backward compatibility: if both provided, data.* wins.
-    for key in ("split_mode", "test_ratio", "split_manifest_path"):
-        if key in data_section:
-            training_section[key] = data_section[key]
-
-    if "seed" in data_section:
-        training_section["split_seed"] = data_section["seed"]
-
-    return training_section
-
-
-def load_training_config(yaml_path: str):
+def _resolve_training_config_sections(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Load training config and return:
-    (ModelConfig, PreprocessConfig, TrainingConfig, AugmentationConfig)
+    Keep backward compatibility:
+    - Prefer nested sections: model/preprocess/training/augmentation/data
+    - Fallback to flattened keys at root if nested section is absent
     """
-    try:
-        raw = load_config(yaml_path)
-    except FileNotFoundError:
-        logger.warning("Config file not found: %s, use defaults", yaml_path)
-        return ModelConfig(), PreprocessConfig(), TrainingConfig(), AugmentationConfig()
+    root = data or {}
+    training_section = dict(root.get("training", {}))
+    data_section = dict(root.get("data", {}))
 
-    if not isinstance(raw, dict):
-        return ModelConfig(), PreprocessConfig(), TrainingConfig(), AugmentationConfig()
+    if "quality_filter" in data_section and "quality_filter" not in training_section:
+        training_section["quality_filter"] = data_section["quality_filter"]
 
-    training_section = _resolve_training_config_sections(raw)
-
-    return (
-        _dict_to_dataclass(ModelConfig, raw.get("model", {})),
-        _dict_to_dataclass(PreprocessConfig, raw.get("preprocess", {})),
-        _dict_to_dataclass(TrainingConfig, training_section),
-        _dict_to_dataclass(AugmentationConfig, raw.get("augmentation", {})),
-    )
+    return {
+        "model": root.get("model", root),
+        "preprocess": root.get("preprocess", root),
+        "training": training_section if training_section else root,
+        "augmentation": root.get("augmentation", root),
+        "data": data_section if data_section else root,
+    }
 
 
-def load_runtime_config(yaml_path: str) -> RuntimeConfig:
-    try:
-        raw = load_config(yaml_path)
-    except FileNotFoundError:
-        logger.warning("Config file not found: %s, use defaults", yaml_path)
-        return RuntimeConfig()
+def _resolve_runtime_config_sections(data: Dict[str, Any]) -> Dict[str, Any]:
+    root = dict(data or {})
+    inference_section = dict(root.get("inference", {}))
+    device_section = dict(root.get("device", {}))
+    hardware_section = dict(root.get("hardware", {}))
 
-    if not isinstance(raw, dict):
-        return RuntimeConfig()
+    legacy_device = inference_section.pop("device", None)
+    if legacy_device is not None and "target" not in device_section:
+        device_section["target"] = legacy_device
 
-    runtime_section = raw.get("runtime", {}) if isinstance(raw.get("runtime", {}), dict) else {}
-    infer_rate_hz = runtime_section.get("infer_rate_hz", raw.get("infer_rate_hz", 0.0))
+    if "sampling_rate" in device_section and "armband_sampling_rate" not in hardware_section:
+        hardware_section["armband_sampling_rate"] = device_section["sampling_rate"]
 
-    return RuntimeConfig(
-        model=_dict_to_dataclass(ModelConfig, raw.get("model", {})),
-        preprocess=_dict_to_dataclass(PreprocessConfig, raw.get("preprocess", {})),
-        inference=_dict_to_dataclass(InferenceConfig, raw.get("inference", {})),
-        hardware=_dict_to_dataclass(HardwareConfig, raw.get("hardware", {})),
-        vote_window_size=raw.get("vote_window_size", 5),
-        vote_min_count=raw.get("vote_min_count", 3),
-        confidence_threshold=raw.get("confidence_threshold", 0.5),
-        control_rate_hz=raw.get("control_rate_hz", 30.0),
-        infer_rate_hz=float(infer_rate_hz),
-    )
+    return {
+        "model_path": root.get("model_path", "models/neurogrip_6g.mindir"),
+        "gestures_path": root.get("gestures_path", "gestures.yaml"),
+        "preprocess": root.get("preprocess", {}),
+        "inference": inference_section,
+        "device": device_section,
+        "hardware": hardware_section,
+        "control_rate_hz": root.get("control_rate_hz", 50.0),
+        "infer_rate_hz": root.get("infer_rate_hz", 20.0),
+    }
+
+
+def load_training_config(path: Union[str, Path]) -> tuple[ModelConfig, PreprocessConfig, TrainingConfig, AugmentationConfig]:
+    data = load_config(path)
+    sections = _resolve_training_config_sections(data)
+    model = _dict_to_dataclass(sections["model"], ModelConfig)
+    preprocess = _dict_to_dataclass(sections["preprocess"], PreprocessConfig)
+    training = _dict_to_dataclass(sections["training"], TrainingConfig)
+    augmentation = _dict_to_dataclass(sections["augmentation"], AugmentationConfig)
+    return model, preprocess, training, augmentation
+
+
+def load_training_data_config(path: Union[str, Path]) -> DataConfig:
+    data = load_config(path)
+    sections = _resolve_training_config_sections(data)
+    return _dict_to_dataclass(sections["data"], DataConfig)
+
+
+def load_runtime_config(path: Union[str, Path]) -> RuntimeConfig:
+    data = load_config(path)
+    return _dict_to_dataclass(_resolve_runtime_config_sections(data), RuntimeConfig)
+
+
+def load_conversion_config(path: Union[str, Path]) -> ConversionConfig:
+    data = load_config(path)
+    return _dict_to_dataclass(data, ConversionConfig)
