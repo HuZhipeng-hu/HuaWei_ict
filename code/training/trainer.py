@@ -237,11 +237,7 @@ class Trainer:
 
         self._ema = ModelEMA(config.ema.decay) if config.ema.enabled else None
 
-        self.optimizer = nn.AdamWeightDecay(
-            self.model.trainable_params(),
-            learning_rate=Tensor(config.learning_rate, ms.float32),
-            weight_decay=config.weight_decay,
-        )
+        self.optimizer = None
         self.loss_fn_ce = nn.SoftmaxCrossEntropyWithLogits(sparse=True, reduction="mean")
         self.loss_fn: nn.Cell | None = None
         self.train_step = None
@@ -281,6 +277,21 @@ class Trainer:
                 lr = base * 0.5 * (1.0 + np.cos(np.pi * progress))
             lrs.append(float(lr))
         return lrs
+
+    def _build_optimizer(self, steps_per_epoch: int):
+        if steps_per_epoch <= 0:
+            raise ValueError("Training dataset is empty; cannot build optimizer with zero steps per epoch.")
+
+        lr_schedule = self._build_lr(steps_per_epoch)
+        if not lr_schedule:
+            raise ValueError("Learning-rate schedule is empty; check training epochs and batch size.")
+
+        optimizer = nn.AdamWeightDecay(
+            self.model.trainable_params(),
+            learning_rate=lr_schedule,
+            weight_decay=float(self.config.weight_decay),
+        )
+        return optimizer, lr_schedule
 
     def _build_train_dataset_for_epoch(
         self,
@@ -333,8 +344,7 @@ class Trainer:
     ) -> Dict[str, List[float]]:
         self.loss_fn = self._build_loss(train_labels)
         steps_per_epoch = int(np.ceil(len(train_labels) / self.config.batch_size))
-        lr_schedule = self._build_lr(steps_per_epoch)
-        self.optimizer.learning_rate = Tensor(np.asarray(lr_schedule, dtype=np.float32))
+        self.optimizer, lr_schedule = self._build_optimizer(steps_per_epoch)
         self.train_step = nn.TrainOneStepCell(nn.WithLossCell(self.model, self.loss_fn), self.optimizer)
         self.train_step.set_train(True)
 
@@ -442,3 +452,4 @@ class Trainer:
             self._ema.restore(self.model, backup)
         else:
             save_checkpoint(self.model, str(self.checkpoint_path))
+
