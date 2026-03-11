@@ -1,0 +1,40 @@
+model_path: models/neurogrip_6g.mindir
+gestures_path: gestures.yaml
+
+inference:
+  confidence_threshold: 0.8
+  smoothing_window_ms: 400
+  hysteresis_count: 3
+  tta_offsets: [0.0, 0.33, 0.66]
+  infer_rate_hz: 20.0
+
+preprocess:
+  sampling_rate: 200
+  num_channels: 8
+  target_length: 420
+  overlap: 0.5
+  stft_window: 120
+  stft_hop: 60
+  n_fft: 230
+  freq_bins_out: 24
+  normalize: log
+  clip_min: 0.0
+  clip_max: 10.0
+  dual_branch:
+    enabled: true
+    fuse_mode: concat_channels
+    low_rate: 200
+    high_rate: 1000
+    high_segment_length: 420
+    high_segment_stride: 210
+    high_stft_window: 120
+    high_stft_hop: 60
+    high_stft_n_fft: 230
+    high_freq_bins_out: 24
+    multi_phase_offsets: [0.0, 0.33, 0.66]
+
+device:
+  target: CPU
+  id: 0
+  # Runtime采样链路保持原始1000Hz，低频分支降采样在预处理内部完成
+  sampling_rate: 1000

@@ -1,0 +1,739 @@
+# ===============================================================================================
+# The following shows the last analyze fail log message.
+# ===============================================================================================
+
+----------------------------------------------------
+- Caught exception:
+----------------------------------------------------
+The types of arguments in Map must be consistent, but the types of arguments are inconsistent.
+There are 4 inputs of `map`, corresponding type info:
+In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 28~113
+                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)
+                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.
+The type of the second argument in Map is: Tuple[Bool*24].
+The type of the third argument in Map is: Tuple[Ref[Tensor[Float32]]*24].
+The type of the 4th argument in Map is: Tensor[Float32].
+
+----------------------------------------------------
+- C++ Call Stack: (For framework developers)
+----------------------------------------------------
+mindspore/ccsrc/frontend/operator/composite/map.cc:239 Make
+
+----------------------------------------------------
+- The Traceback of Net Construct Code:
+----------------------------------------------------
+# 0 In file /home/ma-user/work/try1/code/training/trainer.py:152, 36~65
+            loss = ops.depend(loss, self.optimizer(clipped_grads))
+                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 1 In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:797~798, 8~64
+        if not self.use_offload:
+# 2 In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:798, 12~64
+            gradients = self.gradients_centralization(gradients)
+            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 3 In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:796, 20~48
+        gradients = self.decay_weight(gradients)
+                    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 4 In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:402~408, 8~113
+        if self.exec_weight_decay:
+# 5 In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:405~408, 12~113
+            if self.is_group:
+# 6 In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 16~113
+                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)
+                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# 7 In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:403~408, 12~113
+            params = self._parameters
+# 8 In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 28~113
+                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)
+                            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# ===============================================================================================
+# The following shows the IR when the function graphs evaluation fails to help locate the problem.
+# You can search the last ------------------------> to the node which is evaluated failure.
+# Refer to https://www.mindspore.cn/search?inputValue=analyze_fail.ir to get more instructions.
+# ===============================================================================================
+
+# IR entry: @training_trainer__TrainOneStepWithClip_construct_32
+# Total subgraphs: 0
+
+# Attrs:
+compile_phase: train.1772418516129422080.281469000665040.0...0
+
+# Total params: 90
+# Params:
+%para1_inputs0: <null>
+%para2_inputs1: <null>
+%para3_block1.branch_1x1.0.weight: <Ref[Tensor[Float32]], (16, 6, 1, 1), ref_key=block1.branch_1x1.0.weight, is_parameter>  :  has_default
+%para4_block1.branch_1x1.1.gamma: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_1x1.1.gamma, is_parameter, is_inplace>  :  has_default
+%para5_block1.branch_1x1.1.beta: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_1x1.1.beta, is_parameter, is_inplace>  :  has_default
+%para6_block1.branch_1x1.1.moving_mean: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_1x1.1.moving_mean, is_parameter, is_inplace>  :  has_default
+%para7_block1.branch_1x1.1.moving_variance: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_1x1.1.moving_variance, is_parameter, is_inplace>  :  has_default
+%para8_block1.branch_3x3.0.weight: <Ref[Tensor[Float32]], (16, 6, 3, 3), ref_key=block1.branch_3x3.0.weight, is_parameter>  :  has_default
+%para9_block1.branch_3x3.1.gamma: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_3x3.1.gamma, is_parameter, is_inplace>  :  has_default
+%para10_block1.branch_3x3.1.beta: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_3x3.1.beta, is_parameter, is_inplace>  :  has_default
+%para11_block1.branch_3x3.1.moving_mean: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_3x3.1.moving_mean, is_parameter, is_inplace>  :  has_default
+%para12_block1.branch_3x3.1.moving_variance: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_3x3.1.moving_variance, is_parameter, is_inplace>  :  has_default
+%para13_block1.branch_5x5.0.weight: <Ref[Tensor[Float32]], (16, 6, 5, 5), ref_key=block1.branch_5x5.0.weight, is_parameter>  :  has_default
+%para14_block1.branch_5x5.1.gamma: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_5x5.1.gamma, is_parameter, is_inplace>  :  has_default
+%para15_block1.branch_5x5.1.beta: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_5x5.1.beta, is_parameter, is_inplace>  :  has_default
+%para16_block1.branch_5x5.1.moving_mean: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_5x5.1.moving_mean, is_parameter, is_inplace>  :  has_default
+%para17_block1.branch_5x5.1.moving_variance: <Ref[Tensor[Float32]], (16), ref_key=block1.branch_5x5.1.moving_variance, is_parameter, is_inplace>  :  has_default
+%para18_block1.se.excitation.0.weight: <Ref[Tensor[Float32]], (12, 48), ref_key=block1.se.excitation.0.weight, is_parameter>  :  has_default
+%para19_block1.se.excitation.2.weight: <Ref[Tensor[Float32]], (48, 12), ref_key=block1.se.excitation.2.weight, is_parameter>  :  has_default
+%para20_block2.branch_1x1.0.weight: <Ref[Tensor[Float32]], (32, 48, 1, 1), ref_key=block2.branch_1x1.0.weight, is_parameter>  :  has_default
+%para21_block2.branch_1x1.1.gamma: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_1x1.1.gamma, is_parameter, is_inplace>  :  has_default
+%para22_block2.branch_1x1.1.beta: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_1x1.1.beta, is_parameter, is_inplace>  :  has_default
+%para23_block2.branch_1x1.1.moving_mean: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_1x1.1.moving_mean, is_parameter, is_inplace>  :  has_default
+%para24_block2.branch_1x1.1.moving_variance: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_1x1.1.moving_variance, is_parameter, is_inplace>  :  has_default
+%para25_block2.branch_3x3.0.weight: <Ref[Tensor[Float32]], (32, 48, 3, 3), ref_key=block2.branch_3x3.0.weight, is_parameter>  :  has_default
+%para26_block2.branch_3x3.1.gamma: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_3x3.1.gamma, is_parameter, is_inplace>  :  has_default
+%para27_block2.branch_3x3.1.beta: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_3x3.1.beta, is_parameter, is_inplace>  :  has_default
+%para28_block2.branch_3x3.1.moving_mean: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_3x3.1.moving_mean, is_parameter, is_inplace>  :  has_default
+%para29_block2.branch_3x3.1.moving_variance: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_3x3.1.moving_variance, is_parameter, is_inplace>  :  has_default
+%para30_block2.branch_5x5.0.weight: <Ref[Tensor[Float32]], (32, 48, 5, 5), ref_key=block2.branch_5x5.0.weight, is_parameter>  :  has_default
+%para31_block2.branch_5x5.1.gamma: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_5x5.1.gamma, is_parameter, is_inplace>  :  has_default
+%para32_block2.branch_5x5.1.beta: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_5x5.1.beta, is_parameter, is_inplace>  :  has_default
+%para33_block2.branch_5x5.1.moving_mean: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_5x5.1.moving_mean, is_parameter, is_inplace>  :  has_default
+%para34_block2.branch_5x5.1.moving_variance: <Ref[Tensor[Float32]], (32), ref_key=block2.branch_5x5.1.moving_variance, is_parameter, is_inplace>  :  has_default
+%para35_block2.se.excitation.0.weight: <Ref[Tensor[Float32]], (24, 96), ref_key=block2.se.excitation.0.weight, is_parameter>  :  has_default
+%para36_block2.se.excitation.2.weight: <Ref[Tensor[Float32]], (96, 24), ref_key=block2.se.excitation.2.weight, is_parameter>  :  has_default
+%para37_classifier.weight: <Ref[Tensor[Float32]], (6, 96), ref_key=classifier.weight, is_parameter>  :  has_default
+%para38_classifier.bias: <Ref[Tensor[Float32]], (6), ref_key=classifier.bias, is_parameter>  :  has_default
+%para39_global_step: <Ref[Tensor[Int32]], (1), ref_key=global_step, is_parameter, is_inplace>  :  has_default
+%para40_beta1_power: <Ref[Tensor[Float32]], (), ref_key=beta1_power, is_parameter, is_inplace>  :  has_default
+%para41_beta2_power: <Ref[Tensor[Float32]], (), ref_key=beta2_power, is_parameter>  :  has_default
+%para42_moment1.block1.branch_1x1.0.weight: <Ref[Tensor[Float32]], (16, 6, 1, 1), ref_key=moment1.block1.branch_1x1.0.weight, is_parameter>  :  has_default
+%para43_moment1.block1.branch_1x1.1.gamma: <Ref[Tensor[Float32]], (16), ref_key=moment1.block1.branch_1x1.1.gamma, is_parameter>  :  has_default
+%para44_moment1.block1.branch_1x1.1.beta: <Ref[Tensor[Float32]], (16), ref_key=moment1.block1.branch_1x1.1.beta, is_parameter>  :  has_default
+%para45_moment1.block1.branch_3x3.0.weight: <Ref[Tensor[Float32]], (16, 6, 3, 3), ref_key=moment1.block1.branch_3x3.0.weight, is_parameter>  :  has_default
+%para46_moment1.block1.branch_3x3.1.gamma: <Ref[Tensor[Float32]], (16), ref_key=moment1.block1.branch_3x3.1.gamma, is_parameter>  :  has_default
+%para47_moment1.block1.branch_3x3.1.beta: <Ref[Tensor[Float32]], (16), ref_key=moment1.block1.branch_3x3.1.beta, is_parameter>  :  has_default
+%para48_moment1.block1.branch_5x5.0.weight: <Ref[Tensor[Float32]], (16, 6, 5, 5), ref_key=moment1.block1.branch_5x5.0.weight, is_parameter>  :  has_default
+%para49_moment1.block1.branch_5x5.1.gamma: <Ref[Tensor[Float32]], (16), ref_key=moment1.block1.branch_5x5.1.gamma, is_parameter>  :  has_default
+%para50_moment1.block1.branch_5x5.1.beta: <Ref[Tensor[Float32]], (16), ref_key=moment1.block1.branch_5x5.1.beta, is_parameter>  :  has_default
+%para51_moment1.block1.se.excitation.0.weight: <Ref[Tensor[Float32]], (12, 48), ref_key=moment1.block1.se.excitation.0.weight, is_parameter>  :  has_default
+%para52_moment1.block1.se.excitation.2.weight: <Ref[Tensor[Float32]], (48, 12), ref_key=moment1.block1.se.excitation.2.weight, is_parameter>  :  has_default
+%para53_moment1.block2.branch_1x1.0.weight: <Ref[Tensor[Float32]], (32, 48, 1, 1), ref_key=moment1.block2.branch_1x1.0.weight, is_parameter>  :  has_default
+%para54_moment1.block2.branch_1x1.1.gamma: <Ref[Tensor[Float32]], (32), ref_key=moment1.block2.branch_1x1.1.gamma, is_parameter>  :  has_default
+%para55_moment1.block2.branch_1x1.1.beta: <Ref[Tensor[Float32]], (32), ref_key=moment1.block2.branch_1x1.1.beta, is_parameter>  :  has_default
+%para56_moment1.block2.branch_3x3.0.weight: <Ref[Tensor[Float32]], (32, 48, 3, 3), ref_key=moment1.block2.branch_3x3.0.weight, is_parameter>  :  has_default
+%para57_moment1.block2.branch_3x3.1.gamma: <Ref[Tensor[Float32]], (32), ref_key=moment1.block2.branch_3x3.1.gamma, is_parameter>  :  has_default
+%para58_moment1.block2.branch_3x3.1.beta: <Ref[Tensor[Float32]], (32), ref_key=moment1.block2.branch_3x3.1.beta, is_parameter>  :  has_default
+%para59_moment1.block2.branch_5x5.0.weight: <Ref[Tensor[Float32]], (32, 48, 5, 5), ref_key=moment1.block2.branch_5x5.0.weight, is_parameter>  :  has_default
+%para60_moment1.block2.branch_5x5.1.gamma: <Ref[Tensor[Float32]], (32), ref_key=moment1.block2.branch_5x5.1.gamma, is_parameter>  :  has_default
+%para61_moment1.block2.branch_5x5.1.beta: <Ref[Tensor[Float32]], (32), ref_key=moment1.block2.branch_5x5.1.beta, is_parameter>  :  has_default
+%para62_moment1.block2.se.excitation.0.weight: <Ref[Tensor[Float32]], (24, 96), ref_key=moment1.block2.se.excitation.0.weight, is_parameter>  :  has_default
+%para63_moment1.block2.se.excitation.2.weight: <Ref[Tensor[Float32]], (96, 24), ref_key=moment1.block2.se.excitation.2.weight, is_parameter>  :  has_default
+%para64_moment1.classifier.weight: <Ref[Tensor[Float32]], (6, 96), ref_key=moment1.classifier.weight, is_parameter>  :  has_default
+%para65_moment1.classifier.bias: <Ref[Tensor[Float32]], (6), ref_key=moment1.classifier.bias, is_parameter>  :  has_default
+%para66_moment2.block1.branch_1x1.0.weight: <Ref[Tensor[Float32]], (16, 6, 1, 1), ref_key=moment2.block1.branch_1x1.0.weight, is_parameter>  :  has_default
+%para67_moment2.block1.branch_1x1.1.gamma: <Ref[Tensor[Float32]], (16), ref_key=moment2.block1.branch_1x1.1.gamma, is_parameter>  :  has_default
+%para68_moment2.block1.branch_1x1.1.beta: <Ref[Tensor[Float32]], (16), ref_key=moment2.block1.branch_1x1.1.beta, is_parameter>  :  has_default
+%para69_moment2.block1.branch_3x3.0.weight: <Ref[Tensor[Float32]], (16, 6, 3, 3), ref_key=moment2.block1.branch_3x3.0.weight, is_parameter>  :  has_default
+%para70_moment2.block1.branch_3x3.1.gamma: <Ref[Tensor[Float32]], (16), ref_key=moment2.block1.branch_3x3.1.gamma, is_parameter>  :  has_default
+%para71_moment2.block1.branch_3x3.1.beta: <Ref[Tensor[Float32]], (16), ref_key=moment2.block1.branch_3x3.1.beta, is_parameter>  :  has_default
+%para72_moment2.block1.branch_5x5.0.weight: <Ref[Tensor[Float32]], (16, 6, 5, 5), ref_key=moment2.block1.branch_5x5.0.weight, is_parameter>  :  has_default
+%para73_moment2.block1.branch_5x5.1.gamma: <Ref[Tensor[Float32]], (16), ref_key=moment2.block1.branch_5x5.1.gamma, is_parameter>  :  has_default
+%para74_moment2.block1.branch_5x5.1.beta: <Ref[Tensor[Float32]], (16), ref_key=moment2.block1.branch_5x5.1.beta, is_parameter>  :  has_default
+%para75_moment2.block1.se.excitation.0.weight: <Ref[Tensor[Float32]], (12, 48), ref_key=moment2.block1.se.excitation.0.weight, is_parameter>  :  has_default
+%para76_moment2.block1.se.excitation.2.weight: <Ref[Tensor[Float32]], (48, 12), ref_key=moment2.block1.se.excitation.2.weight, is_parameter>  :  has_default
+%para77_moment2.block2.branch_1x1.0.weight: <Ref[Tensor[Float32]], (32, 48, 1, 1), ref_key=moment2.block2.branch_1x1.0.weight, is_parameter>  :  has_default
+%para78_moment2.block2.branch_1x1.1.gamma: <Ref[Tensor[Float32]], (32), ref_key=moment2.block2.branch_1x1.1.gamma, is_parameter>  :  has_default
+%para79_moment2.block2.branch_1x1.1.beta: <Ref[Tensor[Float32]], (32), ref_key=moment2.block2.branch_1x1.1.beta, is_parameter>  :  has_default
+%para80_moment2.block2.branch_3x3.0.weight: <Ref[Tensor[Float32]], (32, 48, 3, 3), ref_key=moment2.block2.branch_3x3.0.weight, is_parameter>  :  has_default
+%para81_moment2.block2.branch_3x3.1.gamma: <Ref[Tensor[Float32]], (32), ref_key=moment2.block2.branch_3x3.1.gamma, is_parameter>  :  has_default
+%para82_moment2.block2.branch_3x3.1.beta: <Ref[Tensor[Float32]], (32), ref_key=moment2.block2.branch_3x3.1.beta, is_parameter>  :  has_default
+%para83_moment2.block2.branch_5x5.0.weight: <Ref[Tensor[Float32]], (32, 48, 5, 5), ref_key=moment2.block2.branch_5x5.0.weight, is_parameter>  :  has_default
+%para84_moment2.block2.branch_5x5.1.gamma: <Ref[Tensor[Float32]], (32), ref_key=moment2.block2.branch_5x5.1.gamma, is_parameter>  :  has_default
+%para85_moment2.block2.branch_5x5.1.beta: <Ref[Tensor[Float32]], (32), ref_key=moment2.block2.branch_5x5.1.beta, is_parameter>  :  has_default
+%para86_moment2.block2.se.excitation.0.weight: <Ref[Tensor[Float32]], (24, 96), ref_key=moment2.block2.se.excitation.0.weight, is_parameter>  :  has_default
+%para87_moment2.block2.se.excitation.2.weight: <Ref[Tensor[Float32]], (96, 24), ref_key=moment2.block2.se.excitation.2.weight, is_parameter>  :  has_default
+%para88_moment2.classifier.weight: <Ref[Tensor[Float32]], (6, 96), ref_key=moment2.classifier.weight, is_parameter>  :  has_default
+%para89_moment2.classifier.bias: <Ref[Tensor[Float32]], (6), ref_key=moment2.classifier.bias, is_parameter>  :  has_default
+%para90_learning_rate: <Ref[Tensor[Float32]], (7920), ref_key=learning_rate, is_parameter>  :  has_default
+
+subgraph attr:
+compile_phase: train.1772418516129422080.281469000665040.0...0
+subgraph instance: training_trainer__TrainOneStepWithClip_construct_32 : 0x3f02ff00
+# In file /home/ma-user/work/try1/code/training/trainer.py:139~154, 8~23/        def construct(self, *inputs):/
+subgraph @training_trainer__TrainOneStepWithClip_construct_32() {
+  %0(CNode_45) = resolve(NameSpace[Entry: 'training.trainer._TrainOneStepWithClip.construct'], training.trainer._TrainOneStepWithClip.construct)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+  %1(CNode_46) = MakeTuple(%para1_inputs0, %para2_inputs1)
+      : (<Tensor[Float32], (16, 6, 24, 6)>, <Tensor[Int32], (16)>) -> (<Tuple[Tensor[Float32],Tensor[Int32]], TupleShape((16, 6, 24, 6), (16))>)
+      #scope: (Default)
+
+#------------------------> 0
+  %2(CNode_47) = DoUnpackCall(%0, %1)
+      : (<Func, NoShape>, <Tuple[Tensor[Float32],Tensor[Int32]], TupleShape((16, 6, 24, 6), (16))>) -> (<null>)
+      #scope: (Default)
+  Return(%2)
+      : (<null>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:154, 12~23/            return loss/
+}
+# Order:
+#   1: @training_trainer__TrainOneStepWithClip_construct_32:CNode_45{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> Entry: 'training.trainer._TrainOneStepWithClip.construct', [2]: ValueNode<Symbol> training.trainer._TrainOneStepWithClip.construct}
+#   2: @training_trainer__TrainOneStepWithClip_construct_32:CNode_47{[0]: ValueNode<Primitive> DoUnpackCall, [1]: CNode_45, [2]: CNode_46}
+#   3: @training_trainer__TrainOneStepWithClip_construct_32:CNode_48{[0]: ValueNode<Primitive> Return, [1]: CNode_47}
+
+
+subgraph attr:
+core: 1
+subgraph instance: UnpackCall_33 : 0x3f036b20
+
+subgraph @UnpackCall_33(%para0_Parameter_34, %para0_Parameter_35) {
+  %0(CNode_49) = TupleGetItem(%para0_Parameter_35, I64(0))
+      : (<Tuple[Tensor[Float32],Tensor[Int32]], TupleShape((16, 6, 24, 6), (16))>, <Int64, NoShape>) -> (<Tensor[Float32], (16, 6, 24, 6)>)
+      #scope: (Default)
+  %1(CNode_50) = TupleGetItem(%para0_Parameter_35, I64(1))
+      : (<Tuple[Tensor[Float32],Tensor[Int32]], TupleShape((16, 6, 24, 6), (16))>, <Int64, NoShape>) -> (<Tensor[Int32], (16)>)
+      #scope: (Default)
+
+#------------------------> 1
+  %2(CNode_51) = Parameter_34(%0, %1)
+      : (<Tensor[Float32], (16, 6, 24, 6)>, <Tensor[Int32], (16)>) -> (<null>)
+      #scope: (Default)
+  Return(%2)
+      : (<null>)
+      #scope: (Default)
+}
+# Order:
+#   1: @UnpackCall_33:CNode_51{[0]: param_Parameter_34, [1]: CNode_49, [2]: CNode_50}
+#   2: @UnpackCall_33:CNode_52{[0]: ValueNode<Primitive> Return, [1]: CNode_51}
+
+
+subgraph attr:
+compile_phase: train.1772418516129422080.281469000665040.0...0
+subgraph instance: training_trainer__TrainOneStepWithClip_construct_36 : 0x3f07de70
+# In file /home/ma-user/work/try1/code/training/trainer.py:139~154, 8~23/        def construct(self, *inputs):/
+subgraph @training_trainer__TrainOneStepWithClip_construct_36(%para0_inputs0, %para0_inputs1) {
+  %0(CNode_53) = resolve(NameSpace[SymbolStr: 'Namespace:training.trainer'], ops)
+      : (<External, NoShape>, <External, NoShape>) -> (<External, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:141, 19~22/            sens = ops.ones_like(loss)/
+  %1(CNode_54) = getattr(%0, "depend")
+      : (<External, NoShape>, <String, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:152, 19~29/            loss = ops.depend(loss, self.optimizer(clipped_grads))/
+  %2(CNode_55) = getattr(%0, "depend")
+      : (<External, NoShape>, <String, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:149, 19~29/            loss = ops.depend(loss, global_norm)/
+  %3(CNode_56) = resolve(NameSpace[ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>'], network)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:140, 19~31/            loss = self.network(*inputs)/
+  %4(CNode_57) = MakeTuple(%para0_inputs0, %para0_inputs1)
+      : (<Tensor[Float32], (16, 6, 24, 6)>, <Tensor[Int32], (16)>) -> (<Tuple[Tensor[Float32],Tensor[Int32]], TupleShape((16, 6, 24, 6), (16))>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:139, 29~35/        def construct(self, *inputs):/
+  %5(loss) = DoUnpackCall(%3, %4)
+      : (<Func, NoShape>, <Tuple[Tensor[Float32],Tensor[Int32]], TupleShape((16, 6, 24, 6), (16))>) -> (<Tensor[Float32], ()>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:140, 19~40/            loss = self.network(*inputs)/
+  %6(CNode_58) = resolve(NameSpace[CommonOPS: 'Namespace:mindspore._extends.parse.trope'], getitem)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:146, 12~80/            clipped_grads, global_norm = self.clip_op(grads, self.max_grad_norm)/
+  %7(CNode_59) = resolve(NameSpace[ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>'], clip_op)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:146, 41~53/            clipped_grads, global_norm = self.clip_op(grads, self.max_grad_norm)/
+  %8(CNode_60) = resolve(NameSpace[ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>'], grad_reducer)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:143, 20~37/            grads = self.grad_reducer(grads)/
+  %9(CNode_61) = resolve(NameSpace[ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>'], grad)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:142, 20~29/            grads = self.grad(self.network, self.weights)(*inputs, sens)/
+  %10(CNode_62) = resolve(NameSpace[ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>'], network)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:142, 30~42/            grads = self.grad(self.network, self.weights)(*inputs, sens)/
+  %11(CNode_63) = resolve(NameSpace[ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>'], weights)
+      : (<External, NoShape>, <External, NoShape>) -> (<Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:142, 44~56/            grads = self.grad(self.network, self.weights)(*inputs, sens)/
+  %12(CNode_64) = %9(%10, %11)
+      : (<Func, NoShape>, <Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:142, 20~57/            grads = self.grad(self.network, self.weights)(*inputs, sens)/
+  %13(CNode_65) = resolve(NameSpace[CommonOPS: 'Namespace:mindspore._extends.parse.trope'], MakeTuple)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:142, 20~72/            grads = self.grad(self.network, self.weights)(*inputs, sens)/
+  %14(CNode_66) = getattr(%0, "ones_like")
+      : (<External, NoShape>, <String, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:141, 19~32/            sens = ops.ones_like(loss)/
+  %15(sens) = %14(%5)
+      : (<Tensor[Float32], ()>) -> (<Tensor[Float32], ()>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:141, 19~38/            sens = ops.ones_like(loss)/
+  %16(CNode_67) = %13(%15)
+      : (<Tensor[Float32], ()>) -> (<Tuple[Tensor[Float32]], TupleShape(())>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:142, 20~72/            grads = self.grad(self.network, self.weights)(*inputs, sens)/
+  %17(grads) = DoUnpackCall(%12, %4, %16)
+      : (<Func, NoShape>, <Tuple[Tensor[Float32],Tensor[Int32]], TupleShape((16, 6, 24, 6), (16))>, <Tuple[Tensor[Float32]], TupleShape(())>) -> (<Tuple[Tensor[Float32]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:142, 20~72/            grads = self.grad(self.network, self.weights)(*inputs, sens)/
+  %18(grads) = %8(%17)
+      : (<Tuple[Tensor[Float32]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>) -> (<Tuple[Tensor[Float32]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:143, 20~44/            grads = self.grad_reducer(grads)/
+  %19(CNode_68) = resolve(NameSpace[ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>'], max_grad_norm)
+      : (<External, NoShape>, <External, NoShape>) -> (<Float32, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:146, 61~79/            clipped_grads, global_norm = self.clip_op(grads, self.max_grad_norm)/
+  %20(CNode_69) = %7(%18, %19)
+      : (<Tuple[Tensor[Float32]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>, <Float32, NoShape>) -> (<Tuple[Tensor[Float32]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:146, 41~80/            clipped_grads, global_norm = self.clip_op(grads, self.max_grad_norm)/
+  %21(global_norm) = %6(%20, I64(1))
+      : (<Tuple[Tensor[Float32]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>, <Int64, NoShape>) -> (<Tensor[Float32], (16)>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:146, 12~80/            clipped_grads, global_norm = self.clip_op(grads, self.max_grad_norm)/
+  %22(loss) = %2(%5, %21)
+      : (<Tensor[Float32], ()>, <Tensor[Float32], (16)>) -> (<Tensor[Float32], ()>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:149, 19~48/            loss = ops.depend(loss, global_norm)/
+  %23(CNode_70) = resolve(NameSpace[ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>'], optimizer)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:152, 36~50/            loss = ops.depend(loss, self.optimizer(clipped_grads))/
+  %24(clipped_grads) = %6(%20, I64(0))
+      : (<Tuple[Tensor[Float32]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>, <Int64, NoShape>) -> (<Tensor[Float32], (16, 6, 1, 1)>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:146, 12~80/            clipped_grads, global_norm = self.clip_op(grads, self.max_grad_norm)/
+
+#------------------------> 2
+  %25(CNode_71) = %23(%24)
+      : (<Tensor[Float32], (16, 6, 1, 1)>) -> (<null>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:152, 36~65/            loss = ops.depend(loss, self.optimizer(clipped_grads))/
+  %26(loss) = %1(%22, %25)
+      : (<Tensor[Float32], ()>, <null>) -> (<null>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:152, 19~66/            loss = ops.depend(loss, self.optimizer(clipped_grads))/
+  Return(%26)
+      : (<null>)
+      #scope: (Default)
+      # In file /home/ma-user/work/try1/code/training/trainer.py:154, 12~23/            return loss/
+}
+# Order:
+#   1: @training_trainer__TrainOneStepWithClip_construct_36:CNode_56{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>', [2]: ValueNode<Symbol> network}
+#   2: @training_trainer__TrainOneStepWithClip_construct_36:loss{[0]: ValueNode<Primitive> DoUnpackCall, [1]: CNode_56, [2]: CNode_57}
+#   3: @training_trainer__TrainOneStepWithClip_construct_36:CNode_53{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> SymbolStr: 'Namespace:training.trainer', [2]: ValueNode<Symbol> ops}
+#   4: @training_trainer__TrainOneStepWithClip_construct_36:CNode_66{[0]: ValueNode<Primitive> getattr, [1]: CNode_53, [2]: ValueNode<StringImm> ones_like}
+#   5: @training_trainer__TrainOneStepWithClip_construct_32:CNode_72{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#   6: @training_trainer__TrainOneStepWithClip_construct_36:sens{[0]: CNode_66, [1]: loss}
+#   7: @training_trainer__TrainOneStepWithClip_construct_36:CNode_61{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>', [2]: ValueNode<Symbol> grad}
+#   8: @training_trainer__TrainOneStepWithClip_construct_36:CNode_62{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>', [2]: ValueNode<Symbol> network}
+#   9: @training_trainer__TrainOneStepWithClip_construct_36:CNode_63{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>', [2]: ValueNode<Symbol> weights}
+#  10: @training_trainer__TrainOneStepWithClip_construct_32:CNode_73{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#  11: @training_trainer__TrainOneStepWithClip_construct_36:CNode_64{[0]: CNode_61, [1]: CNode_62, [2]: CNode_63}
+#  12: @training_trainer__TrainOneStepWithClip_construct_36:CNode_65{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#  13: @training_trainer__TrainOneStepWithClip_construct_36:CNode_67{[0]: CNode_65, [1]: sens}
+#  14: @training_trainer__TrainOneStepWithClip_construct_36:CNode_74{[0]: ValueNode<UnpackGraphPrimitive> UnpackGraph, [1]: CNode_62, [2]: CNode_57, [3]: CNode_67}
+#  15: @training_trainer__TrainOneStepWithClip_construct_36:grads{[0]: ValueNode<Primitive> DoUnpackCall, [1]: CNode_64, [2]: CNode_57, [3]: CNode_67}
+#  16: @training_trainer__TrainOneStepWithClip_construct_36:CNode_60{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>', [2]: ValueNode<Symbol> grad_reducer}
+#  17: @training_trainer__TrainOneStepWithClip_construct_32:CNode_75{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#  18: @training_trainer__TrainOneStepWithClip_construct_36:grads{[0]: CNode_60, [1]: grads}
+#  19: @training_trainer__TrainOneStepWithClip_construct_36:CNode_59{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>', [2]: ValueNode<Symbol> clip_op}
+#  20: @training_trainer__TrainOneStepWithClip_construct_36:CNode_68{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>', [2]: ValueNode<Symbol> max_grad_norm}
+#  21: @training_trainer__TrainOneStepWithClip_construct_32:CNode_76{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#  22: @training_trainer__TrainOneStepWithClip_construct_36:CNode_69{[0]: CNode_59, [1]: grads, [2]: CNode_68}
+#  23: @training_trainer__TrainOneStepWithClip_construct_36:CNode_58{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> getitem}
+#  24: @training_trainer__TrainOneStepWithClip_construct_36:clipped_grads{[0]: CNode_58, [1]: CNode_69, [2]: ValueNode<Int64Imm> 0}
+#  25: @training_trainer__TrainOneStepWithClip_construct_36:global_norm{[0]: CNode_58, [1]: CNode_69, [2]: ValueNode<Int64Imm> 1}
+#  26: @training_trainer__TrainOneStepWithClip_construct_36:CNode_55{[0]: ValueNode<Primitive> getattr, [1]: CNode_53, [2]: ValueNode<StringImm> depend}
+#  27: @training_trainer__TrainOneStepWithClip_construct_32:CNode_77{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#  28: @training_trainer__TrainOneStepWithClip_construct_36:loss{[0]: CNode_55, [1]: loss, [2]: global_norm}
+#  29: @training_trainer__TrainOneStepWithClip_construct_36:CNode_54{[0]: ValueNode<Primitive> getattr, [1]: CNode_53, [2]: ValueNode<StringImm> depend}
+#  30: @training_trainer__TrainOneStepWithClip_construct_36:CNode_70{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:training.trainer..<_TrainOneStepWithClip::281469000665040>', [2]: ValueNode<Symbol> optimizer}
+#  31: @training_trainer__TrainOneStepWithClip_construct_32:CNode_78{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#  32: @training_trainer__TrainOneStepWithClip_construct_36:CNode_71{[0]: CNode_70, [1]: clipped_grads}
+#  33: @training_trainer__TrainOneStepWithClip_construct_32:CNode_79{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#  34: @training_trainer__TrainOneStepWithClip_construct_36:loss{[0]: CNode_54, [1]: loss, [2]: CNode_71}
+#  35: @training_trainer__TrainOneStepWithClip_construct_36:CNode_80{[0]: ValueNode<Primitive> Return, [1]: loss}
+
+
+subgraph attr:
+skip_auto_parallel_compile: 1
+subgraph instance: mindspore_nn_optim_adam_Adam_construct_37 : 0x40b4e660
+# In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:791~809, 4~98/    @jit/
+subgraph @mindspore_nn_optim_adam_Adam_construct_37(%para0_gradients) {
+
+#------------------------> 3
+  %0(CNode_81) = call @✓mindspore_nn_optim_adam_Adam_construct_38()
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:797~798, 8~64/        if not self.use_offload:/
+  Return(%0)
+      : (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:797~798, 8~64/        if not self.use_offload:/
+}
+# Order:
+#   1: @mindspore_nn_optim_adam_Adam_construct_37:params{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> _parameters}
+#   2: @mindspore_nn_optim_adam_Adam_construct_37:moment1{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> moment1}
+#   3: @mindspore_nn_optim_adam_Adam_construct_37:moment2{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> moment2}
+#   4: @mindspore_nn_optim_adam_Adam_construct_37:CNode_82{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> decay_weight}
+#   5: @mindspore_nn_optim_adam_Adam_construct_37:CNode_83{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#   7: @mindspore_nn_optim_adam_Adam_construct_37:gradients{[0]: CNode_82, [1]: param_gradients}
+#   8: @mindspore_nn_optim_adam_Adam_construct_37:CNode_81{[0]: ValueNode<FuncGraph> ✓mindspore_nn_optim_adam_Adam_construct_38}
+#   9: @mindspore_nn_optim_adam_Adam_construct_37:CNode_84{[0]: ValueNode<Primitive> Return, [1]: CNode_81}
+#  10: @mindspore_nn_optim_adam_Adam_construct_37:CNode_85{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> gradients_centralization}
+#  11: @mindspore_nn_optim_adam_Adam_construct_37:CNode_86{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> scale_grad}
+#  12: @mindspore_nn_optim_adam_Adam_construct_37:CNode_87{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> _grad_sparse_indices_deduplicate}
+#  13: @mindspore_nn_optim_adam_Adam_construct_37:CNode_88{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> get_lr}
+#  14: @mindspore_nn_optim_adam_Adam_construct_37:CNode_89{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> global_step}
+#  15: @mindspore_nn_optim_adam_Adam_construct_37:CNode_90{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> global_step_increase_tensor}
+#  16: @mindspore_nn_optim_adam_Adam_construct_37:CNode_91{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> beta1_power}
+#  17: @mindspore_nn_optim_adam_Adam_construct_37:CNode_92{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> beta1}
+#  18: @mindspore_nn_optim_adam_Adam_construct_37:CNode_93{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> beta2_power}
+#  19: @mindspore_nn_optim_adam_Adam_construct_37:CNode_94{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> beta2}
+#  20: @mindspore_nn_optim_adam_Adam_construct_37:CNode_95{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> _apply_adam}
+
+
+subgraph attr:
+skip_auto_parallel_compile: 1
+subgraph instance: ✓mindspore_nn_optim_adam_Adam_construct_38 : 0x40b562d0
+# In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:791~809, 4~98/    @jit/
+subgraph @✓mindspore_nn_optim_adam_Adam_construct_38 parent: [subgraph @mindspore_nn_optim_adam_Adam_construct_37]() {
+
+#------------------------> 4
+  %0(CNode_96) = call @↓mindspore_nn_optim_adam_Adam_construct_39()
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:798, 12~64/            gradients = self.gradients_centralization(gradients)/
+  Return(%0)
+      : (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:798, 12~64/            gradients = self.gradients_centralization(gradients)/
+}
+# Order:
+#   1: @✓mindspore_nn_optim_adam_Adam_construct_38:CNode_97{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#   3: @✓mindspore_nn_optim_adam_Adam_construct_38:gradients{[0]: CNode_85, [1]: gradients}
+#   4: @✓mindspore_nn_optim_adam_Adam_construct_38:CNode_96{[0]: ValueNode<FuncGraph> ↓mindspore_nn_optim_adam_Adam_construct_39}
+#   5: @✓mindspore_nn_optim_adam_Adam_construct_38:CNode_98{[0]: ValueNode<Primitive> Return, [1]: CNode_96}
+
+
+subgraph attr:
+skip_auto_parallel_compile: 1
+subgraph instance: ↓mindspore_nn_optim_adam_Adam_construct_39 : 0x40b57360
+# In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:791~809, 4~98/    @jit/
+subgraph @↓mindspore_nn_optim_adam_Adam_construct_39 parent: [subgraph @✓mindspore_nn_optim_adam_Adam_construct_38]() {
+  %0(CNode_99) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], assignadd)
+      : (<External, NoShape>, <External, NoShape>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:802, 8~22/        self.assignadd(self.global_step, self.global_step_increase_tensor)/
+  %1(CNode_89) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], global_step)
+      : (<External, NoShape>, <External, NoShape>) -> (<Ref[Tensor[Int32]], (1)>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:802, 23~39/        self.assignadd(self.global_step, self.global_step_increase_tensor)/
+  %2(CNode_90) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], global_step_increase_tensor)
+      : (<External, NoShape>, <External, NoShape>) -> (<Tensor[Int32], (1)>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:802, 41~73/        self.assignadd(self.global_step, self.global_step_increase_tensor)/
+  %3(CNode_100) = %0(%1, %2)
+      : (<Ref[Tensor[Int32]], (1)>, <Tensor[Int32], (1)>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:802, 8~74/        self.assignadd(self.global_step, self.global_step_increase_tensor)/
+  %4(CNode_91) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], beta1_power)
+      : (<External, NoShape>, <External, NoShape>) -> (<Ref[Tensor[Float32]], ()>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:804, 22~38/        beta1_power = self.beta1_power * self.beta1/
+  %5(CNode_101) = resolve(NameSpace[Ast: 'Namespace:mindspore._extends.parse.trope'], mul)
+      : (<External, NoShape>, <External, NoShape>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:804, 22~51/        beta1_power = self.beta1_power * self.beta1/
+  %6(CNode_92) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], beta1)
+      : (<External, NoShape>, <External, NoShape>) -> (<Tensor[Float32], ()>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:804, 41~51/        beta1_power = self.beta1_power * self.beta1/
+  %7(beta1_power) = %5(%4, %6)
+      : (<Ref[Tensor[Float32]], ()>, <Tensor[Float32], ()>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:804, 22~51/        beta1_power = self.beta1_power * self.beta1/
+  %8(CNode_102) = call @assign_103(%4, %7)
+      : (<Ref[Tensor[Float32]], ()>, <null>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:805, 8~38/        self.beta1_power = beta1_power/
+  %9(CNode_93) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], beta2_power)
+      : (<External, NoShape>, <External, NoShape>) -> (<Ref[Tensor[Float32]], ()>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:806, 22~38/        beta2_power = self.beta2_power * self.beta2/
+  %10(CNode_104) = resolve(NameSpace[Ast: 'Namespace:mindspore._extends.parse.trope'], mul)
+      : (<External, NoShape>, <External, NoShape>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:806, 22~51/        beta2_power = self.beta2_power * self.beta2/
+  %11(CNode_94) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], beta2)
+      : (<External, NoShape>, <External, NoShape>) -> (<Tensor[Float32], ()>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:806, 41~51/        beta2_power = self.beta2_power * self.beta2/
+  %12(beta2_power) = %10(%9, %11)
+      : (<Ref[Tensor[Float32]], ()>, <Tensor[Float32], ()>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:806, 22~51/        beta2_power = self.beta2_power * self.beta2/
+  %13(CNode_105) = call @assign_103(%9, %12)
+      : (<Ref[Tensor[Float32]], ()>, <null>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:807, 8~38/        self.beta2_power = beta2_power/
+  %14(CNode_106) = MakeTuple(%3, %8, %13)
+      : (<null>, <null>, <null>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:791~809, 4~98/    @jit/
+  %15(CNode_107) = StopGradient(%14)
+      : (<null>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:791~809, 4~98/    @jit/
+  %16(CNode_95) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], _apply_adam)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:809, 15~31/        return self._apply_adam(params, beta1_power, beta2_power, moment1, moment2, lr, gradients)/
+  %17(params) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], _parameters)
+      : (<External, NoShape>, <External, NoShape>) -> (<Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:793, 17~33/        params = self._parameters/
+  %18(moment1) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], moment1)
+      : (<External, NoShape>, <External, NoShape>) -> (<Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:794, 18~30/        moment1 = self.moment1/
+  %19(moment2) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], moment2)
+      : (<External, NoShape>, <External, NoShape>) -> (<Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:795, 18~30/        moment2 = self.moment2/
+  %20(CNode_88) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], get_lr)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:801, 13~24/        lr = self.get_lr()/
+  %21(lr) = %20()
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:801, 13~26/        lr = self.get_lr()/
+  %22(CNode_87) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], _grad_sparse_indices_deduplicate)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:800, 20~57/        gradients = self._grad_sparse_indices_deduplicate(gradients)/
+  %23(CNode_86) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], scale_grad)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:799, 20~35/        gradients = self.scale_grad(gradients)/
+  %24(CNode_85) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], gradients_centralization)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:798, 24~53/            gradients = self.gradients_centralization(gradients)/
+  %25(CNode_82) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], decay_weight)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:796, 20~37/        gradients = self.decay_weight(gradients)/
+
+#------------------------> 5
+  %26(gradients) = %25(%para0_gradients)
+      : (<Tensor[Float32], (16, 6, 1, 1)>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:796, 20~48/        gradients = self.decay_weight(gradients)/
+  %27(gradients) = %24(%26)
+      : (<null>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:798, 24~64/            gradients = self.gradients_centralization(gradients)/
+  %28(gradients) = %23(%27)
+      : (<null>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:799, 20~46/        gradients = self.scale_grad(gradients)/
+  %29(gradients) = %22(%28)
+      : (<null>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:800, 20~68/        gradients = self._grad_sparse_indices_deduplicate(gradients)/
+  %30(CNode_108) = %16(%17, %7, %12, %18, %19, %21, %29)
+      : (<Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>, <null>, <null>, <Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>, <Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>, <null>, <null>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:809, 15~98/        return self._apply_adam(params, beta1_power, beta2_power, moment1, moment2, lr, gradients)/
+  %31(CNode_109) = Depend(%30, %15) primitive_attrs: {side_effect_propagate: I64(1)} cnode_attrs: {topo_sort_rhs_first: Bool(1)}
+      : (<null>, <null>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:809, 15~98/        return self._apply_adam(params, beta1_power, beta2_power, moment1, moment2, lr, gradients)/
+  Return(%31)
+      : (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/adam.py:809, 8~98/        return self._apply_adam(params, beta1_power, beta2_power, moment1, moment2, lr, gradients)/
+}
+# Order:
+#   1: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_110{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#   3: @↓mindspore_nn_optim_adam_Adam_construct_39:gradients{[0]: CNode_86, [1]: gradients}
+#   4: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_111{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#   6: @↓mindspore_nn_optim_adam_Adam_construct_39:gradients{[0]: CNode_87, [1]: gradients}
+#   7: @↓mindspore_nn_optim_adam_Adam_construct_39:lr{[0]: CNode_88}
+#   8: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_99{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> assignadd}
+#   9: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_112{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#  11: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_100{[0]: CNode_99, [1]: CNode_89, [2]: CNode_90}
+#  12: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_101{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> Ast: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> mul}
+#  13: @↓mindspore_nn_optim_adam_Adam_construct_39:beta1_power{[0]: CNode_101, [1]: CNode_91, [2]: CNode_92}
+#  14: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_102{[0]: ValueNode<FuncGraph> assign_103, [1]: CNode_91, [2]: beta1_power}
+#  15: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_104{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> Ast: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> mul}
+#  16: @↓mindspore_nn_optim_adam_Adam_construct_39:beta2_power{[0]: CNode_104, [1]: CNode_93, [2]: CNode_94}
+#  17: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_105{[0]: ValueNode<FuncGraph> assign_103, [1]: CNode_93, [2]: beta2_power}
+#  18: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_113{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#  20: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_108{[0]: CNode_95, [1]: params, [2]: beta1_power, [3]: beta2_power, [4]: moment1, [5]: moment2, [6]: lr, [7]: gradients}
+#  22: @↓mindspore_nn_optim_adam_Adam_construct_39:CNode_114{[0]: ValueNode<Primitive> Return, [1]: CNode_109}
+
+
+subgraph attr:
+skip_auto_parallel_compile: 1
+subgraph instance: decay_weight_40 : 0x40c68fb0
+# In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:389~410, 4~24/    def decay_weight(self, gradients):/
+subgraph @decay_weight_40(%para0_gradients) {
+
+#------------------------> 6
+  %0(CNode_115) = call @✓decay_weight_41()
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:402~408, 8~113/        if self.exec_weight_decay:/
+  Return(%0)
+      : (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:402~408, 8~113/        if self.exec_weight_decay:/
+}
+# Order:
+#   1: @decay_weight_40:CNode_115{[0]: ValueNode<FuncGraph> ✓decay_weight_41}
+#   2: @decay_weight_40:CNode_116{[0]: ValueNode<Primitive> Return, [1]: CNode_115}
+#   3: @decay_weight_40:params{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> _parameters}
+#   4: @decay_weight_40:CNode_117{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> get_weight_decay}
+#   5: @decay_weight_40:CNode_118{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> map_}
+#   6: @decay_weight_40:CNode_119{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> SymbolStr: 'Namespace:mindspore.nn.optim.optimizer', [2]: ValueNode<Symbol> F}
+#   7: @decay_weight_40:CNode_120{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> SymbolStr: 'Namespace:mindspore.nn.optim.optimizer', [2]: ValueNode<Symbol> _apply_decay}
+#   8: @decay_weight_40:CNode_121{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>', [2]: ValueNode<Symbol> decay_flags}
+
+
+subgraph attr:
+skip_auto_parallel_compile: 1
+subgraph instance: ✓decay_weight_41 : 0x40c69fb0
+# In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:389~410, 4~24/    def decay_weight(self, gradients):/
+subgraph @✓decay_weight_41 parent: [subgraph @decay_weight_40]() {
+
+#------------------------> 7
+  %0(CNode_122) = call @✗✓decay_weight_42()
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:405~408, 12~113/            if self.is_group:/
+  Return(%0)
+      : (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:405~408, 12~113/            if self.is_group:/
+}
+# Order:
+#   1: @✓decay_weight_41:weight_decay{[0]: CNode_117}
+#   2: @✓decay_weight_41:CNode_122{[0]: ValueNode<FuncGraph> ✗✓decay_weight_42}
+#   3: @✓decay_weight_41:CNode_123{[0]: ValueNode<Primitive> Return, [1]: CNode_122}
+
+
+subgraph attr:
+skip_auto_parallel_compile: 1
+subgraph instance: ✗✓decay_weight_42 : 0x40c6f280
+# In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:389~410, 4~24/    def decay_weight(self, gradients):/
+subgraph @✗✓decay_weight_42 parent: [subgraph @✓decay_weight_41]() {
+
+#------------------------> 8
+  %0(CNode_124) = call @↓✓decay_weight_43()
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 16~113/                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)/
+  Return(%0)
+      : (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 16~113/                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)/
+}
+# Order:
+#   1: @✗✓decay_weight_42:CNode_125{[0]: ValueNode<Primitive> getattr, [1]: CNode_119, [2]: ValueNode<StringImm> partial}
+#   2: @✗✓decay_weight_42:CNode_126{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#   4: @✗✓decay_weight_42:CNode_127{[0]: CNode_125, [1]: CNode_120, [2]: weight_decay}
+#   5: @✗✓decay_weight_42:CNode_128{[0]: ValueNode<Primitive> resolve, [1]: ValueNode<NameSpace> CommonOPS: 'Namespace:mindspore._extends.parse.trope', [2]: ValueNode<Symbol> MakeTuple}
+#   7: @✗✓decay_weight_42:gradients{[0]: CNode_118, [1]: CNode_127, [2]: CNode_121, [3]: params, [4]: param_gradients}
+#   8: @✗✓decay_weight_42:CNode_124{[0]: ValueNode<FuncGraph> ↓✓decay_weight_43}
+#   9: @✗✓decay_weight_42:CNode_129{[0]: ValueNode<Primitive> Return, [1]: CNode_124}
+
+
+subgraph attr:
+skip_auto_parallel_compile: 1
+subgraph instance: ↓✓decay_weight_43 : 0x40c703e0
+# In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:389~410, 4~24/    def decay_weight(self, gradients):/
+subgraph @↓✓decay_weight_43 parent: [subgraph @✗✓decay_weight_42]() {
+
+#------------------------> 9
+  %0(CNode_130) = call @↓decay_weight_44()
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:403~408, 12~113/            params = self._parameters/
+  Return(%0)
+      : (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:403~408, 12~113/            params = self._parameters/
+}
+# Order:
+#   1: @↓✓decay_weight_43:CNode_130{[0]: ValueNode<FuncGraph> ↓decay_weight_44}
+#   2: @↓✓decay_weight_43:CNode_131{[0]: ValueNode<Primitive> Return, [1]: CNode_130}
+
+
+subgraph attr:
+skip_auto_parallel_compile: 1
+subgraph instance: ↓decay_weight_44 : 0x40c6b100
+# In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:389~410, 4~24/    def decay_weight(self, gradients):/
+subgraph @↓decay_weight_44 parent: [subgraph @✗✓decay_weight_42]() {
+  %0(CNode_118) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], map_)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 28~37/                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)/
+  %1(CNode_119) = resolve(NameSpace[SymbolStr: 'Namespace:mindspore.nn.optim.optimizer'], F)
+      : (<External, NoShape>, <External, NoShape>) -> (<External, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 38~39/                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)/
+  %2(CNode_125) = getattr(%1, "partial")
+      : (<External, NoShape>, <String, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 38~47/                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)/
+  %3(CNode_120) = resolve(NameSpace[SymbolStr: 'Namespace:mindspore.nn.optim.optimizer'], _apply_decay)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 48~60/                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)/
+  %4(CNode_117) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], get_weight_decay)
+      : (<External, NoShape>, <External, NoShape>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:404, 27~48/            weight_decay = self.get_weight_decay()/
+  %5(weight_decay) = %4()
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:404, 27~50/            weight_decay = self.get_weight_decay()/
+  %6(CNode_127) = %2(%3, %5)
+      : (<Func, NoShape>, <Tensor[Float32], ()>) -> (<Func, NoShape>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 38~75/                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)/
+  %7(CNode_121) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], decay_flags)
+      : (<External, NoShape>, <External, NoShape>) -> (<Tuple[Bool*24], TupleShape(NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape)>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 77~93/                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)/
+  %8(params) = resolve(NameSpace[ClassMember: 'Namespace:mindspore.nn.optim.adam..<Adam::281469000020528>'], _parameters)
+      : (<External, NoShape>, <External, NoShape>) -> (<Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:403, 21~37/            params = self._parameters/
+
+#------------------------> 10
+  %9(gradients) = %0(%6, %7, %8, $(@decay_weight_40:para0_gradients))
+      : (<Func, NoShape>, <Tuple[Bool*24], TupleShape(NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape, NoShape)>, <Tuple[Ref[Tensor[Float32]]*24], TupleShape((16, 6, 1, 1), (16), (16), (16, 6, 3, 3), (16), (16), (16, 6, 5, 5), (16), (16), (12, 48), (48, 12), (32, 48, 1, 1), (32), (32), (32, 48, 3, 3), (32), (32), (32, 48, 5, 5), (32), (32), (24, 96), (96, 24), (6, 96), (6))>, <Tensor[Float32], (16, 6, 1, 1)>) -> (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:408, 28~113/                gradients = self.map_(F.partial(_apply_decay, weight_decay), self.decay_flags, params, gradients)/
+  Return(%9)
+      : (<null>)
+      #scope: (Default/optimizer-Adam)
+      # In file /home/ma-user/anaconda3/envs/MindSpore/lib/python3.11/site-packages/mindspore/nn/optim/optimizer.py:410, 8~24/        return gradients/
+}
+# Order:
+#   1: @↓decay_weight_44:CNode_132{[0]: ValueNode<Primitive> Return, [1]: gradients}
+
+
+# ===============================================================================================
+# The total of function graphs in evaluation stack: 11/13 (Ignored 2 internal frames).
+# ===============================================================================================
+
+
+# ===============================================================================================
+# The rest function graphs are the following:
+# ===============================================================================================
+No more function graphs.
+

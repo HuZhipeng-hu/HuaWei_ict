@@ -1,0 +1,17 @@
+{
+  "run_id": "local_benchmark_smoke",
+  "output_dir": "artifacts\\runs\\local_benchmark_smoke\\realtime_benchmark",
+  "outputs": {
+    "metrics_json": "artifacts\\runs\\local_benchmark_smoke\\realtime_benchmark\\realtime_metrics.json",
+    "per_class_csv": "artifacts\\runs\\local_benchmark_smoke\\realtime_benchmark\\realtime_per_class_metrics.csv",
+    "confusion_csv": "artifacts\\runs\\local_benchmark_smoke\\realtime_benchmark\\realtime_confusion_matrix.csv"
+  },
+  "decisions_csv": "artifacts\\runs\\local_benchmark_smoke\\realtime_benchmark\\realtime_decisions.csv",
+  "mock_mode": true,
+  "expected_input_shape": [
+    1,
+    12,
+    24,
+    6
+  ]
+}

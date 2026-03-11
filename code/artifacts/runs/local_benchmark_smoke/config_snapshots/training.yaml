@@ -1,0 +1,83 @@
+model:
+  model_type: standard
+  in_channels: 16
+  num_classes: 6
+  base_channels: 16
+  use_se: true
+  dropout_rate: 0.4
+  hidden_dim: 64
+  num_layers: 2
+
+preprocess:
+  sampling_rate: 200
+  num_channels: 8
+  target_length: 420
+  overlap: 0.5
+  stft_window: 120
+  stft_hop: 60
+  n_fft: 230
+  freq_bins_out: 24
+  normalize: log
+  clip_min: 0.0
+  clip_max: 10.0
+  dual_branch:
+    enabled: true
+    fuse_mode: concat_channels
+    low_rate: 200
+    high_rate: 1000
+    high_segment_length: 420
+    high_segment_stride: 210
+    high_stft_window: 120
+    high_stft_hop: 60
+    high_stft_n_fft: 230
+    high_freq_bins_out: 24
+    multi_phase_offsets: [0.0, 0.33, 0.66]
+
+training:
+  epochs: 80
+  batch_size: 16
+  learning_rate: 0.0005
+  weight_decay: 0.0003
+  label_smoothing: 0.05
+  warmup_epochs: 5
+  early_stopping_patience: 12
+  split_seed: 42
+  val_ratio: 0.2
+  test_ratio: 0.2
+  kfold: null
+  num_workers: 2
+  loss:
+    type: cb_focal
+    focal_gamma: 1.5
+    class_balance_beta: 0.999
+  sampler:
+    type: balanced
+    hard_mining_ratio: 0.3
+    confusion_pairs:
+      - [FIST, PINCH]
+      - [YE, SIDEGRIP]
+      - [OK, RELAX]
+  ema:
+    enabled: true
+    decay: 0.999
+
+data:
+  split_mode: grouped_file
+  split_manifest_path: artifacts/splits/default_split_manifest.json
+  recordings_manifest_path: null
+  quality_filter:
+    enabled: true
+    energy_min: 2.5
+    clip_ratio_max: 0.08
+    saturation_abs: 126.0
+    static_std_max: 0.5
+
+augmentation:
+  enabled: true
+  augment_factor: 2
+  noise_std: 0.02
+  temporal_shift_max: 2
+  scale_min: 0.9
+  scale_max: 1.1
+  use_mixup: false
+  mixup_alpha: 0.2
