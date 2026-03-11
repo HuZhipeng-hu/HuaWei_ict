@@ -1,0 +1,12 @@
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/config/WebSocketConfig.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/entity/GestureEvent.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/config/CorsConfig.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/mapper/EmgFrameMapper.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/dto/EmgFrameDTO.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/entity/EmgFrame.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/dto/EmgBatchRequest.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/mapper/GestureEventMapper.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/websocket/EmgWebSocketHandler.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/service/EmgDataService.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/EmgBackendApplication.java
+/opt/emg/springboot_backend/src/main/java/com/huaweiict/emg/controller/EmgController.java

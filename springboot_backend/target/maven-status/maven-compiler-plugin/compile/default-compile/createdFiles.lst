@@ -1,0 +1,12 @@
+com/huaweiict/emg/dto/EmgFrameDTO.class
+com/huaweiict/emg/dto/EmgBatchRequest.class
+com/huaweiict/emg/mapper/EmgFrameMapper.class
+com/huaweiict/emg/service/EmgDataService.class
+com/huaweiict/emg/config/WebSocketConfig.class
+com/huaweiict/emg/config/CorsConfig.class
+com/huaweiict/emg/entity/GestureEvent.class
+com/huaweiict/emg/mapper/GestureEventMapper.class
+com/huaweiict/emg/EmgBackendApplication.class
+com/huaweiict/emg/entity/EmgFrame.class
+com/huaweiict/emg/controller/EmgController.class
+com/huaweiict/emg/websocket/EmgWebSocketHandler.class
