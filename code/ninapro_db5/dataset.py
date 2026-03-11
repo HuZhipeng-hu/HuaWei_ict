@@ -51,6 +51,7 @@ class DB5PretrainDatasetLoader:
             }
         )
         self._class_name_by_label: dict[int, str] = {}
+        self._gesture_label_map: dict[tuple[int, int], int] = {}
 
     def _zip_files(self) -> list[Path]:
         files = sorted(self.data_dir.glob(self.config.zip_glob))
@@ -107,14 +108,12 @@ class DB5PretrainDatasetLoader:
     def _global_label(self, exercise: int, local_label: int) -> tuple[int, str]:
         if local_label == 0:
             return 0, "REST"
-        if exercise == 1:
-            global_label = local_label
-        elif exercise == 2:
-            global_label = 12 + local_label
-        elif exercise == 3:
-            global_label = 29 + local_label
-        else:
-            global_label = 100 + local_label
+        key = (int(exercise), int(local_label))
+        global_label = self._gesture_label_map.get(key)
+        if global_label is None:
+            base = 1 if self.config.include_rest_class else 0
+            global_label = base + len(self._gesture_label_map)
+            self._gesture_label_map[key] = global_label
         class_name = f"E{exercise}_G{local_label:02d}"
         return global_label, class_name
 
@@ -173,6 +172,8 @@ class DB5PretrainDatasetLoader:
         *,
         return_metadata: bool = False,
     ):
+        self._class_name_by_label.clear()
+        self._gesture_label_map.clear()
         features: list[np.ndarray] = []
         labels: list[int] = []
         source_ids: list[str] = []
