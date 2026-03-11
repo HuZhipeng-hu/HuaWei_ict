@@ -43,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device_target", default="CPU", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)
     parser.add_argument(
+        "--ms_mode",
+        default="graph",
+        choices=["graph", "pynative"],
+        help="MindSpore execution mode. Use pynative as fallback on unstable Ascend graph runs.",
+    )
+    parser.add_argument(
         "--launch_blocking",
         action="store_true",
         help="Enable MindSpore launch_blocking for operator-level error localization.",
@@ -106,8 +112,13 @@ def main() -> None:
     logger.info("Run directory: %s", run_dir)
     copy_config_snapshot(args.config, run_dir / "config_snapshots" / Path(args.config).name)
     _maybe_enable_launch_blocking(args.launch_blocking)
-    _set_device(target=args.device_target, device_id=args.device_id)
-    logger.info("Training device configured: target=%s device_id=%d", args.device_target, args.device_id)
+    _set_device(mode=args.ms_mode, target=args.device_target, device_id=args.device_id)
+    logger.info(
+        "Training device configured: mode=%s target=%s device_id=%d",
+        args.ms_mode,
+        args.device_target,
+        args.device_id,
+    )
 
     dump_yaml(
         run_dir / "config_snapshots" / "effective_config.yaml",
@@ -169,7 +180,7 @@ def main() -> None:
     history_path = run_dir / "training_history.csv"
     _save_history(history, history_path)
 
-    _set_device(target=args.device_target, device_id=args.device_id)
+    _set_device(mode=args.ms_mode, target=args.device_target, device_id=args.device_id)
     best_model = load_db5_model_from_checkpoint(trainer.checkpoint_path, config, num_classes=len(class_names))
     report = evaluate_db5_model(best_model, test_x, test_y, class_names)
     report.update(
