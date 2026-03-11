@@ -1,0 +1,11 @@
+training_config: configs/training_event_onset.yaml
+checkpoint_path: checkpoints/event_onset_best.ckpt
+output_path: models/event_onset.mindir
+device_target: CPU
+
+inputs:
+  emg_shape: [1, 8, 24, 3]
+  imu_shape: [1, 6, 16]
+
+metadata:
+  output_json: models/event_onset.model_metadata.json

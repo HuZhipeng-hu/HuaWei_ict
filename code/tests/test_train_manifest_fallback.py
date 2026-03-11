@@ -4,8 +4,8 @@ import json
 import numpy as np
 import pytest
 
+from event_onset.train_pipeline import _prepare_manifest
 from training.data.split_strategy import build_manifest, save_manifest
-from training.train import _prepare_manifest
 
 
 def _fake_data():

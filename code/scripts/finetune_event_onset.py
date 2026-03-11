@@ -1,9 +1,15 @@
-"""Event-onset training entrypoint (legacy 6-gesture path removed)."""
+"""Unified finetuning entrypoint for event-onset training."""
 
 from __future__ import annotations
 
 import argparse
 import logging
+import sys
+from pathlib import Path
+
+CODE_ROOT = Path(__file__).resolve().parent.parent
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.train_pipeline import run_event_training
 
@@ -17,8 +23,8 @@ def _parse_optional_bool(value: str) -> bool:
     raise argparse.ArgumentTypeError(f"Invalid boolean value: {value}")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train event-onset model")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Finetune event-onset model on wearer data")
     parser.add_argument("--config", default="configs/training_event_onset.yaml")
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--device_target", default="CPU", choices=["CPU", "GPU", "Ascend"])
@@ -35,13 +41,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use_mixup", type=_parse_optional_bool, default=None)
     parser.add_argument("--augmentation_enabled", type=_parse_optional_bool, default=None)
     parser.add_argument("--split_seed", type=int, default=None)
+
     parser.add_argument("--split_manifest_in", default=None)
     parser.add_argument("--split_manifest_out", default=None)
     parser.add_argument("--manifest_strategy", default="v2", choices=["v1", "v2"])
     parser.add_argument("--quality_report_out", default=None)
     parser.add_argument("--eval_protocol", default="same_user_same_day_v1")
-    parser.add_argument("--pretrained_emg_checkpoint", default=None)
-    return parser.parse_args()
+
+    parser.add_argument(
+        "--pretrained_emg_checkpoint",
+        default=None,
+        help="Optional DB5 pretrained checkpoint for EMG encoder warm start.",
+    )
+    return parser
 
 
 def main() -> None:
@@ -50,9 +62,12 @@ def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    args = parse_args()
-    logger = logging.getLogger("training")
-    logger.info("Legacy 6-gesture training path has been removed. Running event-onset training.")
+    args = build_parser().parse_args()
+    logger = logging.getLogger("event_onset.finetune")
+    if args.pretrained_emg_checkpoint:
+        logger.info("Using pretrained EMG checkpoint: %s", args.pretrained_emg_checkpoint)
+    else:
+        logger.warning("No pretrained EMG checkpoint supplied. Finetune will run from random initialization.")
     run_event_training(args)
 
 

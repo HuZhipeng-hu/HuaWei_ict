@@ -1,34 +1,26 @@
-"""
-Preflight checks for NeuroGrip handoff.
-
-Usage:
-    python scripts/preflight.py --mode local
-    python scripts/preflight.py --mode ascend
-"""
+"""Preflight checks for the event-onset production pipeline."""
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-try:
-    import yaml
-except ImportError:  # pragma: no cover - script exits early if missing.
-    yaml = None
-
-
 CODE_ROOT = Path(__file__).resolve().parents[1]
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
+from event_onset.config import load_event_runtime_config, load_event_training_config
+from shared.config import load_config
+
 
 @dataclass
 class Check:
-    level: str  # "ERROR" | "WARN" | "INFO"
+    level: str
     name: str
     detail: str
 
@@ -37,66 +29,13 @@ def has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
-def normalize_runtime_device(raw_device: str) -> str:
-    aliases = {
-        "CPU": "CPU",
-        "GPU": "GPU",
-        "ASCEND": "ASCEND",
-        "NPU": "ASCEND",
-    }
-    key = str(raw_device).strip().upper()
-    return aliases.get(key, key)
-
-
-def _resolve_under_root(code_root: Path, raw_path: str) -> Path:
+def _resolve_under_root(code_root: Path, raw_path: str | None) -> Path | None:
+    if raw_path is None:
+        return None
     path = Path(raw_path)
     if path.is_absolute():
         return path
     return code_root / path
-
-
-def check_mindir_loadability(model_path: Path, device: str, strict: bool) -> Check:
-    if not has_module("mindspore_lite"):
-        return Check(
-            "WARN",
-            "runtime.model_load_check",
-            "mindspore_lite not installed; skipped build_from_file loadability check",
-        )
-
-    try:
-        import mindspore_lite as mslite
-    except Exception as exc:  # pragma: no cover - environment dependent
-        return Check(
-            "WARN",
-            "runtime.model_load_check",
-            f"mindspore_lite import failed ({exc}); skipped loadability check",
-        )
-
-    target = device.lower()
-    context = mslite.Context()
-    context.target = [target]
-    if device == "CPU":
-        context.cpu.thread_num = 1
-
-    model = mslite.Model()
-    try:
-        model.build_from_file(str(model_path), mslite.ModelType.MINDIR, context)
-    except Exception as exc:
-        level = "ERROR" if strict else "WARN"
-        return Check(
-            level,
-            "runtime.model_load_check",
-            (
-                f"build_from_file failed for {model_path} on device={device}. "
-                f"Details: {exc}. This often indicates unsupported Lite ops "
-                "(e.g. AdaptiveAvgPool2D on CPU) or model/runtime mismatch."
-            ),
-        )
-    return Check(
-        "INFO",
-        "runtime.model_load_check",
-        f"build_from_file passed for {model_path} on device={device}",
-    )
 
 
 def collect_dependency_checks(mode: str) -> list[Check]:
@@ -106,29 +45,16 @@ def collect_dependency_checks(mode: str) -> list[Check]:
     optional = ("pyserial", "smbus2", "pytest")
 
     for mod in base_required:
-        if has_module(mod):
-            checks.append(Check("INFO", f"module:{mod}", "installed"))
-        else:
-            checks.append(Check("ERROR", f"module:{mod}", "missing"))
+        checks.append(Check("INFO" if has_module(mod) else "ERROR", f"module:{mod}", "installed" if has_module(mod) else "missing"))
 
-    if mode == "ascend":
-        for mod in ascend_required:
-            if has_module(mod):
-                checks.append(Check("INFO", f"module:{mod}", "installed"))
-            else:
-                checks.append(Check("ERROR", f"module:{mod}", "missing"))
-    else:
-        for mod in ascend_required:
-            if has_module(mod):
-                checks.append(Check("INFO", f"module:{mod}", "installed"))
-            else:
-                checks.append(Check("WARN", f"module:{mod}", "missing (acceptable for local mode)"))
+    for mod in ascend_required:
+        if mode == "ascend":
+            checks.append(Check("INFO" if has_module(mod) else "ERROR", f"module:{mod}", "installed" if has_module(mod) else "missing"))
+        else:
+            checks.append(Check("INFO" if has_module(mod) else "WARN", f"module:{mod}", "installed" if has_module(mod) else "missing (acceptable for local mode)"))
 
     for mod in optional:
-        if has_module(mod):
-            checks.append(Check("INFO", f"module:{mod}", "installed"))
-        else:
-            checks.append(Check("WARN", f"module:{mod}", "missing (optional)"))
+        checks.append(Check("INFO" if has_module(mod) else "WARN", f"module:{mod}", "installed" if has_module(mod) else "missing (optional)"))
 
     return checks
 
@@ -136,245 +62,106 @@ def collect_dependency_checks(mode: str) -> list[Check]:
 def collect_file_checks(code_root: Path, data_root: Path) -> list[Check]:
     checks: list[Check] = []
     required_files = [
-        code_root / "configs" / "training.yaml",
-        code_root / "configs" / "conversion.yaml",
-        code_root / "configs" / "runtime.yaml",
-        code_root / "training" / "train.py",
-        code_root / "conversion" / "convert.py",
-        code_root / "runtime" / "run.py",
+        code_root / "configs" / "pretrain_ninapro_db5.yaml",
+        code_root / "configs" / "training_event_onset.yaml",
+        code_root / "configs" / "conversion_event_onset.yaml",
+        code_root / "configs" / "runtime_event_onset.yaml",
+        code_root / "scripts" / "pretrain_ninapro_db5.py",
+        code_root / "scripts" / "finetune_event_onset.py",
+        code_root / "scripts" / "convert_event_onset.py",
+        code_root / "scripts" / "run_event_runtime.py",
     ]
-
     for path in required_files:
-        if path.exists():
-            checks.append(Check("INFO", f"file:{path.relative_to(code_root)}", "exists"))
-        else:
-            checks.append(Check("ERROR", f"file:{path.relative_to(code_root)}", "missing"))
+        checks.append(Check("INFO" if path.exists() else "ERROR", f"file:{path.relative_to(code_root)}", "exists" if path.exists() else "missing"))
 
-    if data_root.exists():
-        checks.append(Check("INFO", f"dir:{data_root}", "exists"))
-    else:
-        checks.append(Check("ERROR", f"dir:{data_root}", "missing"))
-
-    legacy_snapshot = code_root / "code"
-    if legacy_snapshot.exists():
-        checks.append(
-            Check(
-                "WARN",
-                f"dir:{legacy_snapshot.relative_to(code_root)}",
-                "legacy snapshot exists; use only main code root for development",
-            )
-        )
-
+    checks.append(Check("INFO" if data_root.exists() else "WARN", f"dir:{data_root}", "exists" if data_root.exists() else "missing (set --data_dir when running training)"))
     return checks
 
 
-def _derive_expected_input_shape(preprocess_config) -> tuple[int, int, int, int]:
-    from shared.config import get_protocol_input_shape
-
-    return get_protocol_input_shape(preprocess_config)
-
-
-def _append_data_checks(checks: list[Check], data_root: Path) -> None:
-    from shared.gestures import FOLDER_TO_GESTURE
-
-    if not data_root.exists():
-        return
-
-    dirs = {p.name.lower(): p for p in data_root.iterdir() if p.is_dir()}
-    for gesture in FOLDER_TO_GESTURE:
-        folder = dirs.get(gesture)
-        if folder is None:
-            checks.append(Check("ERROR", f"data.{gesture}", "missing folder"))
-            continue
-        csv_count = len(list(folder.glob("*.csv")))
-        if csv_count == 0:
-            checks.append(Check("ERROR", f"data.{gesture}", "no csv files"))
-        else:
-            checks.append(Check("INFO", f"data.{gesture}", f"{csv_count} csv files"))
-
-
-def collect_config_checks(code_root: Path, data_root: Path, mode: str) -> list[Check]:
-    from shared.config import load_conversion_config, load_runtime_config, load_training_config
-
+def collect_config_checks(code_root: Path) -> list[Check]:
     checks: list[Check] = []
+    training_cfg_path = code_root / "configs" / "training_event_onset.yaml"
+    runtime_cfg_path = code_root / "configs" / "runtime_event_onset.yaml"
+    conversion_cfg_path = code_root / "configs" / "conversion_event_onset.yaml"
 
-    runtime_cfg = load_runtime_config(code_root / "configs" / "runtime.yaml")
-    conversion_cfg = load_conversion_config(code_root / "configs" / "conversion.yaml")
-    train_model_cfg, train_pp_cfg, _, _ = load_training_config(code_root / "configs" / "training.yaml")
+    model_cfg, data_cfg, _, _ = load_event_training_config(training_cfg_path)
+    runtime_cfg = load_event_runtime_config(runtime_cfg_path)
+    conversion_cfg = load_config(conversion_cfg_path)
 
-    runtime_device_raw = runtime_cfg.device.target
-    runtime_device = normalize_runtime_device(runtime_device_raw)
+    expected_emg_shape = (
+        1,
+        int(model_cfg.emg_in_channels),
+        int(model_cfg.emg_freq_bins),
+        int(model_cfg.emg_time_frames),
+    )
+    expected_imu_shape = (
+        1,
+        int(model_cfg.imu_input_dim),
+        int(model_cfg.imu_num_steps),
+    )
+    checks.append(Check("INFO", "event.expected_emg_shape", str(expected_emg_shape)))
+    checks.append(Check("INFO", "event.expected_imu_shape", str(expected_imu_shape)))
 
-    if runtime_device not in {"CPU", "GPU", "ASCEND"}:
-        checks.append(
-            Check(
-                "ERROR",
-                "runtime.device.target",
-                (
-                    f"unsupported value {runtime_device_raw!r}. "
-                    "Expected one of CPU/GPU/Ascend (alias NPU)."
-                ),
-            )
-        )
+    if data_cfg.label_mode != "event_onset":
+        checks.append(Check("ERROR", "training.label_mode", f"expected event_onset, got {data_cfg.label_mode}"))
     else:
-        checks.append(Check("INFO", "runtime.device.target", runtime_device))
-        if mode == "ascend" and runtime_device == "CPU":
-            checks.append(
-                Check(
-                    "ERROR",
-                    "runtime.device.target",
-                    "mode=ascend does not allow runtime.device.target=CPU. "
-                    "Set configs/runtime.yaml device.target to Ascend (or use --device).",
-                )
-            )
+        checks.append(Check("INFO", "training.label_mode", "event_onset"))
 
-    runtime_model_path = _resolve_under_root(code_root, runtime_cfg.model_path)
-    conversion_output_path = _resolve_under_root(code_root, conversion_cfg.output_path)
-    checkpoint_path = _resolve_under_root(code_root, conversion_cfg.checkpoint_path)
+    conv_inputs = conversion_cfg.get("inputs", {}) or {}
+    conv_emg = tuple(int(x) for x in conv_inputs.get("emg_shape", expected_emg_shape))
+    conv_imu = tuple(int(x) for x in conv_inputs.get("imu_shape", expected_imu_shape))
+    checks.append(Check("INFO", "conversion.emg_shape", str(conv_emg)))
+    checks.append(Check("INFO", "conversion.imu_shape", str(conv_imu)))
+    if conv_emg != expected_emg_shape:
+        checks.append(Check("ERROR", "conversion.emg_shape", f"expected {expected_emg_shape}, got {conv_emg}"))
+    if conv_imu != expected_imu_shape:
+        checks.append(Check("ERROR", "conversion.imu_shape", f"expected {expected_imu_shape}, got {conv_imu}"))
 
-    if runtime_model_path.exists():
-        checks.append(Check("INFO", "runtime.model_path", f"found: {runtime_model_path}"))
-        if runtime_device in {"CPU", "GPU", "ASCEND"}:
-            checks.append(
-                check_mindir_loadability(
-                    model_path=runtime_model_path,
-                    device=runtime_device,
-                    strict=(mode == "ascend"),
-                )
-            )
-    else:
-        checks.append(
-            Check(
-                "WARN",
-                "runtime.model_path",
-                f"not found: {runtime_model_path} (expected before runtime deployment)",
-            )
-        )
+    runtime_ckpt = _resolve_under_root(code_root, runtime_cfg.checkpoint_path)
+    runtime_mindir = _resolve_under_root(code_root, runtime_cfg.model_path)
+    runtime_meta = _resolve_under_root(code_root, runtime_cfg.model_metadata_path)
+    checks.append(Check("INFO" if runtime_ckpt and runtime_ckpt.exists() else "WARN", "runtime.checkpoint_path", f"{runtime_ckpt}" if runtime_ckpt else "unset"))
+    checks.append(Check("INFO" if runtime_mindir and runtime_mindir.exists() else "WARN", "runtime.model_path", f"{runtime_mindir}" if runtime_mindir else "unset"))
+    checks.append(Check("INFO" if runtime_meta and runtime_meta.exists() else "WARN", "runtime.model_metadata_path", f"{runtime_meta}" if runtime_meta else "unset"))
 
-    if runtime_model_path == conversion_output_path:
-        checks.append(Check("INFO", "runtime.model_alignment", "runtime model path matches conversion output"))
-    else:
-        checks.append(
-            Check(
-                "WARN",
-                "runtime.model_alignment",
-                f"runtime model path {runtime_model_path} != conversion output {conversion_output_path}",
-            )
-        )
+    if runtime_meta and runtime_meta.exists():
+        try:
+            payload = json.loads(runtime_meta.read_text(encoding="utf-8"))
+            inputs = {str(item.get("name")): tuple(int(x) for x in item.get("shape", [])) for item in payload.get("inputs", [])}
+            if inputs.get("emg") != expected_emg_shape:
+                checks.append(Check("ERROR", "runtime.metadata.emg", f"expected {expected_emg_shape}, got {inputs.get('emg')}"))
+            if inputs.get("imu") != expected_imu_shape:
+                checks.append(Check("ERROR", "runtime.metadata.imu", f"expected {expected_imu_shape}, got {inputs.get('imu')}"))
+        except Exception as exc:
+            checks.append(Check("ERROR", "runtime.metadata.parse", str(exc)))
 
-    if checkpoint_path.exists():
-        checks.append(Check("INFO", "conversion.checkpoint_path", f"found: {checkpoint_path}"))
-    else:
-        checks.append(
-            Check(
-                "WARN",
-                "conversion.checkpoint_path",
-                f"not found: {checkpoint_path} (expected before training/export)",
-            )
-        )
-
-    try:
-        runtime_expected_shape = _derive_expected_input_shape(runtime_cfg.preprocess)
-        checks.append(Check("INFO", "runtime.expected_input_shape", str(runtime_expected_shape)))
-    except Exception as exc:
-        runtime_expected_shape = None
-        checks.append(Check("ERROR", "runtime.expected_input_shape", f"failed to derive shape: {exc}"))
-
-    try:
-        training_expected_shape = _derive_expected_input_shape(train_pp_cfg)
-        checks.append(Check("INFO", "training.expected_input_shape", str(training_expected_shape)))
-    except Exception as exc:
-        training_expected_shape = None
-        checks.append(Check("ERROR", "training.expected_input_shape", f"failed to derive shape: {exc}"))
-
-    conversion_input_shape = tuple(int(x) for x in conversion_cfg.input_shape)
-    checks.append(Check("INFO", "conversion.input_shape", str(conversion_input_shape)))
-
-    if runtime_expected_shape is not None and training_expected_shape is not None:
-        if runtime_expected_shape == training_expected_shape:
-            checks.append(Check("INFO", "runtime.training_shape_consistency", "runtime and training shapes match"))
-        else:
-            checks.append(
-                Check(
-                    "ERROR",
-                    "runtime.training_shape_consistency",
-                    f"runtime {runtime_expected_shape} != training {training_expected_shape}",
-                )
-            )
-
-    if runtime_expected_shape is not None:
-        if runtime_expected_shape == conversion_input_shape:
-            checks.append(Check("INFO", "runtime.conversion_shape_consistency", "runtime and conversion shapes match"))
-        else:
-            checks.append(
-                Check(
-                    "ERROR",
-                    "runtime.conversion_shape_consistency",
-                    f"runtime {runtime_expected_shape} != conversion {conversion_input_shape}",
-                )
-            )
-
-        runtime_channels = runtime_expected_shape[1]
-        if train_model_cfg.in_channels == runtime_channels:
-            checks.append(Check("INFO", "training.model_channels", "model.in_channels matches preprocess output"))
-        else:
-            checks.append(
-                Check(
-                    "ERROR",
-                    "training.model_channels",
-                    f"training.model.in_channels={train_model_cfg.in_channels} != preprocess output channels={runtime_channels}",
-                )
-            )
-
-    _append_data_checks(checks, data_root)
     return checks
 
 
 def print_checks(checks: Iterable[Check]) -> None:
-    for c in checks:
-        print(f"[{c.level}] {c.name}: {c.detail}")
+    for item in checks:
+        print(f"[{item.level}] {item.name}: {item.detail}")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="NeuroGrip preflight checks")
-    parser.add_argument(
-        "--mode",
-        choices=("local", "ascend"),
-        default="local",
-        help="local: no MindSpore required; ascend: require MindSpore stack.",
-    )
+    parser = argparse.ArgumentParser(description="Event-onset preflight checks")
+    parser.add_argument("--mode", choices=("local", "ascend"), default="local")
     args = parser.parse_args()
+
+    checks: list[Check] = []
+    py = sys.version_info
+    checks.append(Check("INFO", "python.version", f"{py.major}.{py.minor}.{py.micro}"))
+    if (py.major, py.minor) < (3, 8):
+        checks.append(Check("ERROR", "python.version", "requires >=3.8"))
 
     code_root = CODE_ROOT
     data_root = code_root.parent / "data"
-
-    checks: list[Check] = []
-
-    py = sys.version_info
-    if (py.major, py.minor) < (3, 8):
-        checks.append(Check("ERROR", "python.version", f"requires >=3.8, current={py.major}.{py.minor}.{py.micro}"))
-    else:
-        checks.append(Check("INFO", "python.version", f"{py.major}.{py.minor}.{py.micro}"))
-    if args.mode == "ascend" and (py.major, py.minor) >= (3, 12):
-        checks.append(
-            Check(
-                "WARN",
-                "python.version",
-                "MindSpore 2.7.1 environments often use Python <=3.11; verify target machine compatibility.",
-            )
-        )
-
-    if yaml is None:
-        checks.append(Check("ERROR", "module:yaml", "PyYAML not installed"))
-        print_checks(checks)
-        return 1
-
     checks.extend(collect_dependency_checks(args.mode))
     checks.extend(collect_file_checks(code_root, data_root))
-    checks.extend(collect_config_checks(code_root, data_root, args.mode))
+    checks.extend(collect_config_checks(code_root))
 
     print("=" * 72)
-    print(f"NeuroGrip preflight mode={args.mode}")
+    print(f"Event-onset preflight mode={args.mode}")
     print(f"code_root={code_root}")
     print(f"data_root={data_root}")
     print("=" * 72)
@@ -384,7 +171,6 @@ def main() -> int:
     warns = [c for c in checks if c.level == "WARN"]
     print("=" * 72)
     print(f"Summary: {len(errors)} error(s), {len(warns)} warning(s), {len(checks)} checks")
-
     if errors:
         print("Preflight: FAILED")
         return 1

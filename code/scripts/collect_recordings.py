@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--countdown_sec", type=int, default=3)
     parser.add_argument("--record_seconds", type=float, default=3.0)
     parser.add_argument("--rest_seconds", type=float, default=1.0)
-    parser.add_argument("--training_config", default="configs/training.yaml")
+    parser.add_argument("--training_config", default="configs/training_event_onset.yaml")
     parser.add_argument("--manifest_path", default=None)
     parser.add_argument("--report_dir", default=None)
     parser.add_argument("--port", default="COM4")
@@ -130,7 +130,7 @@ def run_collection_batch(
     countdown_sec: int = 3,
     record_seconds: float = 3.0,
     rest_seconds: float = 1.0,
-    training_config: str | Path = "configs/training.yaml",
+    training_config: str | Path = "configs/training_event_onset.yaml",
     manifest_path: str | Path | None = None,
     report_dir: str | Path | None = None,
     port: str = "COM4",
