@@ -29,6 +29,14 @@ from training.reporting import compute_classification_report
 logger = logging.getLogger(__name__)
 
 
+def _argmax(logits):
+    if ops is None:
+        raise RuntimeError("MindSpore ops is not available")
+    if hasattr(ops, "Argmax"):
+        return ops.Argmax(axis=1)(logits)
+    return ops.argmax(logits, 1)
+
+
 def compute_class_balanced_weights(labels: np.ndarray, num_classes: int, beta: float) -> np.ndarray:
     counts = np.bincount(labels.astype(np.int32), minlength=num_classes).astype(np.float32)
     effective_num = 1.0 - np.power(beta, np.maximum(counts, 1.0))
@@ -319,7 +327,7 @@ class Trainer:
             logits = self.model(sample)
             loss = self.loss_fn_ce(logits, label)
             losses.append(float(loss.asnumpy()))
-            pred = ops.argmax(logits, axis=1).asnumpy()
+            pred = _argmax(logits).asnumpy()
             preds.append(pred.astype(np.int32))
             gts.append(label.asnumpy().astype(np.int32))
 

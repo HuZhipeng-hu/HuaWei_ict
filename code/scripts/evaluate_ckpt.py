@@ -13,8 +13,12 @@ CODE_ROOT = Path(__file__).resolve().parent.parent
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from shared.config import load_training_config, load_training_data_config, normalize_model_config_channels
+from event_onset.config import load_event_training_config
+from event_onset.dataset import EventClipDatasetLoader
+from event_onset.evaluate import load_and_evaluate_event
+from shared.config import load_config, load_training_config, load_training_data_config, normalize_model_config_channels
 from shared.gestures import GESTURE_DEFINITIONS
+from shared.label_modes import EVENT_ONSET_LABEL_MODE, get_label_mode_spec
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, ensure_run_dir
 from training.data.csv_dataset import CSVDatasetLoader
 from training.data.split_strategy import load_manifest
@@ -83,6 +87,68 @@ def main() -> None:
     output_dir = run_dir / args.output_dir
     copy_config_snapshot(args.config, run_dir / "config_snapshots" / Path(args.config).name)
     copy_config_snapshot(args.split_manifest, run_dir / "manifests" / Path(args.split_manifest).name)
+
+    raw_config = load_config(args.config)
+    label_mode = str((raw_config.get("data", {}) or {}).get("label_mode", "")).strip().lower()
+    if label_mode == EVENT_ONSET_LABEL_MODE:
+        model_cfg, data_cfg, _, _ = load_event_training_config(args.config)
+        label_spec = get_label_mode_spec(label_mode)
+        loader = EventClipDatasetLoader(
+            args.data_dir,
+            data_cfg,
+            recordings_manifest_path=args.recordings_manifest or data_cfg.recordings_manifest_path,
+        )
+        emg_samples, imu_samples, labels, source_ids, _ = loader.load_all_with_sources(return_metadata=True)
+        manifest = load_manifest(args.split_manifest)
+        if manifest.num_samples != int(labels.shape[0]):
+            raise ValueError(
+                f"Manifest sample count mismatch: manifest={manifest.num_samples}, loaded={labels.shape[0]}. "
+                "Regenerate manifest with current event-onset settings."
+            )
+        test_idx = np.asarray(manifest.test_indices, dtype=np.int32)
+        report = load_and_evaluate_event(
+            ckpt_path=args.checkpoint,
+            emg_samples=emg_samples[test_idx],
+            imu_samples=imu_samples[test_idx],
+            labels=labels[test_idx],
+            class_names=label_spec.class_names,
+            model_config=model_cfg,
+            device_target=args.device_target,
+            device_id=args.device_id,
+        )
+        report.update(
+            {
+                "eval_protocol": args.eval_protocol,
+                "manifest_path": args.split_manifest,
+                "checkpoint_path": args.checkpoint,
+                "run_id": run_id,
+            }
+        )
+        outputs = save_classification_report(report, out_dir=output_dir, prefix="test")
+        summary = {
+            "run_id": run_id,
+            "checkpoint_path": args.checkpoint,
+            "manifest_path": args.split_manifest,
+            "model_type": model_cfg.model_type,
+            "base_channels": model_cfg.base_channels,
+            "use_se": model_cfg.use_se,
+            "test_accuracy": report["accuracy"],
+            "test_macro_f1": report["macro_f1"],
+            "test_macro_recall": report["macro_recall"],
+            "top_confusion_pair": _top_confusion_pair_text(report),
+        }
+        dump_json(output_dir / "evaluation_summary.json", summary)
+        append_csv_row(Path(args.run_root) / "evaluation_results.csv", EVAL_SUMMARY_FIELDS, summary)
+        dump_json(
+            run_dir / "evaluation_recheck_metadata.json",
+            {
+                "run_id": run_id,
+                "output_dir": str(output_dir),
+                "recordings_manifest_path": str(args.recordings_manifest or data_cfg.recordings_manifest_path),
+                "outputs": outputs,
+            },
+        )
+        return
 
     model_cfg, preprocess_cfg, train_cfg, _ = load_training_config(args.config)
     data_cfg = load_training_data_config(args.config)
