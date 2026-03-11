@@ -132,7 +132,7 @@ if MINDSPORE_AVAILABLE:
             # 3×3 分支: 提取局部时频特征
             self.branch_3x3 = nn.SequentialCell([
                 nn.Conv2d(in_channels, out_channels, kernel_size=3,
-                          has_bias=False, pad_mode='same'),
+                          has_bias=False, pad_mode='pad', padding=1),
                 nn.BatchNorm2d(out_channels),
                 nn.ReLU(),
             ])
@@ -140,7 +140,7 @@ if MINDSPORE_AVAILABLE:
             # 5×5 分支: 提取更大范围的时频特征
             self.branch_5x5 = nn.SequentialCell([
                 nn.Conv2d(in_channels, out_channels, kernel_size=5,
-                          has_bias=False, pad_mode='same'),
+                          has_bias=False, pad_mode='pad', padding=2),
                 nn.BatchNorm2d(out_channels),
                 nn.ReLU(),
             ])
