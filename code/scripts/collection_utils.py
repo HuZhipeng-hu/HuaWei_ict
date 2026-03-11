@@ -12,8 +12,13 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
-
-from shared.config import PreprocessConfig, QualityFilterConfig, load_training_config
+from shared.config import (
+    DualBranchConfig,
+    PreprocessConfig,
+    QualityFilterConfig,
+    load_config,
+    load_training_config,
+)
 from shared.gestures import GESTURE_DEFINITIONS, NUM_EMG_CHANNELS
 from shared.preprocessing import PreprocessPipeline
 
@@ -159,6 +164,25 @@ def timestamp_from_path(path: str | Path) -> str:
 def load_collection_protocol(
     training_config_path: str | Path,
 ) -> tuple[PreprocessConfig, QualityFilterConfig]:
+    raw = load_config(training_config_path)
+    label_mode = str((raw.get("data", {}) or {}).get("label_mode", "")).strip().lower()
+    if label_mode == "event_onset":
+        from event_onset.config import load_event_training_config
+
+        _, data_cfg, training_cfg, _ = load_event_training_config(training_config_path)
+        preprocess_cfg = PreprocessConfig(
+            sampling_rate=int(data_cfg.device_sampling_rate_hz),
+            num_channels=8,
+            target_length=int(data_cfg.context_samples),
+            overlap=max(0.0, min(0.99, 1.0 - float(data_cfg.window_step_samples) / float(data_cfg.context_samples))),
+            stft_window=int(data_cfg.feature.emg_stft_window),
+            stft_hop=int(data_cfg.feature.emg_stft_hop),
+            n_fft=int(data_cfg.feature.emg_n_fft),
+            freq_bins_out=int(data_cfg.feature.emg_freq_bins),
+            dual_branch=DualBranchConfig(enabled=False),
+        )
+        return preprocess_cfg, training_cfg.quality_filter
+
     _, preprocess_cfg, training_cfg, _ = load_training_config(training_config_path)
     return preprocess_cfg, training_cfg.quality_filter
 

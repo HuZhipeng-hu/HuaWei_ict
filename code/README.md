@@ -1,170 +1,94 @@
-﻿# NeuroGrip Pro V2
+# NeuroGrip Event-Onset Pipeline
 
-AI-driven sEMG gesture recognition and prosthesis control stack.
+This branch is event-onset only. Legacy 6-gesture standalone training/runtime flow has been removed.
 
-## Repository Layout
+## Pipeline
 
-```text
-code/
-├── shared/        # shared model/config/preprocess definitions
-├── training/      # model training and offline evaluation
-├── conversion/    # checkpoint -> mindir export/quantization
-├── runtime/       # deployment/runtime control loop
-├── scripts/       # utility entry scripts (realtime, preflight, evaluate)
-├── configs/       # YAML configs
-└── tests/         # unit/integration tests
-```
+`DB5 pretrain -> wearer finetune -> MindIR conversion -> Orange Pi runtime`
 
-## 6-Class Gestures
-
-`RELAX`, `FIST`, `PINCH`, `OK`, `YE`, `SIDEGRIP`
-
-## Trusted Train/Eval Protocol
-
-- Split mode default: `grouped_file`
-- Fixed split manifest: `artifacts/splits/default_split_manifest.json`
-- Manifest v2 groups by `user::session::recording` when metadata is available
-- Data augmentation only applies to train split
-- Training/evaluation/conversion/realtime benchmark all emit run-scoped artifacts under `artifacts/runs/<run_id>/`
-- Final KPI requires both offline test metrics and trusted realtime benchmark results
-
-## Train
+## 1) DB5 Pretrain
 
 ```bash
-python -m training.train \
-  --config configs/training.yaml \
-  --data_dir ../data \
-  --run_id 20260308_baseline
+python scripts/pretrain_ninapro_db5.py \
+  --config configs/pretrain_ninapro_db5.yaml \
+  --data_dir ../data_ninaproDB5 \
+  --run_id db5_pretrain_v1
 ```
 
-If `data.split_manifest_path` is configured but the manifest file does not
-exist yet, training will auto-generate it and save it to the configured path.
-Default path: `artifacts/splits/default_split_manifest.json`.
+Output checkpoint (example):
 
-Current default training config enables 8-channel dual-branch features
-(200Hz + 1000Hz) with fused input shape `(16, 24, 6)`. This is a breaking
-change versus legacy single-branch `(6, 24, 6)` models and legacy dual-branch
-`(12, 24, 6)` models.
+`artifacts/runs/db5_pretrain_v1/checkpoints/db5_pretrain_best.ckpt`
 
-Useful experiment overrides:
+## 2) Wearer Finetune (Event-Onset)
 
 ```bash
-python -m training.train \
-  --config configs/training.yaml \
+python scripts/finetune_event_onset.py \
+  --config configs/training_event_onset.yaml \
   --data_dir ../data \
-  --run_id 20260308_lite_b24 \
-  --model_type lite \
-  --base_channels 24 \
-  --use_se false \
-  --loss_type focal \
-  --hard_mining_ratio 0.5 \
-  --augment_factor 3 \
-  --use_mixup true
+  --pretrained_emg_checkpoint artifacts/runs/db5_pretrain_v1/checkpoints/db5_pretrain_best.ckpt \
+  --run_id event_finetune_v1
 ```
 
-Optional metadata manifest:
+Output checkpoint (example):
 
-- Place `recordings_manifest.csv` under the data root, or pass `--recordings_manifest <path>`.
-- Preferred columns: `relative_path,gesture,user_id,session_id,device_id,timestamp,wearing_state`.
+`artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt`
 
-## Evaluate (checkpoint + manifest)
+## 3) Convert Event Model to MindIR
+
+```bash
+python scripts/convert_event_onset.py \
+  --config configs/conversion_event_onset.yaml \
+  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
+  --run_id event_convert_v1
+```
+
+Outputs:
+
+- `models/event_onset.mindir`
+- `models/event_onset.model_metadata.json`
+
+## 4) Runtime (Orange Pi)
+
+Production backend (`lite`):
+
+```bash
+python scripts/run_event_runtime.py \
+  --config configs/runtime_event_onset.yaml \
+  --backend lite
+```
+
+Debug backend (`ckpt`):
+
+```bash
+python scripts/run_event_runtime.py \
+  --config configs/runtime_event_onset.yaml \
+  --backend ckpt
+```
+
+## 5) Runtime Benchmark (CKPT vs MindIR)
+
+```bash
+python scripts/benchmark_event_runtime_ckpt.py \
+  --training_config configs/training_event_onset.yaml \
+  --runtime_config configs/runtime_event_onset.yaml \
+  --data_dir ../data \
+  --backend both \
+  --output artifacts/event_runtime_benchmark_compare.json
+```
+
+## 6) Checkpoint Evaluation
 
 ```bash
 python scripts/evaluate_ckpt.py \
-  --config configs/training.yaml \
+  --config configs/training_event_onset.yaml \
   --data_dir ../data \
-  --checkpoint checkpoints/neurogrip_best.ckpt \
-  --split_manifest artifacts/splits/default_split_manifest.json \
-  --run_id 20260308_eval_baseline
+  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
+  --split_manifest artifacts/splits/event_onset_split_manifest.json
 ```
 
-## Convert
+## 7) Preflight
 
 ```bash
-python -m conversion.convert \
-  --checkpoint checkpoints/neurogrip_best.ckpt \
-  --run_id 20260308_convert_baseline \
-  --config configs/conversion.yaml
+python scripts/preflight.py --mode local
+python scripts/preflight.py --mode ascend
 ```
-
-`configs/conversion.yaml` now defaults to `input_shape: [1, 16, 24, 6]`.
-Legacy 6-channel checkpoints/mindir and legacy `12x24x6` dual-branch artifacts
-are not compatible with this config and must be retrained/re-converted.
-
-## Runtime
-
-```bash
-python -m runtime.run --config configs/runtime.yaml
-```
-
-Runtime preprocess is aligned with training dual-branch config. Ensure deployed
-`.mindir` was exported with matching shape `(1, 16, 24, 6)`.
-
-Standalone smoke test:
-
-```bash
-python -m runtime.run --standalone --max_cycles 200
-```
-
-## Trusted Realtime Benchmark
-
-Use this as the acceptance path for realtime checkpoint replay. It reuses the
-locked test manifest and writes structured outputs into the run directory.
-
-```bash
-python scripts/benchmark_realtime_ckpt.py \
-  --training_config configs/training.yaml \
-  --runtime_config configs/runtime.yaml \
-  --data_dir ../data \
-  --checkpoint checkpoints/neurogrip_best.ckpt \
-  --split_manifest artifacts/splits/default_split_manifest.json \
-  --run_id 20260308_rt_baseline
-```
-
-Local non-MindSpore smoke test:
-
-```bash
-python scripts/benchmark_realtime_ckpt.py \
-  --checkpoint checkpoints/neurogrip_best.ckpt \
-  --split_manifest artifacts/splits/default_split_manifest.json \
-  --data_dir ../data \
-  --mock \
-  --run_id local_benchmark_smoke
-```
-
-## Manual Realtime Checkpoint Debug (Armband)
-
-```bash
-python scripts/realtime_ckpt.py \
-  --port /dev/ttyUSB0 \
-  --device CPU \
-  --ckpt checkpoints/neurogrip_best.ckpt \
-  --threshold 0.6 \
-  --infer_rate_hz 20
-```
-
-`infer_rate_hz=0` keeps old behavior (no inference rate limit).
-This script follows the current 8-channel protocol for manual debugging only; it is not the trusted benchmark path.
-
-## Experiment Matrix
-
-```bash
-python scripts/run_experiment_matrix.py \
-  --config configs/training.yaml \
-  --data_dir ../data \
-  --manifest artifacts/splits/default_split_manifest.json
-```
-
-This generates a structured command matrix in `artifacts/experiment_matrix.md`.
-
-## Tests
-
-```bash
-python -m pytest -q
-```
-
-## More Details
-
-See [docs/evaluation_retrain_runbook.md](docs/evaluation_retrain_runbook.md) for
-full retrain -> conversion -> deployment -> realtime retest procedure.
-

@@ -1,0 +1,51 @@
+data_dir: ../data_ninaproDB5
+zip_glob: s*.zip
+include_rest_class: true
+use_restimulus: true
+
+feature:
+  source_sampling_rate_hz: 200
+  target_sampling_rate_hz: 500
+  use_first_myo_only: true
+  first_myo_channel_count: 8
+  context_window_ms: 240
+  window_step_ms: 80
+  max_windows_per_segment: 6
+  max_rest_windows_per_segment: 2
+  emg_stft_window: 64
+  emg_stft_hop: 24
+  emg_n_fft: 96
+  emg_freq_bins: 24
+
+base_channels: 16
+use_se: true
+dropout_rate: 0.3
+classifier_hidden_dim: 64
+split_seed: 42
+val_ratio: 0.15
+test_ratio: 0.15
+
+training:
+  epochs: 40
+  batch_size: 64
+  learning_rate: 0.0005
+  weight_decay: 0.0003
+  label_smoothing: 0.05
+  warmup_epochs: 3
+  early_stopping_patience: 8
+  split_seed: 42
+  val_ratio: 0.15
+  test_ratio: 0.15
+  kfold: null
+  num_workers: 0
+  loss:
+    type: cb_focal
+    focal_gamma: 1.5
+    class_balance_beta: 0.999
+  sampler:
+    type: balanced
+    hard_mining_ratio: 0.2
+    confusion_pairs: []
+  ema:
+    enabled: true
+    decay: 0.999

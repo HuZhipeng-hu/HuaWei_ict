@@ -39,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session_id", required=True)
     parser.add_argument("--device_id", required=True)
     parser.add_argument("--wearing_state", required=True)
-    parser.add_argument("--training_config", default="configs/training.yaml")
+    parser.add_argument("--training_config", default="configs/training_event_onset.yaml")
     parser.add_argument("--manifest_path", default=None)
     parser.add_argument("--report_dir", default=None)
     parser.add_argument("--source_dir", default=None)
@@ -58,7 +58,7 @@ def run_import_batch(
     session_id: str,
     device_id: str,
     wearing_state: str,
-    training_config: str | Path = "configs/training.yaml",
+    training_config: str | Path = "configs/training_event_onset.yaml",
     manifest_path: str | Path | None = None,
     report_dir: str | Path | None = None,
     source_dir: str | Path | None = None,

@@ -1,0 +1,16 @@
+﻿# Dataset payloads (keep only folder placeholders in Git)
+/data/**
+!/data/.gitkeep
+/data_ninaproDB5/**
+!/data_ninaproDB5/.gitkeep
+/data_ninaproDB5.zip
+
+# Local caches and test temp artifacts
+**/__pycache__/
+**/.pytest_cache/
+code/.tmp_pytest*/
+code/.codex_tmp/
+code/pytest-cache-files-*/
+code/pytest-of-ASUS/
+code/tmpr*/
+code/artifacts/pytest_tmp/

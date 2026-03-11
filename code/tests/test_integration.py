@@ -1,25 +1,39 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 import numpy as np
-import pytest
 
-from shared.config import (
-    get_protocol_input_shape,
-    get_protocol_model_in_channels,
-    load_config,
-    load_training_config,
-)
-from shared.preprocessing import PreprocessPipeline
+from event_onset.config import load_event_training_config
+from event_onset.runtime import EventFeatureExtractor
 from training.trainer import build_balanced_sample_indices, compute_class_balanced_weights
 
 
-def test_training_config_dual_branch_matches_model_channels():
-    cfg_path = Path("configs/training.yaml")
-    model_cfg, preprocess_cfg, train_cfg, _ = load_training_config(cfg_path)
+def test_event_training_config_expected_defaults():
+    cfg_path = Path("configs/training_event_onset.yaml")
+    model_cfg, data_cfg, train_cfg, _ = load_event_training_config(cfg_path)
 
-    if preprocess_cfg.dual_branch.enabled:
-        assert model_cfg.in_channels == 16
-        assert model_cfg.in_channels == get_protocol_model_in_channels(preprocess_cfg)
+    assert model_cfg.model_type == "event_onset"
+    assert model_cfg.num_classes == 3
+    assert model_cfg.emg_in_channels == 8
+    assert model_cfg.imu_input_dim == 6
+    assert data_cfg.label_mode == "event_onset"
+    assert train_cfg.val_ratio > 0.0
+    assert train_cfg.test_ratio > 0.0
+
+
+def test_event_feature_extractor_shapes_match_model_config():
+    model_cfg, data_cfg, _, _ = load_event_training_config("configs/training_event_onset.yaml")
+    extractor = EventFeatureExtractor(data_cfg)
+    matrix = np.random.randn(data_cfg.context_samples, 14).astype(np.float32)
+
+    emg_feature, imu_feature, energy = extractor.build_inputs(matrix)
+
+    assert emg_feature.shape == (
+        model_cfg.emg_in_channels,
+        model_cfg.emg_freq_bins,
+        model_cfg.emg_time_frames,
+    )
+    assert imu_feature.shape == (model_cfg.imu_input_dim, model_cfg.imu_num_steps)
+    assert np.isfinite(energy)
 
 
 def test_balanced_sampler_distribution():
@@ -44,28 +58,3 @@ def test_class_balanced_weights_are_finite():
     assert weights.shape == (3,)
     assert np.isfinite(weights).all()
     assert (weights > 0).all()
-
-
-def test_pipeline_shape_expected():
-    model_cfg, preprocess_cfg, _, _ = load_training_config("configs/training.yaml")
-    pipeline = PreprocessPipeline(preprocess_cfg)
-    raw = np.random.randn(pipeline.get_required_window_size(), 8).astype(np.float32)
-    feat = pipeline.process_window(raw)
-    assert feat.shape[0] == model_cfg.in_channels
-    assert (1,) + tuple(feat.shape) == get_protocol_input_shape(preprocess_cfg)
-
-
-def test_protocol_helpers_reject_legacy_6_channel_config():
-    _, preprocess_cfg, _, _ = load_training_config("configs/training.yaml")
-    preprocess_cfg.num_channels = 6
-
-    with pytest.raises(ValueError, match="8-channel dual-branch 16x24x6 protocol"):
-        get_protocol_input_shape(preprocess_cfg)
-
-
-def test_protocol_helpers_reject_single_branch_config():
-    _, preprocess_cfg, _, _ = load_training_config("configs/training.yaml")
-    preprocess_cfg.dual_branch.enabled = False
-
-    with pytest.raises(ValueError, match="8-channel dual-branch 16x24x6 protocol"):
-        get_protocol_model_in_channels(preprocess_cfg)

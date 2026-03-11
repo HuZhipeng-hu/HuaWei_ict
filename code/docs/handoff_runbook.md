@@ -1,103 +1,58 @@
-# NeuroGrip Handoff Runbook
+# Event-Onset Handoff Runbook
 
-This runbook is for handing off the project to a machine that has the full Ascend + MindSpore stack.
+This runbook is for handing off the event-onset production pipeline to a target machine.
 
-## 1. Repository Guardrails
-
-- Primary repository root: `F:\ICT\义肢核心代码\_incoming\HuaWei_ict_github`
-- Primary development/exec root: `F:\ICT\义肢核心代码\_incoming\HuaWei_ict_github\code`
-- Use this as the only active codebase for handoff.
-
-## 2. Environment Expectations
-
-Minimum:
+## 1) Environment
 
 - Python >= 3.8
-- `numpy`, `scipy`, `pyyaml`
+- Required: `numpy`, `scipy`, `pyyaml`
+- Target deployment: `mindspore`, `mindspore_lite`
+- Optional hardware libs: `pyserial`, `smbus2`
 
-Ascend target machine:
+## 2) Preflight
 
-- `mindspore==2.7.1` (or target-validated equivalent)
-- `mindspore_lite`
-- Optional hardware runtime libs: `pyserial`, `smbus2`
-
-## 3. Preflight
-
-Local machine (without MindSpore):
+Local:
 
 ```powershell
 python scripts/preflight.py --mode local
 ```
 
-Ascend machine:
+Target:
 
 ```powershell
 python scripts/preflight.py --mode ascend
 ```
 
-If preflight reports errors, fix those first.
-
-## 4. Local Non-MindSpore Validation
+## 3) Training + Conversion Chain
 
 ```powershell
-python -m compileall .
-python tests/test_gestures.py
-python tests/test_preprocessing.py
-python tests/test_csv_dataset.py
-python tests/test_integration.py
-python scripts/preflight.py --mode local
-python -m runtime.run --standalone --max_cycles 200
+python scripts/pretrain_ninapro_db5.py --config configs/pretrain_ninapro_db5.yaml --data_dir ../data_ninaproDB5 --run_id db5_pretrain_v1
+python scripts/finetune_event_onset.py --config configs/training_event_onset.yaml --data_dir ../data --pretrained_emg_checkpoint artifacts/runs/db5_pretrain_v1/checkpoints/db5_pretrain_best.ckpt --run_id event_finetune_v1
+python scripts/convert_event_onset.py --config configs/conversion_event_onset.yaml --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt --run_id event_convert_v1
 ```
 
-Notes:
-
-- These checks validate structure, config consistency, dataset parsing, preprocessing, and runtime loop behavior.
-- They do **not** prove MindSpore training/export on this machine.
-
-## 5. Ascend Machine Validation
-
-Run from `F:\ICT\义肢核心代码\_incoming\HuaWei_ict_github\code`:
+## 4) Runtime Benchmark
 
 ```powershell
-python scripts/preflight.py --mode ascend
-python -m training.train --data_dir ../data --config configs/training.yaml --epochs 1
-python -m conversion.convert --checkpoint checkpoints/neurogrip_best.ckpt --output models/neurogrip --config configs/conversion.yaml
-python scripts/preflight.py --mode ascend
-python -m runtime.run --config configs/runtime.yaml --standalone --max_cycles 300
-python -m runtime.run --config configs/runtime.yaml
+python scripts/benchmark_event_runtime_ckpt.py --training_config configs/training_event_onset.yaml --runtime_config configs/runtime_event_onset.yaml --data_dir ../data --backend both --output artifacts/event_runtime_benchmark_compare.json
 ```
 
-## 6. Common Failure Modes
+## 5) Runtime Startup
 
-1. `mindspore`/`mindspore_lite` missing:
-- Install platform-specific packages first.
+Standalone smoke:
 
-2. Runtime model file missing (`models/neurogrip.mindir`):
-- Run training + conversion first.
+```powershell
+python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend lite --standalone --duration_sec 10
+```
 
-3. Runtime model build fails on Lite backend (example keywords):
-- `AdaptiveAvgPool2D`, `unsupported primitive type`
-- `GetPrimitiveCreator failed`, `InferSubgraph failed`, `ret = -500`
-- `build_from_file failed! Error is Common error code.`
-- Actions:
-  - Ensure runtime device is configured as `Ascend` on target machine.
-  - Re-export `.mindir` after compatibility fixes; do not rely on old model artifacts.
-  - Re-run `python scripts/preflight.py --mode ascend` after conversion.
+Real hardware:
 
-4. Shape mismatch at runtime:
-- Ensure preprocess settings are aligned across:
-  - `configs/training.yaml`
-  - `configs/conversion.yaml`
-  - `configs/runtime.yaml`
+```powershell
+python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend lite
+```
 
-5. Hardware communication issues:
-- Validate serial port / I2C settings in `configs/runtime.yaml`.
-- Use `--standalone --max_cycles N` first to isolate software from hardware issues.
+## 6) Deployment Artifacts
 
-## 7. Definition of Done for Handoff
-
-- Preflight passes on target machine.
-- Training command runs and emits checkpoint.
-- Conversion command emits `.mindir`.
-- Standalone runtime loop runs and exits cleanly with `--max_cycles`.
-- Real runtime command starts and controls hardware as expected.
+- `models/event_onset.mindir`
+- `models/event_onset.model_metadata.json`
+- `configs/runtime_event_onset.yaml`

@@ -1,117 +1,84 @@
-﻿# Evaluation + Retrain Closed Loop Runbook
+# Event-Onset Retrain + Deploy Runbook
 
-This runbook defines the trusted workflow for 6-class retraining and deployment.
+This runbook defines the production workflow for the event-onset branch.
 
-Note: current default configs use dual-branch fused features with model input
-shape `(1, 16, 24, 6)`. Legacy single-branch `(1, 6, 24, 6)` and legacy
-dual-branch `(1, 12, 24, 6)` artifacts are not
-compatible and must be retrained/re-converted.
-
-## 1) Build/Reuse Split Manifest (no file leakage)
-
-Preferred: create once, then reuse for all model comparisons.
-
-On first run, if `training/data.split_manifest_path` is configured but missing,
-`training.train` will auto-generate and persist a manifest at that path
-(or at `--split_manifest_out` if provided).
+## 1) DB5 Pretrain
 
 ```bash
-python -m training.train \
-  --config configs/training.yaml \
-  --data_dir ../data \
-  --split_mode grouped_file \
-  --test_ratio 0.2 \
-  --split_manifest_out artifacts/splits/default_split_manifest.json
+python scripts/pretrain_ninapro_db5.py \
+  --config configs/pretrain_ninapro_db5.yaml \
+  --data_dir ../data_ninaproDB5 \
+  --run_id db5_pretrain_v1
 ```
 
-If a manifest already exists, lock it:
+## 2) Wearer Finetune
 
 ```bash
-python -m training.train \
-  --config configs/training.yaml \
+python scripts/finetune_event_onset.py \
+  --config configs/training_event_onset.yaml \
   --data_dir ../data \
-  --split_manifest_in artifacts/splits/default_split_manifest.json
+  --pretrained_emg_checkpoint artifacts/runs/db5_pretrain_v1/checkpoints/db5_pretrain_best.ckpt \
+  --run_id event_finetune_v1
 ```
 
-## 2) Train (train-only augmentation, model selection on val)
-
-```bash
-python -m training.train \
-  --config configs/training.yaml \
-  --data_dir ../data \
-  --split_manifest_in artifacts/splits/default_split_manifest.json
-```
-
-Artifacts:
-- best checkpoint: `checkpoints/neurogrip_best.ckpt`
-- training history: `logs/training_history.csv`
-- test report: `logs/evaluation/test_metrics.json`
-- per-class table: `logs/evaluation/test_per_class_metrics.csv`
-- confusion matrix: `logs/evaluation/test_confusion_matrix.csv`
-
-## 3) Independent Evaluation Entry (checkpoint + manifest)
+## 3) Evaluate Checkpoint
 
 ```bash
 python scripts/evaluate_ckpt.py \
-  --checkpoint checkpoints/neurogrip_best.ckpt \
-  --split_manifest artifacts/splits/default_split_manifest.json \
-  --output_dir logs/eval_recheck
+  --config configs/training_event_onset.yaml \
+  --data_dir ../data \
+  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
+  --split_manifest artifacts/splits/event_onset_split_manifest.json
 ```
 
-Use this for reproducibility audits and side-by-side model comparisons.
-
-## 4) Convert + Deploy
+## 4) Convert to MindIR
 
 ```bash
-python -m conversion.convert \
-  --checkpoint checkpoints/neurogrip_best.ckpt \
-  --output models/neurogrip \
-  --config configs/conversion.yaml
+python scripts/convert_event_onset.py \
+  --config configs/conversion_event_onset.yaml \
+  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
+  --run_id event_convert_v1
 ```
 
-Deploy `models/neurogrip.mindir` and runtime config to Orange Pi.
+Conversion outputs:
 
-## 5) Realtime Retest on Orange Pi (CPU)
+- `models/event_onset.mindir`
+- `models/event_onset.model_metadata.json`
 
-Baseline manual retest at 20Hz (acceptance still uses the trusted realtime benchmark):
+## 5) Runtime Benchmark (CKPT vs Lite)
 
 ```bash
-python scripts/realtime_ckpt.py \
-  --runtime_config configs/runtime.yaml \
-  --training_config configs/training.yaml \
-  --port /dev/ttyUSB0 \
-  --device CPU \
-  --ckpt checkpoints/neurogrip_best.ckpt \
-  --threshold 0.6 \
-  --infer_rate_hz 20
+python scripts/benchmark_event_runtime_ckpt.py \
+  --training_config configs/training_event_onset.yaml \
+  --runtime_config configs/runtime_event_onset.yaml \
+  --data_dir ../data \
+  --backend both \
+  --output artifacts/event_runtime_benchmark_compare.json
 ```
 
-A/B retest for scheduling:
-- profile A: `--infer_rate_hz 20`
-- profile B: `--infer_rate_hz 15`
+## 6) Deploy and Run on Orange Pi
 
-Optional fallback:
-- if misses increase too much at 15Hz, test `--infer_rate_hz 25`
+Copy `models/event_onset.mindir`, `models/event_onset.model_metadata.json`, and
+`configs/runtime_event_onset.yaml` to target machine.
 
-## 6) Acceptance Checklist (must all pass)
+Production run:
 
-- [ ] split manifest fixed and versioned
-- [ ] grouped_file split has no cross-set source overlap
-- [ ] augmentation is applied to train only (never val/test)
-- [ ] final KPI is reported on test only
-- [ ] evaluation reproducible with same checkpoint + same manifest
-- [ ] deployment retest includes hit/false-trigger/latency p50,p95 records
+```bash
+python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend lite
+```
 
-## 7) Recommended Realtime Parameter Table
+Debug run (non-production):
 
-| Scenario | threshold | vote_window | vote_min | infer_rate_hz |
-|---|---:|---:|---:|---:|
-| first deployment retest | 0.60 | 5 | 3 | 20 |
-| reduce CPU load | 0.60 | 5 | 3 | 15 |
-| recover missed gestures | 0.60 | 5 | 3 | 25 |
+```bash
+python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend ckpt
+```
 
-Notes:
-- `infer_rate_hz=0` means no rate limit (backward-compatible behavior).
-- Keep threshold/voting tunable in config/CLI; do not hard-code in logic.
+## 7) Merge Gate
 
+Before merging to `master`, verify:
 
+- `transition_hit_rate_mindir >= transition_hit_rate_ckpt - 0.03`
+- `false_trigger_rate_mindir <= false_trigger_rate_ckpt + 0.03`
+- `state_hold_accuracy_mindir >= state_hold_accuracy_ckpt - 0.03`
+- `release_accuracy_mindir >= release_accuracy_ckpt - 0.03`
+- `latency_p95_mindir <= latency_p95_ckpt * 1.30`
