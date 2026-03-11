@@ -32,7 +32,7 @@ def _set_device(mode: str = "graph", target: str = "CPU", device_id: int = 0) ->
     mode_map = {"graph": context.GRAPH_MODE, "pynative": context.PYNATIVE_MODE}
     context.set_context(mode=mode_map.get(mode, context.GRAPH_MODE))
     context.set_context(device_target=target)
-    if target.upper() == "GPU":
+    if target.upper() in {"GPU", "ASCEND"}:
         context.set_context(device_id=device_id)
 
 

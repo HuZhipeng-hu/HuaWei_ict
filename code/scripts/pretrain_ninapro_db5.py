@@ -17,7 +17,7 @@ if str(CODE_ROOT) not in sys.path:
 
 from ninapro_db5.config import load_db5_pretrain_config
 from ninapro_db5.dataset import DB5PretrainDatasetLoader
-from ninapro_db5.evaluate import evaluate_db5_model, load_db5_model_from_checkpoint
+from ninapro_db5.evaluate import _set_device, evaluate_db5_model, load_db5_model_from_checkpoint
 from ninapro_db5.model import build_db5_pretrain_model
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, dump_yaml, ensure_run_dir
 from training.data.split_strategy import build_manifest
@@ -42,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data_dir", default=None)
     parser.add_argument("--device_target", default="CPU", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)
+    parser.add_argument(
+        "--launch_blocking",
+        action="store_true",
+        help="Enable MindSpore launch_blocking for operator-level error localization.",
+    )
     parser.add_argument("--run_id", default=None)
     parser.add_argument("--run_root", default="artifacts/runs")
     return parser
@@ -66,6 +71,20 @@ def _top_confusion_pair_text(report: dict) -> str:
     return f"{pair['pair'][0]}<->{pair['pair'][1]}:{pair['count']}"
 
 
+def _maybe_enable_launch_blocking(enabled: bool) -> None:
+    if not enabled:
+        return
+    try:
+        from mindspore import runtime
+
+        runtime.launch_blocking()
+        logging.getLogger("ninapro_db5.pretrain").info("MindSpore launch_blocking enabled.")
+    except Exception as exc:  # pragma: no cover - depends on runtime API availability
+        logging.getLogger("ninapro_db5.pretrain").warning(
+            "Failed to enable launch_blocking: %s", exc
+        )
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -81,6 +100,9 @@ def main() -> None:
     logger.info("Run ID: %s", run_id)
     logger.info("Run directory: %s", run_dir)
     copy_config_snapshot(args.config, run_dir / "config_snapshots" / Path(args.config).name)
+    _maybe_enable_launch_blocking(args.launch_blocking)
+    _set_device(target=args.device_target, device_id=args.device_id)
+    logger.info("Training device configured: target=%s device_id=%d", args.device_target, args.device_id)
 
     dump_yaml(
         run_dir / "config_snapshots" / "effective_config.yaml",
@@ -130,8 +152,6 @@ def main() -> None:
     history = trainer.train(train_x, train_y, val_x, val_y)
     history_path = run_dir / "training_history.csv"
     _save_history(history, history_path)
-
-    from ninapro_db5.evaluate import _set_device
 
     _set_device(target=args.device_target, device_id=args.device_id)
     best_model = load_db5_model_from_checkpoint(trainer.checkpoint_path, config, num_classes=len(class_names))
