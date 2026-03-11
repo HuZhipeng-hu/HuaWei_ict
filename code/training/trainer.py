@@ -71,6 +71,8 @@ def build_balanced_sample_indices(
     labels = labels.astype(np.int32)
     class_ids = np.unique(labels)
     class_indices: Dict[int, np.ndarray] = {int(c): np.where(labels == c)[0] for c in class_ids}
+    if steps <= 0 or batch_size <= 0 or class_ids.size == 0:
+        return np.asarray([], dtype=np.int32)
 
     if sampler_cfg.type.lower() != "balanced":
         base = np.arange(labels.shape[0], dtype=np.int32)
@@ -80,8 +82,6 @@ def build_balanced_sample_indices(
         return expanded.astype(np.int32)
 
     n_classes = len(class_ids)
-    per_class = max(1, batch_size // max(1, n_classes))
-    remainder = max(0, batch_size - per_class * n_classes)
 
     gesture_to_idx = {g.name: i for i, g in enumerate(GESTURE_DEFINITIONS)}
     hard_ids = _resolve_confusion_class_ids(sampler_cfg.confusion_pairs, gesture_to_idx)
@@ -96,16 +96,25 @@ def build_balanced_sample_indices(
     all_indices: List[int] = []
     for _ in range(steps):
         batch_idx: List[int] = []
-        for cls in class_ids:
-            pool = class_indices[int(cls)]
-            chosen = rng.choice(pool, size=per_class, replace=len(pool) < per_class)
-            batch_idx.extend(chosen.tolist())
-
-        if remainder > 0:
-            rem_classes = rng.choice(class_ids, size=remainder, replace=True, p=class_probs)
-            for cls in rem_classes:
+        if n_classes >= batch_size:
+            # More classes than slots: pick a class subset each step instead of truncating.
+            chosen_classes = rng.choice(class_ids, size=batch_size, replace=False, p=class_probs)
+            for cls in chosen_classes:
                 pool = class_indices[int(cls)]
                 batch_idx.append(int(rng.choice(pool)))
+        else:
+            per_class = max(1, batch_size // n_classes)
+            remainder = max(0, batch_size - per_class * n_classes)
+            for cls in class_ids:
+                pool = class_indices[int(cls)]
+                chosen = rng.choice(pool, size=per_class, replace=len(pool) < per_class)
+                batch_idx.extend(chosen.tolist())
+
+            if remainder > 0:
+                rem_classes = rng.choice(class_ids, size=remainder, replace=True, p=class_probs)
+                for cls in rem_classes:
+                    pool = class_indices[int(cls)]
+                    batch_idx.append(int(rng.choice(pool)))
 
         rng.shuffle(batch_idx)
         all_indices.extend(batch_idx[:batch_size])
