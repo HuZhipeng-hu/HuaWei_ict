@@ -124,6 +124,7 @@ def create_mindspore_dataset(
     batch_size: int,
     *,
     shuffle: bool = True,
+    drop_remainder: bool = False,
 ) -> "ds.Dataset":
     if ds is None:
         raise RuntimeError("MindSpore dataset is not available")
@@ -133,7 +134,7 @@ def create_mindspore_dataset(
         column_names=["sample", "label"],
         shuffle=shuffle,
     )
-    dataset = dataset.batch(batch_size, drop_remainder=False)
+    dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
     return dataset
 
 
@@ -317,7 +318,13 @@ class Trainer:
         )
         batch_samples = train_samples[indices]
         batch_labels = train_labels[indices]
-        return create_mindspore_dataset(batch_samples, batch_labels, self.config.batch_size, shuffle=False)
+        return create_mindspore_dataset(
+            batch_samples,
+            batch_labels,
+            self.config.batch_size,
+            shuffle=False,
+            drop_remainder=True,
+        )
 
     def _evaluate(self, dataset: "ds.Dataset") -> Dict[str, float]:
         losses: List[float] = []

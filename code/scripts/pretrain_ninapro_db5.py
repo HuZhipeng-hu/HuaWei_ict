@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--run_id", default=None)
     parser.add_argument("--run_root", default="artifacts/runs")
+    parser.add_argument("--batch_size", type=int, default=None, help="Override training.batch_size from config")
     return parser
 
 
@@ -94,6 +95,10 @@ def main() -> None:
     args = build_parser().parse_args()
     start = time.time()
     config = load_db5_pretrain_config(args.config)
+    if args.batch_size is not None:
+        if args.batch_size <= 0:
+            raise ValueError("--batch_size must be > 0")
+        config.training.batch_size = int(args.batch_size)
     data_dir = args.data_dir or config.data_dir
     run_id, run_dir = ensure_run_dir(args.run_root, args.run_id, default_tag="db5_pretrain")
     logger = logging.getLogger("ninapro_db5.pretrain")
@@ -122,6 +127,17 @@ def main() -> None:
     samples, labels, source_ids = loader.load_all_with_sources()
     class_names = loader.get_class_names()
     logger.info("Loaded DB5 samples: %s labels=%d classes=%d", tuple(samples.shape), labels.shape[0], len(class_names))
+    finite_mask = np.isfinite(samples)
+    if not bool(np.all(finite_mask)):
+        bad_count = int(np.size(samples) - np.count_nonzero(finite_mask))
+        raise RuntimeError(f"DB5 samples contain non-finite values (NaN/Inf): count={bad_count}")
+    logger.info(
+        "Sample stats: min=%.5f max=%.5f mean=%.5f std=%.5f",
+        float(np.min(samples)),
+        float(np.max(samples)),
+        float(np.mean(samples)),
+        float(np.std(samples)),
+    )
 
     manifest = build_manifest(
         labels,
