@@ -87,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device_target", default=None, choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--emg_input_shape", default=None, help="Override EMG shape like 1,8,24,3")
     parser.add_argument("--imu_input_shape", default=None, help="Override IMU shape like 1,6,16")
+    parser.add_argument(
+        "--target_db5_keys",
+        default=None,
+        help="Comma-separated DB5 action keys, e.g. E1_G01,E1_G02. RELAX is implicit.",
+    )
     parser.add_argument("--run_id", default=None)
     parser.add_argument("--run_root", default="artifacts/runs")
     return parser
@@ -119,6 +124,12 @@ def main() -> None:
     device_target = args.device_target or raw.get("device_target", "CPU")
 
     model_cfg, data_cfg, _, _ = load_event_training_config(training_config)
+    if args.target_db5_keys:
+        keys = [item.strip().upper() for item in str(args.target_db5_keys).split(",") if item.strip()]
+        if not keys:
+            raise ValueError("--target_db5_keys provided but no valid keys parsed.")
+        data_cfg.target_db5_keys = keys
+        model_cfg.num_classes = 1 + len(keys)
     model = build_event_model(model_cfg)
 
     context.set_context(mode=context.GRAPH_MODE, device_target=device_target)
@@ -161,7 +172,7 @@ def main() -> None:
     export(model, dummy_emg, dummy_imu, file_name=output_stem, file_format="MINDIR")
     model_path = str(Path(output_stem + ".mindir"))
 
-    label_spec = get_label_mode_spec(data_cfg.label_mode)
+    label_spec = get_label_mode_spec(data_cfg.label_mode, data_cfg.target_db5_keys)
     metadata = _build_model_metadata(
         training_config_path=str(training_config),
         checkpoint_path=str(checkpoint_path),

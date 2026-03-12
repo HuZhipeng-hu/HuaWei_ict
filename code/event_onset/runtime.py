@@ -1,16 +1,16 @@
-"""Runtime state machine and feature helpers for event-onset control."""
+"""Runtime state machine and feature helpers for multi-class event-onset control."""
 
 from __future__ import annotations
 
 from collections import Counter, deque
 from dataclasses import dataclass
-from typing import Callable, Deque, Optional
+from typing import Callable, Deque, Optional, Sequence
 
 import numpy as np
 
 from event_onset.config import EventDataConfig, EventInferenceConfig, EventRuntimeBehaviorConfig
-from shared.preprocessing import PreprocessPipeline
 from shared.gestures import GestureType
+from shared.preprocessing import PreprocessPipeline
 
 
 @dataclass
@@ -19,6 +19,7 @@ class RuntimeDecision:
     changed: bool
     emitted_label: int
     voted_label: int
+    emitted_class_name: str
 
 
 @dataclass
@@ -32,7 +33,7 @@ class ControllerStep:
 
 
 class EventRuntimeStateMachine:
-    """Event-onset runtime controller with vote, latching and idle release."""
+    """Event-onset runtime controller with vote, latching and idle release for N action labels."""
 
     def __init__(
         self,
@@ -40,21 +41,37 @@ class EventRuntimeStateMachine:
         runtime_config: EventRuntimeBehaviorConfig,
         *,
         low_energy_threshold: float,
+        class_names: Sequence[str],
+        label_to_state: dict[int, GestureType],
     ):
+        if not class_names:
+            raise ValueError("class_names must not be empty")
+        if 0 not in label_to_state:
+            raise ValueError("label_to_state must contain label 0 (RELAX).")
+
         self.inference_config = inference_config
         self.runtime_config = runtime_config
         self.low_energy_threshold = float(low_energy_threshold)
-        self.current_state = GestureType.RELAX
+        self.class_names = [str(name).strip().upper() for name in class_names]
+        self.label_to_state = dict(label_to_state)
+        self.action_labels = {idx for idx in range(1, len(self.class_names))}
+
+        self.current_label = 0
+        self.current_state = self.label_to_state.get(0, GestureType.RELAX)
         self._vote_window: Deque[int] = deque(maxlen=max(1, int(inference_config.vote_window)))
         self._idle_since_ms: Optional[float] = None
         self._last_transition_ms: float = -1e9
 
+    def _class_name(self, label: int) -> str:
+        if 0 <= int(label) < len(self.class_names):
+            return self.class_names[int(label)]
+        return f"CLASS_{int(label)}"
+
     def _class_threshold(self, label: int) -> float:
-        if label == 1:
-            return float(self.inference_config.fist_confidence_threshold)
-        if label == 2:
-            return float(self.inference_config.pinch_confidence_threshold)
-        return float(self.inference_config.confidence_threshold)
+        base = float(self.inference_config.confidence_threshold)
+        class_name = self._class_name(label)
+        overrides = self.inference_config.per_class_confidence_thresholds or {}
+        return float(overrides.get(class_name, base))
 
     def _vote(self) -> int:
         if not self._vote_window:
@@ -74,11 +91,10 @@ class EventRuntimeStateMachine:
         top2_confidence: float,
         now_ms: float,
     ) -> bool:
-        if predicted_label not in {1, 2}:
+        if predicted_label not in self.action_labels:
             return False
 
-        current_state_label = int(self.current_state)
-        switching = current_state_label in {1, 2} and predicted_label != current_state_label
+        switching = self.current_label in self.action_labels and predicted_label != self.current_label
         threshold = self._class_threshold(predicted_label)
         if switching:
             threshold += float(self.inference_config.switch_confidence_boost)
@@ -109,26 +125,44 @@ class EventRuntimeStateMachine:
     ) -> RuntimeDecision:
         now_ms = float(now_ms)
         active_event = self._accept_action_event(
-            predicted_label,
+            int(predicted_label),
             float(confidence),
             current_state_confidence=float(current_state_confidence),
             top2_confidence=float(top2_confidence),
             now_ms=now_ms,
         )
         if active_event:
-            last_active = next((label for label in reversed(self._vote_window) if label in {1, 2}), None)
-            if last_active is not None and last_active != int(predicted_label):
+            last_active = next(
+                (label for label in reversed(self._vote_window) if label in self.action_labels),
+                None,
+            )
+            if last_active is not None and int(last_active) != int(predicted_label):
                 self._vote_window.clear()
             self._vote_window.append(int(predicted_label))
             voted_label = self._vote()
             self._idle_since_ms = None
-            if voted_label in {1, 2} and (now_ms - self._last_transition_ms) >= float(self.runtime_config.min_transition_gap_ms):
-                target_state = GestureType.FIST if voted_label == 1 else GestureType.PINCH
+            if voted_label in self.action_labels and (
+                now_ms - self._last_transition_ms
+            ) >= float(self.runtime_config.min_transition_gap_ms):
+                self.current_label = int(voted_label)
+                target_state = self.label_to_state.get(self.current_label, GestureType.RELAX)
                 changed = target_state != self.current_state
                 self.current_state = target_state
                 self._last_transition_ms = now_ms
-                return RuntimeDecision(state=self.current_state, changed=changed, emitted_label=voted_label, voted_label=voted_label)
-            return RuntimeDecision(state=self.current_state, changed=False, emitted_label=0, voted_label=voted_label)
+                return RuntimeDecision(
+                    state=self.current_state,
+                    changed=changed,
+                    emitted_label=self.current_label,
+                    voted_label=int(voted_label),
+                    emitted_class_name=self._class_name(self.current_label),
+                )
+            return RuntimeDecision(
+                state=self.current_state,
+                changed=False,
+                emitted_label=0,
+                voted_label=int(voted_label),
+                emitted_class_name=self._class_name(0),
+            )
 
         self._vote_window.append(0)
         if energy <= self.low_energy_threshold:
@@ -137,13 +171,29 @@ class EventRuntimeStateMachine:
         else:
             self._idle_since_ms = None
 
-        if self._idle_since_ms is not None and (now_ms - self._idle_since_ms) >= float(self.runtime_config.idle_release_hold_ms):
-            changed = self.current_state != GestureType.RELAX
-            self.current_state = GestureType.RELAX
+        if self._idle_since_ms is not None and (
+            now_ms - self._idle_since_ms
+        ) >= float(self.runtime_config.idle_release_hold_ms):
+            self.current_label = 0
+            target_state = self.label_to_state.get(0, GestureType.RELAX)
+            changed = self.current_state != target_state
+            self.current_state = target_state
             self._last_transition_ms = now_ms if changed else self._last_transition_ms
-            return RuntimeDecision(state=self.current_state, changed=changed, emitted_label=0, voted_label=0)
+            return RuntimeDecision(
+                state=self.current_state,
+                changed=changed,
+                emitted_label=0,
+                voted_label=0,
+                emitted_class_name=self._class_name(0),
+            )
 
-        return RuntimeDecision(state=self.current_state, changed=False, emitted_label=0, voted_label=0)
+        return RuntimeDecision(
+            state=self.current_state,
+            changed=False,
+            emitted_label=0,
+            voted_label=0,
+            emitted_class_name=self._class_name(0),
+        )
 
 
 class EventFeatureExtractor:
@@ -207,6 +257,8 @@ class EventOnsetController:
         data_config: EventDataConfig,
         inference_config: EventInferenceConfig,
         runtime_config: EventRuntimeBehaviorConfig,
+        class_names: Sequence[str],
+        label_to_state: dict[int, GestureType],
         predict_proba: Callable[[np.ndarray, np.ndarray], np.ndarray],
         actuator=None,
     ):
@@ -218,6 +270,8 @@ class EventOnsetController:
             inference_config=inference_config,
             runtime_config=runtime_config,
             low_energy_threshold=float(runtime_config.low_energy_release_threshold or data_config.quality_filter.energy_min),
+            class_names=class_names,
+            label_to_state=label_to_state,
         )
         self._buffer: Deque[np.ndarray] = deque(maxlen=int(data_config.context_samples))
         self._processed_samples = 0
@@ -254,7 +308,8 @@ class EventOnsetController:
         confidence = float(np.max(probs))
         sorted_probs = np.sort(probs)[::-1]
         top2_confidence = float(sorted_probs[1]) if sorted_probs.size > 1 else 0.0
-        current_state_confidence = float(probs[int(self.state_machine.current_state)]) if int(self.state_machine.current_state) < probs.shape[0] else 0.0
+        current_label = int(self.state_machine.current_label)
+        current_state_confidence = float(probs[current_label]) if current_label < probs.shape[0] else 0.0
         now_ms = float(self._processed_samples) * 1000.0 / float(self.data_config.device_sampling_rate_hz)
         decision = self.state_machine.update(
             predicted_label,
@@ -274,3 +329,4 @@ class EventOnsetController:
             confidence=confidence,
             decision=decision,
         )
+

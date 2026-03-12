@@ -1,0 +1,4 @@
+actuation_map:
+  RELAX: RELAX
+  E1_G01: FIST
+  E1_G02: PINCH

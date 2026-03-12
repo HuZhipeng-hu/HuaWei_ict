@@ -18,8 +18,9 @@ if str(CODE_ROOT) not in sys.path:
 from event_onset.config import load_event_runtime_config, load_event_training_config
 from event_onset.dataset import EventClipDatasetLoader
 from event_onset.inference import EventPredictor
+from event_onset.actuation_mapping import load_and_validate_actuation_map
 from event_onset.runtime import EventOnsetController
-from shared.gestures import GestureType
+from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
 
@@ -33,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_metadata", default=None)
     parser.add_argument("--split_manifest", default=None)
     parser.add_argument("--recordings_manifest", default=None)
+    parser.add_argument(
+        "--target_db5_keys",
+        default=None,
+        help="Comma-separated DB5 action keys to override training/runtime config, e.g. E1_G01,E1_G02.",
+    )
     parser.add_argument("--output", default="artifacts/event_runtime_benchmark.json")
     parser.add_argument("--device_target", default="CPU", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--backend", default="both", choices=["ckpt", "lite", "both"])
@@ -51,6 +57,45 @@ def _build_mock_predictor(seed: int, num_classes: int) -> Callable[[np.ndarray, 
     return _predict
 
 
+def _validate_runtime_class_contract(
+    *,
+    backend: str,
+    expected_class_names: list[str],
+    model_num_classes: int,
+    mapping_by_name: dict[str, str],
+    metadata,
+) -> None:
+    normalized_expected = [str(name).strip().upper() for name in expected_class_names]
+    if int(model_num_classes) != len(normalized_expected):
+        raise ValueError(
+            f"model.num_classes={model_num_classes} mismatches expected labels={len(normalized_expected)} "
+            f"({normalized_expected})"
+        )
+
+    mapping_keys = sorted(str(key).strip().upper() for key in mapping_by_name.keys())
+    if mapping_keys != sorted(normalized_expected):
+        raise ValueError(
+            f"Actuation mapping keys mismatch expected classes. mapping_keys={mapping_keys}, "
+            f"expected={sorted(normalized_expected)}"
+        )
+
+    if metadata is None:
+        if backend == "lite":
+            raise ValueError("Lite backend requires model metadata with class_names for strict runtime validation.")
+        return
+
+    metadata_class_names = [str(name).strip().upper() for name in metadata.class_names]
+    if not metadata_class_names:
+        if backend == "lite":
+            raise ValueError("Lite backend metadata must include non-empty class_names.")
+        return
+    if metadata_class_names != normalized_expected:
+        raise ValueError(
+            "Runtime class order mismatch between config and model metadata: "
+            f"config={normalized_expected}, metadata={metadata_class_names}"
+        )
+
+
 def _benchmark_backend(
     *,
     backend_name: str,
@@ -58,7 +103,10 @@ def _benchmark_backend(
     loader: EventClipDatasetLoader,
     runtime_cfg,
     test_sources: set[str],
+    class_names: list[str],
+    label_to_state: dict[int, object],
 ) -> dict:
+    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
     transition_hits = 0
     transition_total = 0
     false_triggers = 0
@@ -77,18 +125,28 @@ def _benchmark_backend(
             data_config=runtime_cfg.data,
             inference_config=runtime_cfg.inference,
             runtime_config=runtime_cfg.runtime,
+            class_names=class_names,
+            label_to_state=label_to_state,
             predict_proba=predict_proba,
         )
-        controller.state_machine.current_state = getattr(GestureType, start_state)
+        normalized_start = str(start_state).strip().upper()
+        normalized_target = str(target_state).strip().upper()
+        if normalized_start not in class_to_idx or normalized_target not in class_to_idx:
+            continue
+        start_label = int(class_to_idx[normalized_start])
+        target_label = int(class_to_idx[normalized_target])
+        start_state_gesture = label_to_state[start_label]
+        expected_state = label_to_state[target_label]
+        controller.state_machine.current_label = start_label
+        controller.state_machine.current_state = start_state_gesture
         steps = controller.ingest_rows(matrix[:, :14])
         transitions = [step for step in steps if step.decision.changed]
-        expected_state = getattr(GestureType, target_state)
 
-        if target_state == "RELAX":
+        if normalized_target == "RELAX":
             release_total += 1
-            if controller.current_state == GestureType.RELAX:
+            if controller.current_state == label_to_state[0]:
                 release_correct += 1
-            if any(step.decision.state != GestureType.RELAX for step in transitions):
+            if any(step.decision.state != label_to_state[0] for step in transitions):
                 false_triggers += 1
         else:
             transition_total += 1
@@ -96,7 +154,7 @@ def _benchmark_backend(
             if first_target is not None:
                 transition_hits += 1
                 latencies.append(max(0.0, first_target.now_ms - float(metadata.get("pre_roll_ms") or 0)))
-            if any(step.decision.state not in {getattr(GestureType, start_state), expected_state} for step in transitions):
+            if any(step.decision.state not in {start_state_gesture, expected_state} for step in transitions):
                 false_triggers += 1
             hold_total += 1
             if controller.current_state == expected_state:
@@ -161,6 +219,14 @@ def main() -> None:
 
     model_cfg, data_cfg, _, _ = load_event_training_config(args.training_config)
     runtime_cfg = load_event_runtime_config(args.runtime_config)
+    if args.target_db5_keys:
+        keys = [item.strip().upper() for item in str(args.target_db5_keys).split(",") if item.strip()]
+        if not keys:
+            raise ValueError("--target_db5_keys provided but no valid keys parsed.")
+        data_cfg.target_db5_keys = keys
+        runtime_cfg.data.target_db5_keys = list(keys)
+    label_spec = get_label_mode_spec(data_cfg.label_mode, data_cfg.target_db5_keys)
+    model_cfg.num_classes = int(len(label_spec.class_names))
     runtime_cfg.device.target = args.device_target
     if args.checkpoint:
         runtime_cfg.checkpoint_path = args.checkpoint
@@ -173,6 +239,10 @@ def main() -> None:
     manifest = load_manifest(manifest_path)
     test_sources = set(manifest.test_sources)
     loader = EventClipDatasetLoader(args.data_dir, data_cfg, recordings_manifest_path=args.recordings_manifest or data_cfg.recordings_manifest_path)
+    label_to_state, mapping_by_name = load_and_validate_actuation_map(
+        runtime_cfg.actuation_mapping_path,
+        class_names=label_spec.class_names,
+    )
 
     backends = [args.backend] if args.backend != "both" else ["ckpt", "lite"]
     reports: dict[str, dict] = {}
@@ -180,6 +250,13 @@ def main() -> None:
     for backend in backends:
         if args.mock:
             predictor_fn = _build_mock_predictor(seed=42 if backend == "ckpt" else 123, num_classes=model_cfg.num_classes)
+            _validate_runtime_class_contract(
+                backend=backend,
+                expected_class_names=list(label_spec.class_names),
+                model_num_classes=int(model_cfg.num_classes),
+                mapping_by_name=mapping_by_name,
+                metadata=None,
+            )
         else:
             predictor = EventPredictor(
                 backend=backend,
@@ -189,6 +266,13 @@ def main() -> None:
                 model_path=runtime_cfg.model_path,
                 model_metadata_path=runtime_cfg.model_metadata_path,
             )
+            _validate_runtime_class_contract(
+                backend=backend,
+                expected_class_names=list(label_spec.class_names),
+                model_num_classes=int(model_cfg.num_classes),
+                mapping_by_name=mapping_by_name,
+                metadata=predictor.metadata,
+            )
             predictor_fn = predictor.predict_proba
         logger.info("Running event benchmark for backend=%s", backend)
         reports[backend] = _benchmark_backend(
@@ -197,6 +281,8 @@ def main() -> None:
             loader=loader,
             runtime_cfg=runtime_cfg,
             test_sources=test_sources,
+            class_names=label_spec.class_names,
+            label_to_state=label_to_state,
         )
 
     output_payload = {

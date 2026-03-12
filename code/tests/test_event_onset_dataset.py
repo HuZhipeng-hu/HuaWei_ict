@@ -7,12 +7,29 @@ from event_onset.config import load_event_training_config
 from event_onset.dataset import EventClipDatasetLoader
 from event_onset.manifest import EVENT_MANIFEST_FIELDS, upsert_event_manifest
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BASE_TRAINING_CONFIG = REPO_ROOT / "configs" / "training_event_onset.yaml"
+
 
 def _write_standard_csv(path: Path, matrix: np.ndarray) -> None:
     headers = [
-        "emg1", "emg2", "emg3", "emg4", "emg5", "emg6", "emg7", "emg8",
-        "acc_x", "acc_y", "acc_z", "gyro_x", "gyro_y", "gyro_z",
-        "angle_pitch", "angle_roll", "angle_yaw",
+        "emg1",
+        "emg2",
+        "emg3",
+        "emg4",
+        "emg5",
+        "emg6",
+        "emg7",
+        "emg8",
+        "acc_x",
+        "acc_y",
+        "acc_z",
+        "gyro_x",
+        "gyro_y",
+        "gyro_z",
+        "angle_pitch",
+        "angle_roll",
+        "angle_yaw",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as handle:
@@ -76,15 +93,21 @@ def _build_loader(tmp_path: Path) -> tuple[EventClipDatasetLoader, Path]:
 
 def test_event_loader_selects_top_k_action_windows_and_uses_target_state(tmp_path: Path):
     config_path = tmp_path / "training_event_onset.yaml"
-    config_path.write_text((Path("F:/ICT/义肢核心代码/code/configs/training_event_onset.yaml")).read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.write_text(BASE_TRAINING_CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
     loader, manifest_path = _build_loader(tmp_path)
 
-    fist_path = tmp_path / "FIST" / "clip_fist.csv"
-    pinch_path = tmp_path / "PINCH" / "clip_pinch.csv"
-    _write_standard_csv(fist_path, _build_action_matrix())
-    _write_standard_csv(pinch_path, _build_action_matrix(amp=32.0))
-    upsert_event_manifest(manifest_path, _manifest_row("FIST/clip_fist.csv", start_state="RELAX", target_state="FIST", sample_count=600))
-    upsert_event_manifest(manifest_path, _manifest_row("PINCH/clip_pinch.csv", start_state="FIST", target_state="PINCH", sample_count=600))
+    action_a_path = tmp_path / "E1_G01" / "clip_e1_g01.csv"
+    action_b_path = tmp_path / "E1_G02" / "clip_e1_g02.csv"
+    _write_standard_csv(action_a_path, _build_action_matrix())
+    _write_standard_csv(action_b_path, _build_action_matrix(amp=32.0))
+    upsert_event_manifest(
+        manifest_path,
+        _manifest_row("E1_G01/clip_e1_g01.csv", start_state="RELAX", target_state="E1_G01", sample_count=600),
+    )
+    upsert_event_manifest(
+        manifest_path,
+        _manifest_row("E1_G02/clip_e1_g02.csv", start_state="E1_G01", target_state="E1_G02", sample_count=600),
+    )
 
     emg, imu, labels, source_ids, metadata = loader.load_all_with_sources(return_metadata=True)
 
@@ -93,13 +116,13 @@ def test_event_loader_selects_top_k_action_windows_and_uses_target_state(tmp_pat
     assert set(labels.tolist()) == {1, 2}
     assert sum(label == 1 for label in labels.tolist()) == 2
     assert sum(label == 2 for label in labels.tolist()) == 2
-    assert set(source_ids.tolist()) == {"FIST/clip_fist.csv", "PINCH/clip_pinch.csv"}
+    assert set(source_ids.tolist()) == {"E1_G01/clip_e1_g01.csv", "E1_G02/clip_e1_g02.csv"}
     assert all(item["selection_mode"] == "top_k_energy" for item in metadata)
 
 
 def test_event_loader_relax_clip_only_produces_idle_samples(tmp_path: Path):
     config_path = tmp_path / "training_event_onset.yaml"
-    config_path.write_text((Path("F:/ICT/义肢核心代码/code/configs/training_event_onset.yaml")).read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.write_text(BASE_TRAINING_CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
     loader, manifest_path = _build_loader(tmp_path)
 
     relax_path = tmp_path / "RELAX" / "clip_relax.csv"
@@ -116,13 +139,16 @@ def test_event_loader_relax_clip_only_produces_idle_samples(tmp_path: Path):
 
 def test_event_loader_filters_low_energy_action_clip(tmp_path: Path):
     config_path = tmp_path / "training_event_onset.yaml"
-    config_path.write_text((Path("F:/ICT/义肢核心代码/code/configs/training_event_onset.yaml")).read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.write_text(BASE_TRAINING_CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
     loader, manifest_path = _build_loader(tmp_path)
 
     low_energy = _build_action_matrix(amp=0.6)
-    fist_path = tmp_path / "FIST" / "clip_low.csv"
-    _write_standard_csv(fist_path, low_energy)
-    upsert_event_manifest(manifest_path, _manifest_row("FIST/clip_low.csv", start_state="RELAX", target_state="FIST", sample_count=600))
+    action_path = tmp_path / "E1_G01" / "clip_low.csv"
+    _write_standard_csv(action_path, low_energy)
+    upsert_event_manifest(
+        manifest_path,
+        _manifest_row("E1_G01/clip_low.csv", start_state="RELAX", target_state="E1_G01", sample_count=600),
+    )
 
     try:
         loader.load_all_with_sources()

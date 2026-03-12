@@ -17,8 +17,10 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.config import load_event_runtime_config, load_event_training_config
+from event_onset.actuation_mapping import load_and_validate_actuation_map
 from event_onset.manifest import load_event_manifest_rows
 from shared.config import load_config
+from shared.label_modes import get_label_mode_spec
 
 @dataclass
 class Check:
@@ -125,6 +127,18 @@ def collect_config_checks(code_root: Path) -> list[Check]:
         checks.append(Check("ERROR", "training.label_mode", f"expected event_onset, got {data_cfg.label_mode}"))
     else:
         checks.append(Check("INFO", "training.label_mode", "event_onset"))
+    checks.append(Check("INFO", "training.target_db5_keys", ",".join(data_cfg.target_db5_keys)))
+    label_spec = get_label_mode_spec(data_cfg.label_mode, data_cfg.target_db5_keys)
+    if int(model_cfg.num_classes) != len(label_spec.class_names):
+        checks.append(
+            Check(
+                "ERROR",
+                "training.model_num_classes",
+                f"model.num_classes={model_cfg.num_classes}, expected={len(label_spec.class_names)}",
+            )
+        )
+    else:
+        checks.append(Check("INFO", "training.model_num_classes", str(model_cfg.num_classes)))
 
     conv_inputs = conversion_cfg.get("inputs", {}) or {}
     conv_emg = tuple(int(x) for x in conv_inputs.get("emg_shape", expected_emg_shape))
@@ -139,9 +153,17 @@ def collect_config_checks(code_root: Path) -> list[Check]:
     runtime_ckpt = _resolve_under_root(code_root, runtime_cfg.checkpoint_path)
     runtime_mindir = _resolve_under_root(code_root, runtime_cfg.model_path)
     runtime_meta = _resolve_under_root(code_root, runtime_cfg.model_metadata_path)
+    runtime_map = _resolve_under_root(code_root, runtime_cfg.actuation_mapping_path)
     checks.append(Check("INFO" if runtime_ckpt and runtime_ckpt.exists() else "WARN", "runtime.checkpoint_path", f"{runtime_ckpt}" if runtime_ckpt else "unset"))
     checks.append(Check("INFO" if runtime_mindir and runtime_mindir.exists() else "WARN", "runtime.model_path", f"{runtime_mindir}" if runtime_mindir else "unset"))
     checks.append(Check("INFO" if runtime_meta and runtime_meta.exists() else "WARN", "runtime.model_metadata_path", f"{runtime_meta}" if runtime_meta else "unset"))
+    checks.append(Check("INFO" if runtime_map and runtime_map.exists() else "WARN", "runtime.actuation_mapping_path", f"{runtime_map}" if runtime_map else "unset"))
+    if runtime_map and runtime_map.exists():
+        try:
+            _, mapping_by_name = load_and_validate_actuation_map(runtime_map, class_names=label_spec.class_names)
+            checks.append(Check("INFO", "runtime.actuation_mapping_keys", ",".join(sorted(mapping_by_name.keys()))))
+        except Exception as exc:
+            checks.append(Check("ERROR", "runtime.actuation_mapping", str(exc)))
 
     if runtime_meta and runtime_meta.exists():
         try:
@@ -151,6 +173,20 @@ def collect_config_checks(code_root: Path) -> list[Check]:
                 checks.append(Check("ERROR", "runtime.metadata.emg", f"expected {expected_emg_shape}, got {inputs.get('emg')}"))
             if inputs.get("imu") != expected_imu_shape:
                 checks.append(Check("ERROR", "runtime.metadata.imu", f"expected {expected_imu_shape}, got {inputs.get('imu')}"))
+            metadata_class_names = [str(name).strip().upper() for name in payload.get("class_names", [])]
+            expected_class_names = [str(name).strip().upper() for name in label_spec.class_names]
+            if metadata_class_names and metadata_class_names != expected_class_names:
+                checks.append(
+                    Check(
+                        "ERROR",
+                        "runtime.metadata.class_names",
+                        f"expected {expected_class_names}, got {metadata_class_names}",
+                    )
+                )
+            elif not metadata_class_names:
+                checks.append(Check("WARN", "runtime.metadata.class_names", "missing class_names"))
+            else:
+                checks.append(Check("INFO", "runtime.metadata.class_names", ",".join(metadata_class_names)))
         except Exception as exc:
             checks.append(Check("ERROR", "runtime.metadata.parse", str(exc)))
 
@@ -179,7 +215,7 @@ def collect_db5_checks(code_root: Path, db5_data_root: Path, *, skip_probe: bool
         checks.append(Check("WARN", "db5.subject_zip_count", f"expected ~=10 subjects, found {subject_count}"))
 
     if skip_probe:
-        checks.append(Check("WARN", "db5.aligned3_probe", "skipped by --skip_db5_probe"))
+        checks.append(Check("WARN", "db5.full53_probe", "skipped by --skip_db5_probe"))
         return checks
 
     def _iter_segments(labels: np.ndarray):
@@ -193,12 +229,9 @@ def collect_db5_checks(code_root: Path, db5_data_root: Path, *, skip_probe: bool
                 current = value
         yield current, start, labels.shape[0]
 
-    def _gesture_key(exercise: int, local_label: int) -> str:
-        return f"E{int(exercise)}_G{int(local_label):02d}"
-
     try:
-        action_segments: dict[str, int] = {}
-        rest_segments = 0
+        action_keys: set[str] = set()
+        has_rest = False
         labels_key = "restimulus" if bool(cfg.use_restimulus) else "stimulus"
         for zip_path in zip_files:
             with zipfile.ZipFile(zip_path) as zf:
@@ -215,51 +248,23 @@ def collect_db5_checks(code_root: Path, db5_data_root: Path, *, skip_probe: bool
                         continue
                     for local_label, _, _ in _iter_segments(labels):
                         if int(local_label) == 0:
-                            rest_segments += 1
+                            has_rest = True
                         else:
-                            key = _gesture_key(exercise, int(local_label))
-                            action_segments[key] = int(action_segments.get(key, 0)) + 1
+                            key = f"E{int(exercise)}_G{int(local_label):02d}"
+                            action_keys.add(key)
 
-        action_top_k = max(1, int(cfg.aligned3.onset_window_policy.action_top_k_per_segment))
-        rest_top_k = max(1, int(cfg.aligned3.onset_window_policy.rest_top_k_per_segment))
-        min_samples = int(cfg.aligned3.min_samples_per_class)
-        required_classes = ["FIST", "PINCH"] + (["REST"] if bool(cfg.include_rest_class) else [])
-
-        profile_scores: list[tuple[int, int, str, dict[str, int]]] = []
-        for profile in cfg.aligned3.candidate_mapping_profiles:
-            fist_est = int(sum(action_segments.get(key, 0) for key in profile.fist) * action_top_k)
-            pinch_est = int(sum(action_segments.get(key, 0) for key in profile.pinch) * action_top_k)
-            counts = {"FIST": fist_est, "PINCH": pinch_est}
-            if bool(cfg.include_rest_class):
-                counts["REST"] = int(rest_segments * rest_top_k)
-            min_required = min(counts.get(name, 0) for name in required_classes)
-            profile_scores.append((min_required, fist_est + pinch_est, profile.name, counts))
-
-        profile_scores.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        if not profile_scores:
-            checks.append(Check("ERROR", "db5.aligned3.selected_profile", "no candidate profiles configured"))
-            return checks
-        _, _, selected_name, selected_counts = profile_scores[0]
-        checks.append(Check("INFO", "db5.aligned3.selected_profile", selected_name))
-        checks.append(
-            Check(
-                "INFO",
-                "db5.aligned3.estimate_basis",
-                "segment_count * top_k_per_segment (fast estimate)",
-            )
-        )
-        for class_name in required_classes:
-            class_count = int(selected_counts.get(class_name, 0))
-            level = "INFO" if class_count >= min_samples else "WARN"
+        checks.append(Check("INFO", "db5.full53.action_key_count", str(len(action_keys))))
+        checks.append(Check("INFO" if has_rest else "WARN", "db5.full53.has_rest", str(has_rest)))
+        if len(action_keys) < 52:
             checks.append(
                 Check(
-                    level,
-                    f"db5.aligned3.estimated_count.{class_name}",
-                    f"{class_count} (min_required={min_samples})",
+                    "WARN",
+                    "db5.full53.action_key_count",
+                    f"expected around 52 action keys, found {len(action_keys)}",
                 )
             )
     except Exception as exc:
-        checks.append(Check("ERROR", "db5.aligned3_probe", str(exc)))
+        checks.append(Check("ERROR", "db5.full53_probe", str(exc)))
 
     return checks
 
@@ -305,7 +310,8 @@ def collect_budget_checks(
         checks.append(Check("WARN", "budget.window_estimate", "skipped by --skip_budget_probe"))
         return checks
 
-    for class_name in ["RELAX", "FIST", "PINCH"]:
+    target_classes = ["RELAX", *[str(key).strip().upper() for key in data_cfg.target_db5_keys]]
+    for class_name in target_classes:
         clips = int(clip_counts.get(class_name, 0))
         per_clip = int(data_cfg.idle_top_k_windows_per_clip if class_name == "RELAX" else data_cfg.top_k_windows_per_clip)
         estimated_windows = clips * max(1, per_clip)

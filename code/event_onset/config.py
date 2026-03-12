@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Type, TypeVar, get_args, get_origin, get_type_hints
 
 from shared.config import AugmentationConfig, DeviceConfig, HardwareConfig, QualityFilterConfig, TrainingConfig, load_config
+from shared.label_modes import get_label_mode_spec
 
 T = TypeVar("T")
 
@@ -37,7 +38,7 @@ class EventDataConfig:
     split_mode: str = "grouped_file"
     split_manifest_path: str = "artifacts/splits/event_onset_split_manifest.json"
     recordings_manifest_path: str = "recordings_manifest.csv"
-    target_gestures: list[str] = field(default_factory=lambda: ["RELAX", "FIST", "PINCH"])
+    target_db5_keys: list[str] = field(default_factory=lambda: ["E1_G01", "E1_G02"])
     device_sampling_rate_hz: int = 500
     imu_sampling_rate_hz: int = 50
     clip_duration_ms: int = 1200
@@ -77,8 +78,7 @@ class EventModelConfig:
 @dataclass
 class EventInferenceConfig:
     confidence_threshold: float = 0.75
-    fist_confidence_threshold: float = 0.75
-    pinch_confidence_threshold: float = 0.82
+    per_class_confidence_thresholds: dict[str, float] = field(default_factory=dict)
     vote_window: int = 3
     vote_min_count: int = 2
     activation_margin_threshold: float = 0.08
@@ -101,6 +101,7 @@ class EventRuntimeConfig:
     checkpoint_path: str = "checkpoints/event_onset_best.ckpt"
     model_path: str = "models/event_onset.mindir"
     model_metadata_path: str = "models/event_onset.model_metadata.json"
+    actuation_mapping_path: str = "configs/event_actuation_mapping.yaml"
     data: EventDataConfig = field(default_factory=EventDataConfig)
     inference: EventInferenceConfig = field(default_factory=EventInferenceConfig)
     runtime: EventRuntimeBehaviorConfig = field(default_factory=EventRuntimeBehaviorConfig)
@@ -171,10 +172,17 @@ def load_event_training_config(path: str | Path) -> tuple[EventModelConfig, Even
     sections = _resolve_training_sections(load_config(path))
     model = _dict_to_dataclass(sections["model"], EventModelConfig)
     data = _dict_to_dataclass(sections["data"], EventDataConfig)
+    data.target_db5_keys = [
+        str(item).strip().upper()
+        for item in data.target_db5_keys
+        if str(item).strip()
+    ]
+    label_spec = get_label_mode_spec(data.label_mode, data.target_db5_keys)
     model.emg_in_channels = 8
     model.emg_freq_bins = int(data.feature.emg_freq_bins)
     model.imu_input_dim = int(data.feature.imu_input_dim)
     model.imu_num_steps = int(data.feature.imu_resample_steps)
+    model.num_classes = int(len(label_spec.class_names))
     model.emg_time_frames = max(
         1,
         (data.context_samples - int(data.feature.emg_stft_window)) // int(data.feature.emg_stft_hop) + 1,
@@ -191,6 +199,7 @@ def load_event_runtime_config(path: str | Path) -> EventRuntimeConfig:
         "checkpoint_path": root.get("checkpoint_path", "checkpoints/event_onset_best.ckpt"),
         "model_path": root.get("model_path", "models/event_onset.mindir"),
         "model_metadata_path": root.get("model_metadata_path", "models/event_onset.model_metadata.json"),
+        "actuation_mapping_path": root.get("actuation_mapping_path", "configs/event_actuation_mapping.yaml"),
         "data": root.get("data", {}),
         "inference": root.get("inference", {}),
         "runtime": root.get("runtime", {}),

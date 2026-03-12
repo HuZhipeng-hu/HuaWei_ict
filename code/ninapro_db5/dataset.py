@@ -1,4 +1,4 @@
-"""Load NinaPro DB5 MAT archives and build EMG pretraining samples."""
+"""Load NinaPro DB5 MAT archives and build full-coverage EMG pretraining samples."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any, Iterator
 import numpy as np
 import scipy.io as sio
 
-from ninapro_db5.config import DB5MappingProfileConfig, DB5PretrainConfig
+from ninapro_db5.config import DB5PretrainConfig
 from shared.preprocessing import PreprocessPipeline
 
 logger = logging.getLogger(__name__)
@@ -27,30 +27,12 @@ class DB5WindowRecord:
     metadata: dict[str, Any]
 
 
-@dataclass(frozen=True)
-class _AlignedWindowCandidate:
-    feature: np.ndarray
-    source_id: str
-    metadata: dict[str, Any]
-    is_rest: bool
-    gesture_key: str
-
-
 class DB5PretrainDatasetLoader:
     """Build EMG-only pretraining windows from NinaPro DB5 zip archives."""
 
-    def __init__(
-        self,
-        data_dir: str | Path,
-        config: DB5PretrainConfig,
-        *,
-        pretrain_mode: str = "legacy53",
-    ):
+    def __init__(self, data_dir: str | Path, config: DB5PretrainConfig):
         self.data_dir = Path(data_dir)
         self.config = config
-        self.pretrain_mode = str(pretrain_mode).strip().lower()
-        if self.pretrain_mode not in {"legacy53", "aligned3"}:
-            raise ValueError(f"Unsupported pretrain_mode={pretrain_mode!r}; expected legacy53 or aligned3")
         self._stft_pipeline = PreprocessPipeline(
             {
                 "sampling_rate": config.feature.target_sampling_rate_hz,
@@ -70,11 +52,6 @@ class DB5PretrainDatasetLoader:
         )
         self._class_name_by_label: dict[int, str] = {}
         self._gesture_label_map: dict[tuple[int, int], int] = {}
-        self._mapping_profile_report: dict[str, Any] = {
-            "mode": self.pretrain_mode,
-            "selected_profile": None,
-            "candidate_profiles": [],
-        }
 
     def _zip_files(self) -> list[Path]:
         files = sorted(self.data_dir.glob(self.config.zip_glob))
@@ -114,11 +91,7 @@ class DB5PretrainDatasetLoader:
             resampled[:, ch] = np.interp(dst, src, signal[:, ch]).astype(np.float32)
         return resampled
 
-    @staticmethod
-    def _window_energy(window: np.ndarray) -> float:
-        return float(np.mean(np.abs(window)))
-
-    def _select_windows(self, segment_signal: np.ndarray, *, allow_many: int, local_label: int) -> list[np.ndarray]:
+    def _select_windows(self, segment_signal: np.ndarray, *, allow_many: int) -> list[np.ndarray]:
         window = int(self.config.feature.source_window_samples)
         step = int(self.config.feature.source_step_samples)
         if segment_signal.shape[0] < window:
@@ -127,39 +100,16 @@ class DB5PretrainDatasetLoader:
         if not starts:
             starts = [0]
         windows = [self._resample_window(segment_signal[start : start + window]) for start in starts]
-        if not windows:
-            return []
-
-        if self.pretrain_mode != "aligned3":
-            if len(windows) > allow_many:
-                positions = np.linspace(0, len(windows) - 1, allow_many, dtype=int).tolist()
-                windows = [windows[pos] for pos in positions]
-            return windows
-
-        policy = self.config.aligned3.onset_window_policy
-        if local_label == 0:
-            top_k = min(int(policy.rest_top_k_per_segment), allow_many, len(windows))
-            mode = str(policy.rest_selection).strip().lower()
-        else:
-            top_k = min(int(policy.action_top_k_per_segment), allow_many, len(windows))
-            mode = str(policy.action_selection).strip().lower()
-        if top_k <= 0:
-            return []
-
-        if mode in {"peak_energy", "high_energy"}:
-            order = sorted(range(len(windows)), key=lambda idx: self._window_energy(windows[idx]), reverse=True)
-        elif mode in {"low_energy", "idle_energy"}:
-            order = sorted(range(len(windows)), key=lambda idx: self._window_energy(windows[idx]))
-        else:
-            order = list(range(len(windows)))
-        selected = [windows[idx] for idx in order[:top_k]]
-        return selected
+        if len(windows) > allow_many:
+            positions = np.linspace(0, len(windows) - 1, allow_many, dtype=int).tolist()
+            windows = [windows[pos] for pos in positions]
+        return windows
 
     @staticmethod
     def _gesture_key(exercise: int, local_label: int) -> str:
         return f"E{int(exercise)}_G{int(local_label):02d}"
 
-    def _global_label_legacy(self, exercise: int, local_label: int) -> tuple[int, str]:
+    def _global_label(self, exercise: int, local_label: int) -> tuple[int, str]:
         if local_label == 0:
             return 0, "REST"
         key = (int(exercise), int(local_label))
@@ -177,7 +127,7 @@ class DB5PretrainDatasetLoader:
                 payload = handle.read()
         return sio.loadmat(io.BytesIO(payload))
 
-    def _iter_raw_window_candidates(self) -> Iterator[_AlignedWindowCandidate]:
+    def _iter_records(self) -> Iterator[DB5WindowRecord]:
         for zip_path in self._zip_files():
             subject = zip_path.stem.replace(" (1)", "")
             with zipfile.ZipFile(zip_path) as zf:
@@ -214,10 +164,12 @@ class DB5PretrainDatasetLoader:
                         if local_label == 0
                         else self.config.feature.max_windows_per_segment
                     )
-                    windows = self._select_windows(segment, allow_many=allow_many, local_label=int(local_label))
+                    windows = self._select_windows(segment, allow_many=allow_many)
                     if not windows:
                         continue
-                    gesture_key = self._gesture_key(exercise, local_label)
+                    global_label, class_name = self._global_label(exercise, int(local_label))
+                    self._class_name_by_label[int(global_label)] = class_name
+
                     for win_idx, window in enumerate(windows):
                         feature = self._stft_pipeline.process_window(window)
                         source_id = (
@@ -229,194 +181,18 @@ class DB5PretrainDatasetLoader:
                             "file": Path(member.filename).name,
                             "exercise": exercise,
                             "local_label": int(local_label),
-                            "gesture_key": gesture_key,
+                            "gesture_key": self._gesture_key(exercise, int(local_label)),
+                            "class_name": class_name,
+                            "global_label": int(global_label),
                             "repetition": repetition,
                         }
-                        yield _AlignedWindowCandidate(
+                        yield DB5WindowRecord(
                             feature=feature,
+                            label=int(global_label),
                             source_id=source_id,
                             metadata=metadata,
-                            is_rest=int(local_label) == 0,
-                            gesture_key=gesture_key,
                         )
                     segment_index += 1
-
-    @staticmethod
-    def _profile_counts(
-        profile: DB5MappingProfileConfig,
-        action_counts: Counter[str],
-        rest_count: int,
-        *,
-        include_rest_class: bool,
-    ) -> dict[str, int]:
-        counts = {
-            "FIST": int(sum(action_counts.get(key, 0) for key in profile.fist)),
-            "PINCH": int(sum(action_counts.get(key, 0) for key in profile.pinch)),
-        }
-        if include_rest_class:
-            counts["REST"] = int(rest_count)
-        return counts
-
-    def _select_aligned_profile(self, action_counts: Counter[str], rest_count: int) -> DB5MappingProfileConfig:
-        aligned = self.config.aligned3
-        min_samples = int(aligned.min_samples_per_class)
-        required = ["FIST", "PINCH"] + (["REST"] if self.config.include_rest_class else [])
-        profile_reports: list[dict[str, Any]] = []
-
-        for profile in aligned.candidate_mapping_profiles:
-            counts = self._profile_counts(
-                profile,
-                action_counts,
-                rest_count,
-                include_rest_class=self.config.include_rest_class,
-            )
-            min_required = min(counts.get(name, 0) for name in required)
-            report = {
-                "name": profile.name,
-                "fist": list(profile.fist),
-                "pinch": list(profile.pinch),
-                "counts": counts,
-                "min_required_count": int(min_required),
-                "eligible": bool(min_required >= min_samples),
-            }
-            profile_reports.append(report)
-
-        selected: DB5MappingProfileConfig | None = None
-        if aligned.mapping_override is not None:
-            selected = aligned.mapping_override
-            selected_counts = self._profile_counts(
-                selected,
-                action_counts,
-                rest_count,
-                include_rest_class=self.config.include_rest_class,
-            )
-            min_required = min(selected_counts.get(name, 0) for name in required)
-            if min_required < min_samples:
-                raise RuntimeError(
-                    f"mapping_override does not satisfy min_samples_per_class={min_samples}: "
-                    f"counts={selected_counts}"
-                )
-            profile_reports.append(
-                {
-                    "name": selected.name or "mapping_override",
-                    "fist": list(selected.fist),
-                    "pinch": list(selected.pinch),
-                    "counts": selected_counts,
-                    "min_required_count": int(min_required),
-                    "eligible": True,
-                    "override": True,
-                }
-            )
-        else:
-            eligible = [item for item in profile_reports if item["eligible"]]
-            if eligible:
-                best = max(
-                    eligible,
-                    key=lambda item: (
-                        int(item["min_required_count"]),
-                        int(item["counts"].get("FIST", 0) + item["counts"].get("PINCH", 0)),
-                    ),
-                )
-                selected = next(profile for profile in aligned.candidate_mapping_profiles if profile.name == best["name"])
-
-        self._mapping_profile_report = {
-            "mode": "aligned3",
-            "min_samples_per_class": min_samples,
-            "required_classes": required,
-            "candidate_profiles": profile_reports,
-            "available_action_keys": dict(sorted(action_counts.items())),
-            "rest_count": int(rest_count),
-            "selected_profile": selected.name if selected is not None else None,
-            "override_used": aligned.mapping_override is not None,
-        }
-
-        if selected is None:
-            raise RuntimeError(
-                "No aligned3 mapping profile satisfies min sample coverage. "
-                f"Required={required} min={min_samples} report={profile_reports}"
-            )
-        return selected
-
-    def _iter_records_legacy(self) -> Iterator[DB5WindowRecord]:
-        self._mapping_profile_report = {
-            "mode": "legacy53",
-            "selected_profile": None,
-            "candidate_profiles": [],
-        }
-        for candidate in self._iter_raw_window_candidates():
-            exercise = int(candidate.metadata["exercise"])
-            local_label = int(candidate.metadata["local_label"])
-            global_label, class_name = self._global_label_legacy(exercise, local_label)
-            self._class_name_by_label[global_label] = class_name
-            metadata = dict(candidate.metadata)
-            metadata["global_label"] = int(global_label)
-            metadata["class_name"] = class_name
-            yield DB5WindowRecord(
-                feature=candidate.feature,
-                label=int(global_label),
-                source_id=candidate.source_id,
-                metadata=metadata,
-            )
-
-    def _iter_records_aligned(self) -> Iterator[DB5WindowRecord]:
-        candidates = list(self._iter_raw_window_candidates())
-        action_counts: Counter[str] = Counter()
-        rest_count = 0
-        for candidate in candidates:
-            if candidate.is_rest:
-                rest_count += 1
-            else:
-                action_counts[candidate.gesture_key] += 1
-        selected_profile = self._select_aligned_profile(action_counts, rest_count)
-        fist_keys = set(selected_profile.fist)
-        pinch_keys = set(selected_profile.pinch)
-
-        rest_label = 0
-        fist_label = 1 if self.config.include_rest_class else 0
-        pinch_label = fist_label + 1
-        self._class_name_by_label = {
-            fist_label: "FIST",
-            pinch_label: "PINCH",
-        }
-        if self.config.include_rest_class:
-            self._class_name_by_label[rest_label] = "REST"
-        self._mapping_profile_report["selected_counts"] = self._profile_counts(
-            selected_profile,
-            action_counts,
-            rest_count,
-            include_rest_class=self.config.include_rest_class,
-        )
-
-        for candidate in candidates:
-            metadata = dict(candidate.metadata)
-            if candidate.is_rest:
-                if not self.config.include_rest_class:
-                    continue
-                label = rest_label
-                class_name = "REST"
-            elif candidate.gesture_key in fist_keys:
-                label = fist_label
-                class_name = "FIST"
-            elif candidate.gesture_key in pinch_keys:
-                label = pinch_label
-                class_name = "PINCH"
-            else:
-                continue
-            metadata["global_label"] = int(label)
-            metadata["class_name"] = class_name
-            metadata["aligned_profile"] = str(self._mapping_profile_report.get("selected_profile") or "")
-            yield DB5WindowRecord(
-                feature=candidate.feature,
-                label=int(label),
-                source_id=candidate.source_id,
-                metadata=metadata,
-            )
-
-    def _iter_records(self) -> Iterator[DB5WindowRecord]:
-        if self.pretrain_mode == "aligned3" and bool(self.config.aligned3.enabled):
-            yield from self._iter_records_aligned()
-            return
-        yield from self._iter_records_legacy()
 
     def load_all_with_sources(
         self,
@@ -448,14 +224,8 @@ class DB5PretrainDatasetLoader:
             return []
         names: list[str] = []
         for label, name in sorted(self._class_name_by_label.items()):
-            if (
-                str(name).upper() == "REST"
-                and not self.config.include_rest_class
-                and self.pretrain_mode != "legacy53"
-            ):
+            if str(name).upper() == "REST" and not self.config.include_rest_class:
                 continue
             names.append(name)
         return names
 
-    def get_mapping_profile_report(self) -> dict[str, Any]:
-        return dict(self._mapping_profile_report)

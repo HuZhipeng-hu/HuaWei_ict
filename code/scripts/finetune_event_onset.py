@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run_id", default=None)
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--recordings_manifest", default=None)
+    parser.add_argument(
+        "--target_db5_keys",
+        default=None,
+        help="Comma-separated DB5 action keys, e.g. E1_G01,E1_G02. RELAX is implicit.",
+    )
 
     parser.add_argument("--base_channels", type=int, default=None)
     parser.add_argument("--use_se", type=_parse_optional_bool, default=None)

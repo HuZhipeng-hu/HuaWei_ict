@@ -43,7 +43,7 @@ class EventClipDatasetLoader:
     ):
         self.data_dir = Path(data_dir)
         self.data_config = data_config
-        self.label_spec = get_label_mode_spec(data_config.label_mode)
+        self.label_spec = get_label_mode_spec(data_config.label_mode, data_config.target_db5_keys)
         self.recordings_manifest_path = self._resolve_manifest_path(recordings_manifest_path)
         self._manifest_rows = load_event_manifest_rows(self.recordings_manifest_path) if self.recordings_manifest_path else {}
         self._quality_report: dict[str, Any] = {}
@@ -87,8 +87,13 @@ class EventClipDatasetLoader:
             self._manifest_rows = load_event_manifest_rows(self.recordings_manifest_path)
         if not self._manifest_rows:
             raise FileNotFoundError("Event-onset dataset requires a recordings manifest with event metadata.")
+        allowed_targets = set(self.label_spec.gesture_to_idx.keys())
         for metadata in sorted(self._manifest_rows.values(), key=lambda row: row["relative_path"]):
             if metadata.get("capture_mode", "") != self.data_config.capture_mode_filter:
+                continue
+            target_state = str(metadata.get("target_state", "")).strip().upper()
+            if target_state not in allowed_targets:
+                logger.warning("Skip clip with target_state=%s not in configured label set.", target_state)
                 continue
             csv_path = self.data_dir / metadata["relative_path"]
             if not csv_path.exists():
@@ -158,9 +163,12 @@ class EventClipDatasetLoader:
 
     def _build_event_windows(self, matrix: np.ndarray, metadata: dict[str, str]) -> list[EventWindowRecord]:
         qf = self.data_config.quality_filter
-        label = int(self.label_spec.gesture_to_idx[metadata["target_state"]])
+        target_state = str(metadata["target_state"]).strip().upper()
+        if target_state not in self.label_spec.gesture_to_idx:
+            raise ValueError(f"target_state={target_state!r} is not in configured label set {self.label_spec.class_names}")
+        label = int(self.label_spec.gesture_to_idx[target_state])
         source_id = normalize_relative_path(metadata["relative_path"])
-        is_relax_clip = metadata["target_state"] == "RELAX"
+        is_relax_clip = target_state == "RELAX"
         relax_candidates: list[EventWindowRecord] = []
         scored_action_windows: list[EventWindowRecord] = []
 

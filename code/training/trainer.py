@@ -45,7 +45,7 @@ def compute_class_balanced_weights(labels: np.ndarray, num_classes: int, beta: f
     return weights.astype(np.float32)
 
 
-def _resolve_confusion_class_ids(confusion_pairs: Sequence[Sequence], gesture_to_idx: Dict[str, int]) -> set[int]:
+def _resolve_confusion_class_ids(confusion_pairs: Sequence[Sequence], class_name_to_idx: Dict[str, int]) -> set[int]:
     ids: set[int] = set()
     for pair in confusion_pairs:
         if len(pair) != 2:
@@ -54,8 +54,9 @@ def _resolve_confusion_class_ids(confusion_pairs: Sequence[Sequence], gesture_to
             if isinstance(item, int):
                 ids.add(item)
             elif isinstance(item, str):
-                if item in gesture_to_idx:
-                    ids.add(gesture_to_idx[item])
+                normalized = item.strip().upper()
+                if normalized in class_name_to_idx:
+                    ids.add(class_name_to_idx[normalized])
     return ids
 
 
@@ -66,6 +67,7 @@ def build_balanced_sample_indices(
     *,
     steps: int,
     seed: int,
+    class_names: Sequence[str] | None = None,
 ) -> np.ndarray:
     rng = np.random.default_rng(seed)
     labels = labels.astype(np.int32)
@@ -83,8 +85,11 @@ def build_balanced_sample_indices(
 
     n_classes = len(class_ids)
 
-    gesture_to_idx = {g.name: i for i, g in enumerate(GESTURE_DEFINITIONS)}
-    hard_ids = _resolve_confusion_class_ids(sampler_cfg.confusion_pairs, gesture_to_idx)
+    if class_names:
+        class_name_to_idx = {str(name).strip().upper(): idx for idx, name in enumerate(class_names)}
+    else:
+        class_name_to_idx = {g.name.upper(): i for i, g in enumerate(GESTURE_DEFINITIONS)}
+    hard_ids = _resolve_confusion_class_ids(sampler_cfg.confusion_pairs, class_name_to_idx)
 
     class_weights = np.ones(n_classes, dtype=np.float32)
     if hard_ids:
@@ -324,6 +329,7 @@ class Trainer:
             self.config.sampler,
             steps=steps,
             seed=self.config.split_seed + epoch,
+            class_names=self.class_names,
         )
         batch_samples = train_samples[indices]
         batch_labels = train_labels[indices]

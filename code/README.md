@@ -1,54 +1,68 @@
-# NeuroGrip Event-Onset v1 (Final Mainline)
+# NeuroGrip Event-Onset v1 (DB5 Full53 Foundation)
 
-This branch is **event-onset only** and the recommended workflow is now a single one-click command:
+主线已经固定为：
 
-`DB5 aligned pretrain -> wearer finetune A/B (scratch vs pretrained) -> auto select best -> MindIR convert -> CKPT/Lite benchmark gate`
+`DB5 全量53类固定底座 -> 选择 DB5 原始键微调 -> N类 event-onset 运行 -> MindIR 部署`
 
-## 1) One-Click Pipeline (Recommended)
+旧 `aligned3/legacy53` 流程已移除。
+
+## 1) 一键主流程（推荐）
 
 ```bash
 python scripts/train_event_pipeline.py \
   --db5_data_dir ../data_ninaproDB5 \
-  --wearer_data_dir ../data \
+  --wearer_data_dir ../data_event_onset \
+  --target_db5_keys E1_G01,E1_G02,E2_G05 \
   --budget_per_class 60 \
   --device_target Ascend \
   --device_id 0 \
   --run_id event_pipeline_v1
 ```
 
-Main outputs:
+说明：
+
+- 首次运行若固定底座缺失，会自动构建并缓存到 `artifacts/foundation/db5_full53/`。
+- 后续运行默认直接复用该底座，不再重复预训练。
+- `target_db5_keys` 决定当前微调与运行类别集合，`RELAX` 自动包含。
+
+主产物：
 
 - `artifacts/runs/<run_id>/final_selection.json`
 - `artifacts/runs/<run_id>/final_artifacts.json`
 - `artifacts/runs/<run_id>/models/event_onset_selected.mindir`
 - `artifacts/runs/<run_id>/models/event_onset_selected.model_metadata.json`
 
-Notes:
-
-- Budget mode defaults to `60` train windows per class (`RELAX/FIST/PINCH`).
-- A/B selection rule: pretrained must **strictly outperform** scratch (`macro_f1`, then `accuracy` tie-break), otherwise scratch is chosen automatically.
-- Production deployment format is `MindIR`; CKPT is debug only.
-
-## 2) Preflight
+## 2) 运行前预检
 
 ```bash
 python scripts/preflight.py --mode local
 python scripts/preflight.py --mode ascend
 ```
 
-Optional explicit paths:
+预检会检查：
 
-```bash
-python scripts/preflight.py \
-  --mode ascend \
-  --db5_data_dir ../data_ninaproDB5 \
-  --wearer_data_dir ../data \
-  --budget_per_class 60
+- DB5 zip 覆盖与 full53 key 覆盖
+- 动态类别与 `model.num_classes` 一致性
+- 执行映射文件存在且键集合匹配
+- MindIR metadata 输入形状与 `class_names` 一致性
+
+## 3) 执行映射（运行必填）
+
+运行侧必须提供完整映射：`DB5键 -> 执行动作`，否则拒绝启动。
+
+示例：`configs/event_actuation_mapping.yaml`
+
+```yaml
+actuation_map:
+  RELAX: RELAX
+  E1_G01: FIST
+  E1_G02: PINCH
+  E2_G05: OK
 ```
 
-## 3) Runtime on Orange Pi
+可用执行动作：`RELAX/FIST/PINCH/OK/YE/SIDEGRIP`
 
-Production backend (`lite`):
+## 4) 运行（MindIR 默认）
 
 ```bash
 python scripts/run_event_runtime.py \
@@ -56,7 +70,7 @@ python scripts/run_event_runtime.py \
   --backend lite
 ```
 
-Debug backend (`ckpt`, offline troubleshooting only):
+调试可用 CKPT：
 
 ```bash
 python scripts/run_event_runtime.py \
@@ -64,38 +78,24 @@ python scripts/run_event_runtime.py \
   --backend ckpt
 ```
 
-## 4) Hardware Gesture Test (No Inference)
-
-Use this mode to validate actuator behavior directly from keyboard input:
+## 5) 硬件联调（不走模型）
 
 ```bash
 python scripts/test_actuator_gesture.py \
   --config configs/runtime_event_onset.yaml
 ```
 
-Commands:
+键位：
 
-- `r` -> `RELAX`
-- `f` -> `FIST`
-- `p` -> `PINCH`
-- `o` -> `OK`
-- `y` -> `YE`
-- `s` -> `SIDEGRIP`
-- `i` -> print actuator info
-- `h` -> help
-- `q` -> quit
+- `r/f/p/o/y/s`：执行对应动作
+- `i`：执行器信息
+- `h`：帮助
+- `q`：退出（自动 `RELAX`）
 
-Safety behavior:
+## 6) 分步入口（高级调试）
 
-- startup auto `RELAX`
-- exit auto `RELAX` then disconnect
-
-## 5) Advanced Debug (Step-by-Step, Optional)
-
-Not recommended for daily usage, but kept for troubleshooting:
-
-- `scripts/pretrain_ninapro_db5.py` (`--pretrain_mode legacy53` only for debug fallback)
-- `scripts/finetune_event_onset.py`
+- `scripts/pretrain_ninapro_db5.py`（固定 full53 底座构建）
+- `scripts/finetune_event_onset.py`（支持动态 `--target_db5_keys`）
 - `scripts/convert_event_onset.py`
 - `scripts/benchmark_event_runtime_ckpt.py`
 - `scripts/evaluate_ckpt.py`

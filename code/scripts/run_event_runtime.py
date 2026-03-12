@@ -17,9 +17,11 @@ if str(CODE_ROOT) not in sys.path:
 
 from event_onset.config import load_event_runtime_config, load_event_training_config
 from event_onset.inference import EventPredictor
+from event_onset.actuation_mapping import load_and_validate_actuation_map
 from event_onset.runtime import EventOnsetController
 from runtime.hardware.factory import create_actuator
 from scripts.collection_utils import STANDARD_CSV_HEADERS
+from shared.label_modes import get_label_mode_spec
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--model_path", default=None, help="MindIR model path for --backend lite")
     parser.add_argument("--model_metadata", default=None, help="Model metadata json path for --backend lite")
+    parser.add_argument("--actuation_mapping", default=None, help="Class-to-actuator mapping YAML path.")
+    parser.add_argument(
+        "--target_db5_keys",
+        default=None,
+        help="Comma-separated DB5 action keys to override runtime config, e.g. E1_G01,E1_G02.",
+    )
     parser.add_argument("--port", default=None)
     parser.add_argument("--device", default=None, choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--source_csv", default=None, help="Replay a standardized CSV instead of reading the live device.")
@@ -66,6 +74,45 @@ def _rows_from_frame(parsed: dict) -> np.ndarray:
     return np.asarray(rows, dtype=np.float32)
 
 
+def _validate_runtime_class_contract(
+    *,
+    backend: str,
+    expected_class_names: list[str],
+    model_num_classes: int,
+    mapping_by_name: dict[str, str],
+    metadata,
+) -> None:
+    normalized_expected = [str(name).strip().upper() for name in expected_class_names]
+    if int(model_num_classes) != len(normalized_expected):
+        raise ValueError(
+            f"model.num_classes={model_num_classes} mismatches expected labels={len(normalized_expected)} "
+            f"({normalized_expected})"
+        )
+
+    mapping_keys = sorted(str(key).strip().upper() for key in mapping_by_name.keys())
+    if mapping_keys != sorted(normalized_expected):
+        raise ValueError(
+            f"Actuation mapping keys mismatch expected classes. mapping_keys={mapping_keys}, "
+            f"expected={sorted(normalized_expected)}"
+        )
+
+    if metadata is None:
+        if backend == "lite":
+            raise ValueError("Lite backend requires model metadata with class_names for strict runtime validation.")
+        return
+
+    metadata_class_names = [str(name).strip().upper() for name in metadata.class_names]
+    if not metadata_class_names:
+        if backend == "lite":
+            raise ValueError("Lite backend metadata must include non-empty class_names.")
+        return
+    if metadata_class_names != normalized_expected:
+        raise ValueError(
+            "Runtime class order mismatch between config and model metadata: "
+            f"config={normalized_expected}, metadata={metadata_class_names}"
+        )
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -82,6 +129,13 @@ def main() -> None:
         runtime_cfg.model_path = args.model_path
     if args.model_metadata:
         runtime_cfg.model_metadata_path = args.model_metadata
+    if args.actuation_mapping:
+        runtime_cfg.actuation_mapping_path = args.actuation_mapping
+    if args.target_db5_keys:
+        keys = [item.strip().upper() for item in str(args.target_db5_keys).split(",") if item.strip()]
+        if not keys:
+            raise ValueError("--target_db5_keys provided but no valid keys parsed.")
+        runtime_cfg.data.target_db5_keys = keys
     if args.port:
         runtime_cfg.hardware.sensor_port = args.port
     if args.device:
@@ -90,6 +144,12 @@ def main() -> None:
         runtime_cfg.hardware.actuator_mode = "standalone"
 
     model_cfg, _, _, _ = load_event_training_config(runtime_cfg.training_config)
+    label_spec = get_label_mode_spec(runtime_cfg.data.label_mode, runtime_cfg.data.target_db5_keys)
+    model_cfg.num_classes = int(len(label_spec.class_names))
+    label_to_state, mapping_by_name = load_and_validate_actuation_map(
+        runtime_cfg.actuation_mapping_path,
+        class_names=label_spec.class_names,
+    )
     predictor = EventPredictor(
         backend=args.backend,
         model_config=model_cfg,
@@ -98,18 +158,27 @@ def main() -> None:
         model_path=runtime_cfg.model_path,
         model_metadata_path=runtime_cfg.model_metadata_path,
     )
+    _validate_runtime_class_contract(
+        backend=args.backend,
+        expected_class_names=list(label_spec.class_names),
+        model_num_classes=int(model_cfg.num_classes),
+        mapping_by_name=mapping_by_name,
+        metadata=predictor.metadata,
+    )
 
     actuator = create_actuator(runtime_cfg.hardware)
     if hasattr(actuator, "connect"):
         actuator.connect()
 
     logger.info(
-        "Event runtime started: backend=%s device=%s checkpoint=%s model=%s",
+        "Event runtime started: backend=%s device=%s checkpoint=%s model=%s actuation_mapping=%s",
         args.backend,
         runtime_cfg.device.target,
         runtime_cfg.checkpoint_path,
         runtime_cfg.model_path,
+        runtime_cfg.actuation_mapping_path,
     )
+    logger.info("Class mapping: %s", mapping_by_name)
     if args.backend == "ckpt":
         logger.warning("CKPT backend is intended for debugging only. Use --backend lite for production deployment.")
 
@@ -117,6 +186,8 @@ def main() -> None:
         data_config=runtime_cfg.data,
         inference_config=runtime_cfg.inference,
         runtime_config=runtime_cfg.runtime,
+        class_names=label_spec.class_names,
+        label_to_state=label_to_state,
         predict_proba=predictor.predict_proba,
         actuator=actuator,
     )
@@ -127,8 +198,9 @@ def main() -> None:
             for step in controller.ingest_rows(matrix):
                 if step.decision.changed:
                     logger.info(
-                        "state=%s confidence=%.3f energy=%.3f now_ms=%.1f",
+                        "state=%s class=%s confidence=%.3f energy=%.3f now_ms=%.1f",
                         step.decision.state.name,
+                        step.decision.emitted_class_name,
                         step.confidence,
                         step.energy,
                         step.now_ms,
@@ -157,8 +229,9 @@ def main() -> None:
                     for step in controller.ingest_rows(rows):
                         if step.decision.changed:
                             logger.info(
-                                "state=%s confidence=%.3f energy=%.3f now_ms=%.1f",
+                                "state=%s class=%s confidence=%.3f energy=%.3f now_ms=%.1f",
                                 step.decision.state.name,
+                                step.decision.emitted_class_name,
                                 step.confidence,
                                 step.energy,
                                 step.now_ms,

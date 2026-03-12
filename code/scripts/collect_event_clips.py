@@ -1,4 +1,4 @@
-"""Collect short event-onset clips for the 3-state experiment."""
+"""Collect short event-onset clips for dynamic RELAX + DB5 action-key classes."""
 
 from __future__ import annotations
 
@@ -30,10 +30,10 @@ from scripts.collection_utils import (
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Collect event-onset clips for RELAX/FIST/PINCH")
+    parser = argparse.ArgumentParser(description="Collect event-onset clips for RELAX + configured DB5 action keys")
     parser.add_argument("--data_dir", default="../data_event_onset")
-    parser.add_argument("--start_state", required=True, choices=["RELAX", "FIST", "PINCH"])
-    parser.add_argument("--target_state", required=True, choices=["RELAX", "FIST", "PINCH"])
+    parser.add_argument("--start_state", required=True, help="RELAX or one configured DB5 action key.")
+    parser.add_argument("--target_state", required=True, help="RELAX or one configured DB5 action key.")
     parser.add_argument("--user_id", required=True)
     parser.add_argument("--session_id", required=True)
     parser.add_argument("--device_id", required=True)
@@ -145,6 +145,8 @@ def run_collection_batch(
     timeout: float = 0.5,
     source_csvs: Sequence[str | Path] | None = None,
 ) -> dict[str, Any]:
+    start_state = str(start_state).strip().upper()
+    target_state = str(target_state).strip().upper()
     if target_state == "RELAX" and start_state != "RELAX":
         raise ValueError("Pure RELAX clips must use start_state=RELAX and target_state=RELAX")
 
@@ -156,6 +158,11 @@ def run_collection_batch(
         wearing_state=wearing_state,
     )
     _, data_cfg, _, _ = load_event_training_config(training_config)
+    allowed_states = {"RELAX", *[str(item).strip().upper() for item in data_cfg.target_db5_keys]}
+    if start_state not in allowed_states:
+        raise ValueError(f"start_state={start_state!r} is not in configured states: {sorted(allowed_states)}")
+    if target_state not in allowed_states:
+        raise ValueError(f"target_state={target_state!r} is not in configured states: {sorted(allowed_states)}")
     clip_duration_ms = 2000 if start_state == target_state == "RELAX" else int(data_cfg.clip_duration_ms)
     duration_sec = float(clip_duration_ms) / 1000.0
 

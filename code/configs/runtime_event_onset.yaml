@@ -2,6 +2,7 @@ training_config: configs/training_event_onset.yaml
 checkpoint_path: checkpoints/event_onset_best.ckpt
 model_path: models/event_onset.mindir
 model_metadata_path: models/event_onset.model_metadata.json
+actuation_mapping_path: configs/event_actuation_mapping.yaml
 
 data:
   label_mode: event_onset
@@ -9,7 +10,7 @@ data:
   split_mode: grouped_file
   split_manifest_path: artifacts/splits/event_onset_split_manifest.json
   recordings_manifest_path: recordings_manifest.csv
-  target_gestures: [RELAX, FIST, PINCH]
+  target_db5_keys: [E1_G01, E1_G02]
   device_sampling_rate_hz: 500
   imu_sampling_rate_hz: 50
   clip_duration_ms: 1200
@@ -36,8 +37,9 @@ data:
 
 inference:
   confidence_threshold: 0.75
-  fist_confidence_threshold: 0.75
-  pinch_confidence_threshold: 0.82
+  per_class_confidence_thresholds:
+    E1_G01: 0.75
+    E1_G02: 0.82
   vote_window: 3
   vote_min_count: 2
   activation_margin_threshold: 0.08

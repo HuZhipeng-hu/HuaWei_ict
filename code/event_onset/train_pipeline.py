@@ -40,6 +40,7 @@ OFFLINE_SUMMARY_FIELDS = [
     "budget_per_class",
     "budget_seed",
     "used_pretrained_init",
+    "target_db5_keys",
     "test_accuracy",
     "test_macro_f1",
     "test_macro_recall",
@@ -74,6 +75,16 @@ def _apply_cli_overrides(args, model_cfg: EventModelConfig, train_cfg, augmentat
     if getattr(args, "pretrained_emg_checkpoint", None):
         model_cfg.pretrained_emg_checkpoint = args.pretrained_emg_checkpoint
     return model_cfg, train_cfg, augmentation_cfg
+
+
+def _apply_data_cli_overrides(args, data_cfg):
+    raw = getattr(args, "target_db5_keys", None)
+    if raw:
+        keys = [item.strip().upper() for item in str(raw).split(",") if item.strip()]
+        if not keys:
+            raise ValueError("--target_db5_keys provided but no valid keys parsed.")
+        data_cfg.target_db5_keys = keys
+    return data_cfg
 
 
 def _apply_train_budget_to_manifest(
@@ -336,7 +347,9 @@ def run_event_training(args) -> None:
     model_cfg, data_cfg, train_cfg, augmentation_cfg = load_event_training_config(args.config)
     copy_config_snapshot(args.config, run_dir / "config_snapshots" / Path(args.config).name)
     model_cfg, train_cfg, augmentation_cfg = _apply_cli_overrides(args, model_cfg, train_cfg, augmentation_cfg)
-    label_spec = get_label_mode_spec(data_cfg.label_mode)
+    data_cfg = _apply_data_cli_overrides(args, data_cfg)
+    label_spec = get_label_mode_spec(data_cfg.label_mode, data_cfg.target_db5_keys)
+    model_cfg.num_classes = int(len(label_spec.class_names))
 
     dump_yaml(
         run_dir / "config_snapshots" / "effective_overrides.yaml",
@@ -361,6 +374,7 @@ def run_event_training(args) -> None:
             },
             "data": {
                 "label_mode": data_cfg.label_mode,
+                "target_db5_keys": list(data_cfg.target_db5_keys),
                 "capture_mode_filter": data_cfg.capture_mode_filter,
                 "device_sampling_rate_hz": data_cfg.device_sampling_rate_hz,
                 "imu_sampling_rate_hz": data_cfg.imu_sampling_rate_hz,
@@ -494,6 +508,7 @@ def run_event_training(args) -> None:
         "budget_per_class": int(budget_per_class),
         "budget_seed": int(budget_seed),
         "used_pretrained_init": bool(model_cfg.pretrained_emg_checkpoint),
+        "target_db5_keys": ",".join(data_cfg.target_db5_keys),
         "test_accuracy": report["accuracy"],
         "test_macro_f1": report["macro_f1"],
         "test_macro_recall": report["macro_recall"],

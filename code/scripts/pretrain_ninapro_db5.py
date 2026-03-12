@@ -1,10 +1,11 @@
-"""Pretrain the EMG encoder on NinaPro DB5 and save a transferable checkpoint."""
+"""Pretrain an EMG encoder on NinaPro DB5 full coverage and publish foundation artifacts."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import logging
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -28,7 +29,7 @@ from training.trainer import Trainer
 SUMMARY_FIELDS = [
     "run_id",
     "checkpoint_path",
-    "pretrain_mode",
+    "foundation_version",
     "num_classes",
     "test_accuracy",
     "test_macro_f1",
@@ -38,15 +39,9 @@ SUMMARY_FIELDS = [
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Pretrain EMG encoder on NinaPro DB5")
+    parser = argparse.ArgumentParser(description="Pretrain EMG encoder on NinaPro DB5 full coverage")
     parser.add_argument("--config", default="configs/pretrain_ninapro_db5.yaml")
     parser.add_argument("--data_dir", default=None)
-    parser.add_argument(
-        "--pretrain_mode",
-        default="aligned3",
-        choices=["aligned3", "legacy53"],
-        help="DB5 pretraining mode. aligned3 is task-aligned default; legacy53 kept for debug fallback.",
-    )
     parser.add_argument("--device_target", default="CPU", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)
     parser.add_argument(
@@ -63,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run_id", default=None)
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--batch_size", type=int, default=None, help="Override training.batch_size from config")
+    parser.add_argument(
+        "--foundation_dir",
+        default="artifacts/foundation/db5_full53",
+        help="Fixed foundation artifact directory.",
+    )
     return parser
 
 
@@ -93,10 +93,41 @@ def _maybe_enable_launch_blocking(enabled: bool) -> None:
 
         runtime.launch_blocking()
         logging.getLogger("ninapro_db5.pretrain").info("MindSpore launch_blocking enabled.")
-    except Exception as exc:  # pragma: no cover - depends on runtime API availability
-        logging.getLogger("ninapro_db5.pretrain").warning(
-            "Failed to enable launch_blocking: %s", exc
-        )
+    except Exception as exc:  # pragma: no cover
+        logging.getLogger("ninapro_db5.pretrain").warning("Failed to enable launch_blocking: %s", exc)
+
+
+def _publish_foundation(
+    *,
+    foundation_dir: Path,
+    run_id: str,
+    run_dir: Path,
+    summary: dict,
+    class_names: list[str],
+    config_version: str,
+    data_dir: str,
+) -> dict:
+    foundation_dir.mkdir(parents=True, exist_ok=True)
+    foundation_ckpt = foundation_dir / "checkpoints" / "db5_full53_foundation.ckpt"
+    foundation_ckpt.parent.mkdir(parents=True, exist_ok=True)
+    source_ckpt = Path(summary["checkpoint_path"])
+    shutil.copy2(source_ckpt, foundation_ckpt)
+
+    manifest = {
+        "foundation_version": config_version,
+        "coverage": "db5_full53",
+        "num_classes": int(summary["num_classes"]),
+        "class_names": list(class_names),
+        "checkpoint_path": str(foundation_ckpt),
+        "source_run_id": run_id,
+        "source_run_dir": str(run_dir),
+        "source_data_dir": str(data_dir),
+        "source_summary_path": str(run_dir / "offline_summary.json"),
+        "created_at_unix": int(time.time()),
+    }
+    dump_json(foundation_dir / "foundation_manifest.json", manifest)
+    dump_json(foundation_dir / "foundation_summary.json", summary)
+    return manifest
 
 
 def main() -> None:
@@ -113,7 +144,7 @@ def main() -> None:
             raise ValueError("--batch_size must be > 0")
         config.training.batch_size = int(args.batch_size)
     data_dir = args.data_dir or config.data_dir
-    run_id, run_dir = ensure_run_dir(args.run_root, args.run_id, default_tag="db5_pretrain")
+    run_id, run_dir = ensure_run_dir(args.run_root, args.run_id, default_tag="db5_pretrain_full53")
     logger = logging.getLogger("ninapro_db5.pretrain")
     logger.info("Run ID: %s", run_id)
     logger.info("Run directory: %s", run_dir)
@@ -131,34 +162,8 @@ def main() -> None:
         run_dir / "config_snapshots" / "effective_config.yaml",
         {
             "data_dir": data_dir,
-            "pretrain_mode": args.pretrain_mode,
-            "aligned3": {
-                "enabled": config.aligned3.enabled,
-                "min_samples_per_class": config.aligned3.min_samples_per_class,
-                "candidate_mapping_profiles": [
-                    {
-                        "name": profile.name,
-                        "fist": list(profile.fist),
-                        "pinch": list(profile.pinch),
-                    }
-                    for profile in config.aligned3.candidate_mapping_profiles
-                ],
-                "mapping_override": (
-                    None
-                    if config.aligned3.mapping_override is None
-                    else {
-                        "name": config.aligned3.mapping_override.name,
-                        "fist": list(config.aligned3.mapping_override.fist),
-                        "pinch": list(config.aligned3.mapping_override.pinch),
-                    }
-                ),
-                "onset_window_policy": {
-                    "action_selection": config.aligned3.onset_window_policy.action_selection,
-                    "rest_selection": config.aligned3.onset_window_policy.rest_selection,
-                    "action_top_k_per_segment": config.aligned3.onset_window_policy.action_top_k_per_segment,
-                    "rest_top_k_per_segment": config.aligned3.onset_window_policy.rest_top_k_per_segment,
-                },
-            },
+            "coverage": "full53",
+            "foundation_version": config.foundation_version,
             "feature": {
                 "source_sampling_rate_hz": config.feature.source_sampling_rate_hz,
                 "target_sampling_rate_hz": config.feature.target_sampling_rate_hz,
@@ -169,17 +174,10 @@ def main() -> None:
         },
     )
 
-    loader = DB5PretrainDatasetLoader(data_dir, config, pretrain_mode=args.pretrain_mode)
+    loader = DB5PretrainDatasetLoader(data_dir, config)
     samples, labels, source_ids = loader.load_all_with_sources()
     class_names = loader.get_class_names()
     logger.info("Loaded DB5 samples: %s labels=%d classes=%d", tuple(samples.shape), labels.shape[0], len(class_names))
-    mapping_profile_report = loader.get_mapping_profile_report()
-    dump_json(run_dir / "mapping_profile_report.json", mapping_profile_report)
-    if args.pretrain_mode == "aligned3":
-        logger.info(
-            "Aligned3 selected mapping profile: %s",
-            str(mapping_profile_report.get("selected_profile")),
-        )
     finite_mask = np.isfinite(samples)
     if not bool(np.all(finite_mask)):
         bad_count = int(np.size(samples) - np.count_nonzero(finite_mask))
@@ -225,18 +223,13 @@ def main() -> None:
     _set_device(mode=args.ms_mode, target=args.device_target, device_id=args.device_id)
     best_model = load_db5_model_from_checkpoint(trainer.checkpoint_path, config, num_classes=len(class_names))
     report = evaluate_db5_model(best_model, test_x, test_y, class_names)
-    report.update(
-        {
-            "run_id": run_id,
-            "checkpoint_path": str(trainer.checkpoint_path),
-        }
-    )
+    report.update({"run_id": run_id, "checkpoint_path": str(trainer.checkpoint_path)})
     outputs = save_classification_report(report, out_dir=run_dir / "evaluation", prefix="test")
 
     summary = {
         "run_id": run_id,
         "checkpoint_path": str(trainer.checkpoint_path),
-        "pretrain_mode": args.pretrain_mode,
+        "foundation_version": config.foundation_version,
         "num_classes": len(class_names),
         "test_accuracy": report["accuracy"],
         "test_macro_f1": report["macro_f1"],
@@ -245,6 +238,16 @@ def main() -> None:
     }
     dump_json(run_dir / "offline_summary.json", summary)
     append_csv_row(Path(args.run_root) / "db5_pretrain_results.csv", SUMMARY_FIELDS, summary)
+    foundation_manifest = _publish_foundation(
+        foundation_dir=Path(args.foundation_dir),
+        run_id=run_id,
+        run_dir=run_dir,
+        summary=summary,
+        class_names=class_names,
+        config_version=config.foundation_version,
+        data_dir=data_dir,
+    )
+    dump_json(run_dir / "foundation_manifest.json", foundation_manifest)
     dump_json(
         run_dir / "run_metadata.json",
         {
@@ -255,9 +258,11 @@ def main() -> None:
             "evaluation_outputs": outputs,
             "elapsed_minutes": (time.time() - start) / 60.0,
             "class_names": class_names,
+            "foundation_manifest_path": str(Path(args.foundation_dir) / "foundation_manifest.json"),
         },
     )
 
 
 if __name__ == "__main__":
     main()
+

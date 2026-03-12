@@ -32,7 +32,7 @@ training:
     type: balanced
     hard_mining_ratio: 0.3
     confusion_pairs:
-      - [FIST, PINCH]
+      - [E1_G01, E1_G02]
   ema:
     enabled: true
     decay: 0.999
@@ -43,7 +43,7 @@ data:
   split_mode: grouped_file
   split_manifest_path: artifacts/splits/event_onset_split_manifest.json
   recordings_manifest_path: recordings_manifest.csv
-  target_gestures: [RELAX, FIST, PINCH]
+  target_db5_keys: [E1_G01, E1_G02]
   device_sampling_rate_hz: 500
   imu_sampling_rate_hz: 50
   clip_duration_ms: 1200
