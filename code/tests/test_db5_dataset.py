@@ -57,6 +57,7 @@ def _base_feature_config() -> DB5FeatureConfig:
         static_std_min=0.08,
         clip_ratio_max=0.08,
         saturation_abs=126.0,
+        action_quantile_percent=30.0,
         context_window_ms=240,
         window_step_ms=80,
         max_windows_per_segment=1,
@@ -176,6 +177,7 @@ def test_db5_feature_config_exposes_quality_and_bandpass_fields():
     assert cfg.static_std_min == 0.08
     assert cfg.clip_ratio_max == 0.08
     assert cfg.saturation_abs == 126.0
+    assert cfg.action_quantile_percent == 30.0
 
 
 def test_db5_loader_quality_first_window_selection_and_diagnostics(tmp_path: Path):
@@ -209,6 +211,7 @@ def test_db5_loader_quality_first_window_selection_and_diagnostics(tmp_path: Pat
             static_std_min=0.05,
             clip_ratio_max=0.08,
             saturation_abs=126.0,
+            action_quantile_percent=30.0,
             context_window_ms=240,
             window_step_ms=80,
             max_windows_per_segment=2,
@@ -228,3 +231,74 @@ def test_db5_loader_quality_first_window_selection_and_diagnostics(tmp_path: Pat
     assert diagnostics["totals"]["raw_candidates"] >= diagnostics["totals"]["selected"]
     assert diagnostics["totals"]["filtered_by_quality"] > 0
     assert diagnostics["per_class"]["E1_G01"]["selected"] == 1
+
+
+def test_db5_loader_metadata_contains_recording_identity_fields(tmp_path: Path):
+    zip_path = tmp_path / "s1.zip"
+    _write_db5_zip(zip_path, exercise=1, active_label=1, member_name="s1/S1_E1_A1.mat")
+    feature = _base_feature_config()
+    feature.action_quantile_percent = 0.0
+    cfg = DB5PretrainConfig(
+        data_dir=str(tmp_path),
+        zip_glob="s*.zip",
+        include_rest_class=False,
+        use_restimulus=True,
+        feature=feature,
+    )
+    loader = DB5PretrainDatasetLoader(tmp_path, cfg)
+    _, _, source_ids, metadata = loader.load_all_with_sources(return_metadata=True)
+
+    assert metadata
+    first = metadata[0]
+    assert str(first["user_id"]).strip()
+    assert str(first["session_id"]).strip()
+    assert str(first["recording_id"]).strip()
+    assert "user_id=" in str(source_ids[0])
+    assert "recording_id=" in str(source_ids[0])
+
+
+def test_db5_loader_action_threshold_uses_adaptive_quantile(tmp_path: Path):
+    zip_path = tmp_path / "s1.zip"
+    emg = np.zeros((140, 16), dtype=np.float32)
+    emg[70:, :] = (0.24 * np.random.randn(70, 16)).astype(np.float32)
+    _write_db5_zip(
+        zip_path,
+        exercise=1,
+        active_label=1,
+        emg=emg,
+        num_channels=16,
+        member_name="s1/S1_E1_A1.mat",
+    )
+    cfg = DB5PretrainConfig(
+        data_dir=str(tmp_path),
+        zip_glob="s*.zip",
+        include_rest_class=False,
+        use_restimulus=True,
+        feature=DB5FeatureConfig(
+            source_sampling_rate_hz=200,
+            target_sampling_rate_hz=500,
+            use_first_myo_only=False,
+            first_myo_channel_count=16,
+            lowcut_hz=20.0,
+            highcut_hz=180.0,
+            energy_min=0.8,
+            static_std_min=0.6,
+            clip_ratio_max=0.12,
+            saturation_abs=126.0,
+            action_quantile_percent=30.0,
+            context_window_ms=240,
+            window_step_ms=80,
+            max_windows_per_segment=10,
+            max_rest_windows_per_segment=2,
+            emg_stft_window=64,
+            emg_stft_hop=24,
+            emg_n_fft=96,
+            emg_freq_bins=24,
+        ),
+    )
+    loader = DB5PretrainDatasetLoader(tmp_path, cfg)
+    _, labels, _, _ = loader.load_all_with_sources(return_metadata=True)
+    diagnostics = loader.get_window_diagnostics()
+
+    assert set(np.unique(labels).tolist()) == {0}
+    assert diagnostics["per_class"]["E1_G01"]["selected"] > 0

@@ -21,11 +21,13 @@ class DB5FeatureConfig:
     highcut_hz: float = 180.0
     energy_min: float = 0.25
     static_std_min: float = 0.08
-    clip_ratio_max: float = 0.08
+    clip_ratio_max: float = 0.12
     saturation_abs: float = 126.0
+    use_adaptive_action_thresholds: bool = True
+    action_quantile_percent: float = 30.0
     context_window_ms: int = 240
     window_step_ms: int = 80
-    max_windows_per_segment: int = 6
+    max_windows_per_segment: int = 10
     max_rest_windows_per_segment: int = 2
     emg_stft_window: int = 64
     emg_stft_hop: int = 24
@@ -62,6 +64,7 @@ class DB5PretrainConfig:
     split_seed: int = 42
     val_ratio: float = 0.15
     test_ratio: float = 0.15
+    manifest_use_source_metadata: bool = True
 
 
 def _coerce_scalar(value: Any, expected_type: type[Any]) -> Any:
@@ -137,5 +140,6 @@ def load_db5_pretrain_config(path: str | Path) -> DB5PretrainConfig:
         "split_seed": root.get("split_seed", 42),
         "val_ratio": root.get("val_ratio", 0.15),
         "test_ratio": root.get("test_ratio", 0.15),
+        "manifest_use_source_metadata": root.get("manifest_use_source_metadata", True),
     }
     return _dict_to_dataclass(payload, DB5PretrainConfig)

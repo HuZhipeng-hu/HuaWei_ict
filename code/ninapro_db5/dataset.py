@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
@@ -54,6 +55,7 @@ class DB5PretrainDatasetLoader:
         )
         self._class_name_by_label: dict[int, str] = {}
         self._gesture_label_map: dict[tuple[int, int], int] = {}
+        self._action_threshold_history: dict[str, dict[str, list[float]]] = {}
         self._window_diagnostics: dict[str, Any] = {
             "totals": {
                 "segments": 0,
@@ -115,13 +117,51 @@ class DB5PretrainDatasetLoader:
     def _window_clip_ratio(window: np.ndarray, saturation_abs: float) -> float:
         return float(np.mean(np.abs(window) >= float(saturation_abs)))
 
+    @staticmethod
+    def _append_capped(history: list[float], values: list[float], cap: int = 4000) -> None:
+        history.extend(float(v) for v in values)
+        if len(history) > cap:
+            del history[: len(history) - cap]
+
+    def _adaptive_action_thresholds(
+        self,
+        class_name: str,
+        energies: list[float],
+        stds: list[float],
+    ) -> tuple[float, float]:
+        history = self._action_threshold_history.setdefault(class_name, {"energy": [], "std": []})
+        all_energies = np.asarray(history["energy"] + list(energies), dtype=np.float32)
+        all_stds = np.asarray(history["std"] + list(stds), dtype=np.float32)
+        if all_energies.size == 0 or all_stds.size == 0:
+            return float(self.config.feature.energy_min), float(self.config.feature.static_std_min)
+
+        q = float(np.clip(self.config.feature.action_quantile_percent, 0.0, 100.0))
+        energy_threshold = float(np.percentile(all_energies, q))
+        std_threshold = float(np.percentile(all_stds, q))
+        self._append_capped(history["energy"], energies)
+        self._append_capped(history["std"], stds)
+        return energy_threshold, std_threshold
+
+    @staticmethod
+    def _parse_recording_identity(subject: str, member_name: str, exercise: int) -> tuple[str, str, str]:
+        stem = Path(member_name).stem
+        user_id = str(subject).strip().upper()
+        session_id = f"E{int(exercise)}"
+        recording_id = stem
+        match = re.search(r"S(?P<subject>\d+)_E(?P<exercise>\d+)_A(?P<acq>\d+)", stem, re.IGNORECASE)
+        if match:
+            user_id = f"S{int(match.group('subject'))}"
+            session_id = f"S{int(match.group('subject'))}_A{int(match.group('acq'))}"
+        return user_id, session_id, recording_id
+
     def _select_windows(
         self,
         segment_signal: np.ndarray,
         *,
         allow_many: int,
         local_label: int,
-    ) -> tuple[list[tuple[np.ndarray, dict[str, float]]], dict[str, int]]:
+        class_name: str,
+    ) -> tuple[list[tuple[np.ndarray, dict[str, float]]], dict[str, float | int | bool]]:
         window = int(self.config.feature.source_window_samples)
         step = int(self.config.feature.source_step_samples)
         if segment_signal.shape[0] < window:
@@ -130,12 +170,15 @@ class DB5PretrainDatasetLoader:
                 "passed_quality": 0,
                 "selected": 0,
                 "filtered_by_quality": 0,
+                "energy_threshold": float(self.config.feature.energy_min),
+                "std_threshold": float(self.config.feature.static_std_min),
+                "adaptive_action_threshold": False,
             }
         starts = list(range(0, segment_signal.shape[0] - window + 1, step))
         if not starts:
             starts = [0]
         is_rest = int(local_label) == 0
-        candidates: list[tuple[np.ndarray, dict[str, float], float]] = []
+        quality_rows: list[tuple[int, np.ndarray, float, float, float]] = []
         for start in starts:
             raw_window = segment_signal[start : start + window]
             energy = self._window_energy(raw_window)
@@ -143,40 +186,70 @@ class DB5PretrainDatasetLoader:
             clip_ratio = self._window_clip_ratio(raw_window, self.config.feature.saturation_abs)
             if clip_ratio > float(self.config.feature.clip_ratio_max):
                 continue
+            quality_rows.append((int(start), raw_window, float(energy), float(mean_std), float(clip_ratio)))
 
+        energy_threshold = float(self.config.feature.energy_min)
+        std_threshold = float(self.config.feature.static_std_min)
+        adaptive_action = bool((not is_rest) and self.config.feature.use_adaptive_action_thresholds)
+        if adaptive_action:
+            energies = [item[2] for item in quality_rows]
+            stds = [item[3] for item in quality_rows]
+            energy_threshold, std_threshold = self._adaptive_action_thresholds(class_name, energies, stds)
+
+        candidates: list[tuple[np.ndarray, dict[str, float], float]] = []
+        fallback_candidates: list[tuple[np.ndarray, dict[str, float], float]] = []
+        for _start, raw_window, energy, mean_std, clip_ratio in quality_rows:
             if is_rest:
                 if energy > float(self.config.feature.energy_min):
                     continue
                 if mean_std > float(self.config.feature.static_std_min):
                     continue
                 score = -(energy + mean_std + clip_ratio * 10.0)
-            else:
-                if energy < float(self.config.feature.energy_min):
-                    continue
-                if mean_std < float(self.config.feature.static_std_min):
-                    continue
-                score = energy + mean_std - clip_ratio * 10.0
-
-            candidates.append(
-                (
-                    self._resample_window(raw_window),
-                    {
-                        "energy": float(energy),
-                        "mean_std": float(mean_std),
-                        "clip_ratio": float(clip_ratio),
-                    },
-                    float(score),
+                candidates.append(
+                    (
+                        self._resample_window(raw_window),
+                        {
+                            "energy": float(energy),
+                            "mean_std": float(mean_std),
+                            "clip_ratio": float(clip_ratio),
+                        },
+                        float(score),
+                    )
                 )
+                continue
+
+            score = energy + mean_std - clip_ratio * 10.0
+            entry = (
+                self._resample_window(raw_window),
+                {
+                    "energy": float(energy),
+                    "mean_std": float(mean_std),
+                    "clip_ratio": float(clip_ratio),
+                },
+                float(score),
             )
+            fallback_candidates.append(entry)
+            if energy < energy_threshold or mean_std < std_threshold:
+                continue
+            candidates.append(entry)
+
+        if (not is_rest) and (not candidates) and fallback_candidates:
+            candidates = list(fallback_candidates)
 
         candidates.sort(key=lambda item: item[2], reverse=True)
-        selected = candidates[: int(max(0, allow_many))]
+        target_count = int(max(0, allow_many))
+        if (not is_rest) and candidates:
+            target_count = max(target_count, min(3, len(candidates)))
+        selected = candidates[: min(len(candidates), target_count)]
         output = [(window_item, metrics) for window_item, metrics, _score in selected]
         diag = {
             "raw_candidates": int(len(starts)),
             "passed_quality": int(len(candidates)),
             "selected": int(len(output)),
             "filtered_by_quality": int(max(0, len(starts) - len(candidates))),
+            "energy_threshold": float(energy_threshold),
+            "std_threshold": float(std_threshold),
+            "adaptive_action_threshold": bool(adaptive_action),
         }
         return output, diag
 
@@ -213,6 +286,11 @@ class DB5PretrainDatasetLoader:
             for member in members:
                 mat = self._load_mat_from_zip(zip_path, member)
                 exercise = int(np.asarray(mat["exercise"]).reshape(-1)[0])
+                user_id, session_id, recording_id = self._parse_recording_identity(
+                    subject=subject,
+                    member_name=member.filename,
+                    exercise=exercise,
+                )
                 labels_key = "restimulus" if self.config.use_restimulus else "stimulus"
                 labels = np.asarray(mat[labels_key]).reshape(-1).astype(np.int32)
                 repetitions = np.asarray(mat["rerepetition"]).reshape(-1).astype(np.int32)
@@ -244,6 +322,7 @@ class DB5PretrainDatasetLoader:
                         segment,
                         allow_many=allow_many,
                         local_label=int(local_label),
+                        class_name=class_name,
                     )
                     self._class_name_by_label[int(global_label)] = class_name
                     totals = self._window_diagnostics["totals"]
@@ -274,12 +353,15 @@ class DB5PretrainDatasetLoader:
                     for win_idx, (window, quality_metrics) in enumerate(windows):
                         feature = self._stft_pipeline.process_window(window)
                         source_id = (
-                            f"{subject}|{Path(member.filename).stem}|label={local_label}|rep={repetition}|"
-                            f"seg={segment_index}|win={win_idx}"
+                            f"user_id={user_id}|session_id={session_id}|recording_id={recording_id}|"
+                            f"label={local_label}|rep={repetition}|seg={segment_index}|win={win_idx}"
                         )
                         metadata = {
                             "subject": subject,
                             "file": Path(member.filename).name,
+                            "user_id": user_id,
+                            "session_id": session_id,
+                            "recording_id": recording_id,
                             "exercise": exercise,
                             "local_label": int(local_label),
                             "gesture_key": self._gesture_key(exercise, int(local_label)),
@@ -290,6 +372,11 @@ class DB5PretrainDatasetLoader:
                             "window_std": float(quality_metrics["mean_std"]),
                             "window_clip_ratio": float(quality_metrics["clip_ratio"]),
                         }
+                        required_identity = ("user_id", "session_id", "recording_id")
+                        if any(not str(metadata.get(key, "")).strip() for key in required_identity):
+                            raise RuntimeError(
+                                f"Missing recording identity metadata: source={source_id}, metadata={metadata}"
+                            )
                         yield DB5WindowRecord(
                             feature=feature,
                             label=int(global_label),
@@ -305,6 +392,7 @@ class DB5PretrainDatasetLoader:
     ):
         self._class_name_by_label.clear()
         self._gesture_label_map.clear()
+        self._action_threshold_history.clear()
         self._window_diagnostics = {
             "totals": {
                 "segments": 0,
