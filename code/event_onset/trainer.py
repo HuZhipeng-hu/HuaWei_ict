@@ -281,16 +281,21 @@ class EventTrainer:
         return create_event_dataset(train_emg[indices], train_imu[indices], train_labels[indices], self.config.batch_size, shuffle=False)
 
     def _evaluate(self, dataset) -> Dict[str, float]:
+        prev_training = bool(getattr(self.model, "training", True))
+        self.model.set_train(False)
         losses: List[float] = []
         preds: List[np.ndarray] = []
         gts: List[np.ndarray] = []
-        for emg, imu, label in dataset.create_tuple_iterator():
-            logits = self.model(emg, imu)
-            loss = self.loss_fn_ce(logits, label)
-            losses.append(float(loss.asnumpy()))
-            pred = _argmax(logits).asnumpy()
-            preds.append(pred.astype(np.int32))
-            gts.append(label.asnumpy().astype(np.int32))
+        try:
+            for emg, imu, label in dataset.create_tuple_iterator():
+                logits = self.model(emg, imu)
+                loss = self.loss_fn_ce(logits, label)
+                losses.append(float(loss.asnumpy()))
+                pred = _argmax(logits).asnumpy()
+                preds.append(pred.astype(np.int32))
+                gts.append(label.asnumpy().astype(np.int32))
+        finally:
+            self.model.set_train(prev_training)
         if not preds:
             return {"loss": 0.0, "acc": 0.0, "macro_f1": 0.0}
         y_pred = np.concatenate(preds)

@@ -336,16 +336,21 @@ class Trainer:
         )
 
     def _evaluate(self, dataset: "ds.Dataset") -> Dict[str, float]:
+        prev_training = bool(getattr(self.model, "training", True))
+        self.model.set_train(False)
         losses: List[float] = []
         preds: List[np.ndarray] = []
         gts: List[np.ndarray] = []
-        for sample, label in dataset.create_tuple_iterator():
-            logits = self.model(sample)
-            loss = self.loss_fn_ce(logits, label)
-            losses.append(float(loss.asnumpy()))
-            pred = _argmax(logits).asnumpy()
-            preds.append(pred.astype(np.int32))
-            gts.append(label.asnumpy().astype(np.int32))
+        try:
+            for sample, label in dataset.create_tuple_iterator():
+                logits = self.model(sample)
+                loss = self.loss_fn_ce(logits, label)
+                losses.append(float(loss.asnumpy()))
+                pred = _argmax(logits).asnumpy()
+                preds.append(pred.astype(np.int32))
+                gts.append(label.asnumpy().astype(np.int32))
+        finally:
+            self.model.set_train(prev_training)
 
         if not preds:
             return {"loss": 0.0, "acc": 0.0, "macro_f1": 0.0}
@@ -397,10 +402,9 @@ class Trainer:
             for sample, label in epoch_train_dataset.create_tuple_iterator():
                 loss = self.train_step(sample, label)
                 epoch_losses.append(float(loss.asnumpy()))
+                if self._ema is not None:
+                    self._ema.update(self.model)
                 global_step += 1
-
-            if self._ema is not None:
-                self._ema.update(self.model)
 
             train_eval_dataset = create_mindspore_dataset(
                 train_samples, train_labels, self.config.batch_size, shuffle=False
@@ -470,7 +474,7 @@ class Trainer:
         return history
 
     def _save_best_checkpoint(self) -> None:
-        if self._ema is not None:
+        if self._ema is not None and self._ema.state.shadow:
             backup = self._ema.apply(self.model)
             save_checkpoint(self.model, str(self.checkpoint_path))
             self._ema.restore(self.model, backup)
