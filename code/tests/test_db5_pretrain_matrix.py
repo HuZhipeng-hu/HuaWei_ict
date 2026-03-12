@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from scripts.pretrain_db5_experiment_matrix import _rank_key, _should_skip_run4
+from scripts.pretrain_db5_experiment_matrix import _missing_summary_fields, _rank_key, _should_skip_run4
 from scripts.pretrain_ninapro_db5 import (
     _best_validation_from_history,
     _build_referee_card_content,
@@ -35,6 +35,11 @@ def test_matrix_rank_key_uses_validation_metrics() -> None:
 def test_should_skip_run4_when_run3_gain_below_threshold() -> None:
     assert _should_skip_run4(run0_val_f1=0.083, run3_val_f1=0.109) is True
     assert _should_skip_run4(run0_val_f1=0.083, run3_val_f1=0.113) is False
+
+
+def test_missing_summary_fields_reports_required_keys() -> None:
+    summary = {"best_val_epoch": 10, "best_val_macro_f1": 0.2}
+    assert _missing_summary_fields(summary) == ["best_val_acc"]
 
 
 @dataclass

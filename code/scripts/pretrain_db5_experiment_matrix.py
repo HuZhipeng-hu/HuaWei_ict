@@ -30,11 +30,15 @@ RUN4_VARIANTS: dict[str, dict[str, str]] = {
     "lr3e4_wd1e3": {"learning_rate": "0.0003", "weight_decay": "0.001"},
 }
 
+REQUIRED_SUMMARY_FIELDS = ("best_val_epoch", "best_val_macro_f1", "best_val_acc")
+REQUIRED_EVAL_FILES = ("test_metrics.json", "test_per_class_metrics.csv", "test_confusion_matrix.csv")
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run DB5 pretraining emergency matrix (Run-0..Run-4).")
     parser.add_argument("--config", default="configs/pretrain_ninapro_db5.yaml")
     parser.add_argument("--data_dir", default="../data_ninaproDB5")
+    parser.add_argument("--wearer_data_dir", default="../data")
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--device_target", default="Ascend", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)
@@ -47,6 +51,12 @@ def _parse_args() -> argparse.Namespace:
         help="Run all three Run-4 candidates instead of one recommended variant.",
     )
     parser.add_argument("--min_run3_gain", type=float, default=0.03)
+    parser.add_argument("--skip_quality_gate", action="store_true")
+    parser.add_argument("--quality_gate_script", default="scripts/pretrain_db5_quality_gate.py")
+    parser.add_argument("--quality_gate_fail_on_warning", choices=["true", "false"], default="true")
+    parser.add_argument("--quality_gate_skip_db5_probe", action="store_true")
+    parser.add_argument("--quality_gate_skip_budget_probe", action="store_true")
+    parser.add_argument("--quality_gate_pytest_basetemp_root", default=".tmp_pytest_runcheck")
     return parser.parse_args()
 
 
@@ -68,7 +78,61 @@ def _should_skip_run4(*, run0_val_f1: float, run3_val_f1: float, min_gain: float
     return float(run3_val_f1) - float(run0_val_f1) < float(min_gain)
 
 
-def _run_pretrain(args: argparse.Namespace, run: MatrixRun) -> dict:
+def _resolve_path(path_str: str) -> Path:
+    path = Path(path_str)
+    if path.is_absolute():
+        return path
+    return CODE_ROOT / path
+
+
+def _missing_summary_fields(summary: dict) -> list[str]:
+    missing: list[str] = []
+    for field in REQUIRED_SUMMARY_FIELDS:
+        value = summary.get(field, None)
+        if value is None:
+            missing.append(field)
+            continue
+        if isinstance(value, str) and not value.strip():
+            missing.append(field)
+    return missing
+
+
+def _validate_run_artifacts(args: argparse.Namespace, run: MatrixRun, summary: dict) -> list[str]:
+    issues: list[str] = []
+    missing_fields = _missing_summary_fields(summary)
+    if missing_fields:
+        issues.append(f"offline_summary missing required fields: {', '.join(missing_fields)}")
+
+    run_dir = Path(args.run_root) / run.run_id
+    summary_path = run_dir / "offline_summary.json"
+    if not summary_path.exists():
+        issues.append(f"missing artifact: {summary_path}")
+
+    checkpoint = str(summary.get("checkpoint_path", "")).strip()
+    if not checkpoint:
+        issues.append("offline_summary.checkpoint_path is empty")
+    else:
+        checkpoint_path = _resolve_path(checkpoint)
+        if not checkpoint_path.exists():
+            issues.append(f"checkpoint does not exist: {checkpoint_path}")
+
+    eval_dir = run_dir / "evaluation"
+    if not eval_dir.exists():
+        issues.append(f"missing evaluation directory: {eval_dir}")
+    else:
+        for filename in REQUIRED_EVAL_FILES:
+            path = eval_dir / filename
+            if not path.exists():
+                issues.append(f"missing evaluation artifact: {path}")
+
+    run_card = run_dir / "referee_repro_card.md"
+    if not run_card.exists():
+        issues.append(f"missing run referee card: {run_card}")
+
+    return issues
+
+
+def _build_pretrain_command(args: argparse.Namespace, run: MatrixRun) -> list[str]:
     cmd: list[str] = [
         sys.executable,
         "scripts/pretrain_ninapro_db5.py",
@@ -89,11 +153,26 @@ def _run_pretrain(args: argparse.Namespace, run: MatrixRun) -> dict:
     ]
     for key, value in run.overrides.items():
         cmd.extend([f"--{key}", str(value)])
+    return cmd
+
+
+def _run_pretrain(args: argparse.Namespace, run: MatrixRun) -> dict:
+    cmd = _build_pretrain_command(args, run)
     cmd_str = " ".join(shlex.quote(item) for item in cmd)
     print(f"[MATRIX] {run.name} -> {cmd_str}")
-    subprocess.run(cmd, cwd=str(CODE_ROOT), check=True)
+    completed = subprocess.run(cmd, cwd=str(CODE_ROOT), check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"training subprocess failed: run_id={run.run_id}, rc={completed.returncode}, cmd={cmd_str}"
+        )
+
     summary_path = Path(args.run_root) / run.run_id / "offline_summary.json"
+    if not summary_path.exists():
+        raise RuntimeError(f"missing offline_summary after run: {summary_path}")
     summary = _read_summary(summary_path)
+    issues = _validate_run_artifacts(args, run, summary)
+    if issues:
+        raise RuntimeError("; ".join(issues))
     summary["matrix_name"] = run.name
     summary["matrix_run_id"] = run.run_id
     summary["matrix_command"] = cmd_str
@@ -263,17 +342,123 @@ def _build_run4_candidates(prefix: str, variant: str, *, run_all: bool) -> list[
     return runs
 
 
+def _write_failure_report(matrix_dir: Path, failures: list[dict]) -> None:
+    report_json = matrix_dir / "db5_pretrain_failure_report.json"
+    report_md = matrix_dir / "db5_pretrain_failure_report.md"
+    payload = {"failed": bool(failures), "failure_count": len(failures), "failures": failures}
+    report_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    lines = [
+        "# DB5 Pretrain Failure Report",
+        "",
+        f"- failed: `{payload['failed']}`",
+        f"- failure_count: `{payload['failure_count']}`",
+        "",
+    ]
+    if failures:
+        lines.extend(
+            [
+                "| stage | matrix_run_id | root_cause | next_command |",
+                "|---|---|---|---|",
+            ]
+        )
+        for item in failures:
+            lines.append(
+                "| "
+                f"{item.get('stage', '')} | {item.get('matrix_run_id', '')} | "
+                f"{item.get('root_cause', '')} | `{item.get('next_command', '')}` |"
+            )
+    else:
+        lines.append("No failures.")
+    report_md.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _run_quality_gate(args: argparse.Namespace, prefix: str) -> None:
+    gate_prefix = f"{prefix}_gate"
+    cmd: list[str] = [
+        sys.executable,
+        str(args.quality_gate_script),
+        "--config",
+        str(args.config),
+        "--data_dir",
+        str(args.data_dir),
+        "--wearer_data_dir",
+        str(args.wearer_data_dir),
+        "--run_root",
+        str(args.run_root),
+        "--device_target",
+        str(args.device_target),
+        "--device_id",
+        str(int(args.device_id)),
+        "--foundation_dir",
+        str(args.foundation_dir),
+        "--run_prefix",
+        gate_prefix,
+        "--fail_on_warning",
+        str(args.quality_gate_fail_on_warning),
+        "--pytest_basetemp_root",
+        str(args.quality_gate_pytest_basetemp_root),
+    ]
+    if args.quality_gate_skip_db5_probe:
+        cmd.append("--skip_db5_probe")
+    if args.quality_gate_skip_budget_probe:
+        cmd.append("--skip_budget_probe")
+
+    cmd_str = " ".join(shlex.quote(item) for item in cmd)
+    print(f"[MATRIX] quality_gate -> {cmd_str}")
+    subprocess.run(cmd, cwd=str(CODE_ROOT), check=True)
+
+
 def main() -> None:
     args = _parse_args()
     prefix = str(args.run_prefix).strip() or "db5_sprint"
+    matrix_dir = Path(args.run_root) / f"{prefix}_summary"
+    matrix_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[dict] = []
+    failures: list[dict] = []
+
+    def run_or_fail(run: MatrixRun) -> dict:
+        cmd = _build_pretrain_command(args, run)
+        cmd_str = " ".join(shlex.quote(item) for item in cmd)
+        try:
+            summary = _run_pretrain(args, run)
+            results.append(summary)
+            return summary
+        except Exception as exc:
+            failure = {
+                "stage": run.name,
+                "matrix_run_id": run.run_id,
+                "root_cause": str(exc),
+                "next_command": cmd_str,
+            }
+            failures.append(failure)
+            _write_failure_report(matrix_dir, failures)
+            raise
+
+    if not args.skip_quality_gate:
+        try:
+            _run_quality_gate(args, prefix)
+        except Exception as exc:
+            failures.append(
+                {
+                    "stage": "quality_gate",
+                    "matrix_run_id": f"{prefix}_gate",
+                    "root_cause": str(exc),
+                    "next_command": (
+                        f"{sys.executable} {args.quality_gate_script} "
+                        f"--config {args.config} --data_dir {args.data_dir}"
+                    ),
+                }
+            )
+            _write_failure_report(matrix_dir, failures)
+            raise
+
     core_runs = _build_core_runs(prefix)
-    run0_summary = _run_pretrain(args, core_runs[0])
-    run1_summary = _run_pretrain(args, core_runs[1])
-    run2_summary = _run_pretrain(args, core_runs[2])
-    run3_summary = _run_pretrain(args, core_runs[3])
-    results.extend([run0_summary, run1_summary, run2_summary, run3_summary])
+    run0_summary = run_or_fail(core_runs[0])
+    run1_summary = run_or_fail(core_runs[1])
+    run2_summary = run_or_fail(core_runs[2])
+    run3_summary = run_or_fail(core_runs[3])
 
     run3_gain = float(run3_summary.get("best_val_macro_f1", 0.0) or 0.0) - float(
         run0_summary.get("best_val_macro_f1", 0.0) or 0.0
@@ -294,7 +479,7 @@ def main() -> None:
     else:
         run4_candidates = _build_run4_candidates(prefix, args.run4_variant, run_all=bool(args.run4_grid_search))
         for run in run4_candidates:
-            results.append(_run_pretrain(args, run))
+            run_or_fail(run)
 
     best = max(results, key=_rank_key)
     output = {
@@ -307,14 +492,25 @@ def main() -> None:
         "best_run": best,
         "results": results,
     }
-    matrix_dir = Path(args.run_root) / f"{prefix}_summary"
-    matrix_dir.mkdir(parents=True, exist_ok=True)
     summary_json = matrix_dir / "db5_pretrain_matrix_summary.json"
     summary_csv = matrix_dir / "db5_pretrain_matrix_summary.csv"
     referee_card = matrix_dir / "db5_referee_repro_card.md"
     summary_json.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_csv(summary_csv, results)
     referee_card.write_text(_build_referee_card(best, output, str(args.data_dir)), encoding="utf-8")
+    if not referee_card.exists():
+        failures.append(
+            {
+                "stage": "matrix_referee_card",
+                "matrix_run_id": str(best.get("matrix_run_id", "")),
+                "root_cause": f"missing matrix referee card: {referee_card}",
+                "next_command": f"re-run matrix script: {Path(__file__).name}",
+            }
+        )
+        _write_failure_report(matrix_dir, failures)
+        raise RuntimeError(f"missing matrix referee card: {referee_card}")
+
+    _write_failure_report(matrix_dir, failures)
     print(
         "[MATRIX] best="
         f"{best.get('matrix_run_id')} "

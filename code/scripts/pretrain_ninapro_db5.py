@@ -145,6 +145,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="artifacts/foundation/db5_full53",
         help="Fixed foundation artifact directory.",
     )
+    parser.add_argument(
+        "--smoke_manifest_only",
+        action="store_true",
+        help="Build dataset/manifest diagnostics only, then exit before model training.",
+    )
     return parser
 
 
@@ -216,6 +221,13 @@ def _build_split_diagnostics(manifest, class_names: list[str]) -> dict:
             "has_empty_classes": has_empty,
         }
     return {"by_split": by_split, "overall": {"has_any_empty_classes": bool(has_any_empty)}}
+
+
+def _has_group_leakage(manifest) -> bool:
+    train = set(getattr(manifest, "group_keys_train", []) or [])
+    val = set(getattr(manifest, "group_keys_val", []) or [])
+    test = set(getattr(manifest, "group_keys_test", []) or [])
+    return bool((train & val) or (train & test) or (val & test))
 
 
 def _build_referee_card_content(*, summary: dict, data_dir: str, command: str) -> str:
@@ -502,6 +514,44 @@ def main() -> None:
     dump_json(run_dir / "db5_split_diagnostics.json", split_diagnostics)
     if bool(split_diagnostics["overall"]["has_any_empty_classes"]):
         logger.warning("Split diagnostics detected empty classes in at least one split.")
+    has_group_leakage = _has_group_leakage(manifest)
+    if has_group_leakage:
+        raise RuntimeError("Group leakage detected after manifest construction.")
+    if args.smoke_manifest_only:
+        if bool(split_diagnostics["overall"]["has_any_empty_classes"]):
+            raise RuntimeError("Manifest smoke failed: at least one split has empty classes.")
+        smoke_summary = {
+            "run_id": run_id,
+            "mode": "manifest_smoke",
+            "num_classes": int(len(class_names)),
+            "split_seed": int(config.split_seed),
+            "manifest_use_source_metadata": bool(config.manifest_use_source_metadata),
+            "group_leakage_detected": bool(has_group_leakage),
+            "has_any_empty_classes": bool(split_diagnostics["overall"]["has_any_empty_classes"]),
+            "artifacts": {
+                "manifest_path": str(run_dir / "db5_manifest.json"),
+                "split_diagnostics_path": str(run_dir / "db5_split_diagnostics.json"),
+                "window_diagnostics_path": str(run_dir / "db5_window_diagnostics.json"),
+            },
+            "repro_command": repro_command,
+        }
+        dump_json(run_dir / "manifest_smoke_summary.json", smoke_summary)
+        dump_json(
+            run_dir / "run_metadata.json",
+            {
+                "run_id": run_id,
+                "run_dir": str(run_dir),
+                "data_dir": str(data_dir),
+                "smoke_manifest_only": True,
+                "elapsed_minutes": (time.time() - start) / 60.0,
+                "class_names": class_names,
+                "window_diagnostics_path": str(run_dir / "db5_window_diagnostics.json"),
+                "split_diagnostics_path": str(run_dir / "db5_split_diagnostics.json"),
+                "manifest_path": str(run_dir / "db5_manifest.json"),
+            },
+        )
+        logger.info("Manifest smoke completed successfully; skipped training/evaluation by --smoke_manifest_only.")
+        return
 
     train_idx = np.asarray(manifest.train_indices, dtype=np.int32)
     val_idx = np.asarray(manifest.val_indices, dtype=np.int32)
