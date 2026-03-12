@@ -1,53 +1,52 @@
-# NeuroGrip Event-Onset Pipeline
+# NeuroGrip Event-Onset v1 (Final Mainline)
 
-This branch is event-onset only. Legacy 6-gesture standalone training/runtime flow has been removed.
+This branch is **event-onset only** and the recommended workflow is now a single one-click command:
 
-## Pipeline
+`DB5 aligned pretrain -> wearer finetune A/B (scratch vs pretrained) -> auto select best -> MindIR convert -> CKPT/Lite benchmark gate`
 
-`DB5 pretrain -> wearer finetune -> MindIR conversion -> Orange Pi runtime`
-
-## 1) DB5 Pretrain
+## 1) One-Click Pipeline (Recommended)
 
 ```bash
-python scripts/pretrain_ninapro_db5.py \
-  --config configs/pretrain_ninapro_db5.yaml \
-  --data_dir ../data_ninaproDB5 \
-  --run_id db5_pretrain_v1
+python scripts/train_event_pipeline.py \
+  --db5_data_dir ../data_ninaproDB5 \
+  --wearer_data_dir ../data \
+  --budget_per_class 60 \
+  --device_target Ascend \
+  --device_id 0 \
+  --run_id event_pipeline_v1
 ```
 
-Output checkpoint (example):
+Main outputs:
 
-`artifacts/runs/db5_pretrain_v1/checkpoints/db5_pretrain_best.ckpt`
+- `artifacts/runs/<run_id>/final_selection.json`
+- `artifacts/runs/<run_id>/final_artifacts.json`
+- `artifacts/runs/<run_id>/models/event_onset_selected.mindir`
+- `artifacts/runs/<run_id>/models/event_onset_selected.model_metadata.json`
 
-## 2) Wearer Finetune (Event-Onset)
+Notes:
+
+- Budget mode defaults to `60` train windows per class (`RELAX/FIST/PINCH`).
+- A/B selection rule: pretrained must **strictly outperform** scratch (`macro_f1`, then `accuracy` tie-break), otherwise scratch is chosen automatically.
+- Production deployment format is `MindIR`; CKPT is debug only.
+
+## 2) Preflight
 
 ```bash
-python scripts/finetune_event_onset.py \
-  --config configs/training_event_onset.yaml \
-  --data_dir ../data \
-  --pretrained_emg_checkpoint artifacts/runs/db5_pretrain_v1/checkpoints/db5_pretrain_best.ckpt \
-  --run_id event_finetune_v1
+python scripts/preflight.py --mode local
+python scripts/preflight.py --mode ascend
 ```
 
-Output checkpoint (example):
-
-`artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt`
-
-## 3) Convert Event Model to MindIR
+Optional explicit paths:
 
 ```bash
-python scripts/convert_event_onset.py \
-  --config configs/conversion_event_onset.yaml \
-  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
-  --run_id event_convert_v1
+python scripts/preflight.py \
+  --mode ascend \
+  --db5_data_dir ../data_ninaproDB5 \
+  --wearer_data_dir ../data \
+  --budget_per_class 60
 ```
 
-Outputs:
-
-- `models/event_onset.mindir`
-- `models/event_onset.model_metadata.json`
-
-## 4) Runtime (Orange Pi)
+## 3) Runtime on Orange Pi
 
 Production backend (`lite`):
 
@@ -57,7 +56,7 @@ python scripts/run_event_runtime.py \
   --backend lite
 ```
 
-Debug backend (`ckpt`):
+Debug backend (`ckpt`, offline troubleshooting only):
 
 ```bash
 python scripts/run_event_runtime.py \
@@ -65,30 +64,38 @@ python scripts/run_event_runtime.py \
   --backend ckpt
 ```
 
-## 5) Runtime Benchmark (CKPT vs MindIR)
+## 4) Hardware Gesture Test (No Inference)
+
+Use this mode to validate actuator behavior directly from keyboard input:
 
 ```bash
-python scripts/benchmark_event_runtime_ckpt.py \
-  --training_config configs/training_event_onset.yaml \
-  --runtime_config configs/runtime_event_onset.yaml \
-  --data_dir ../data \
-  --backend both \
-  --output artifacts/event_runtime_benchmark_compare.json
+python scripts/test_actuator_gesture.py \
+  --config configs/runtime_event_onset.yaml
 ```
 
-## 6) Checkpoint Evaluation
+Commands:
 
-```bash
-python scripts/evaluate_ckpt.py \
-  --config configs/training_event_onset.yaml \
-  --data_dir ../data \
-  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
-  --split_manifest artifacts/splits/event_onset_split_manifest.json
-```
+- `r` -> `RELAX`
+- `f` -> `FIST`
+- `p` -> `PINCH`
+- `o` -> `OK`
+- `y` -> `YE`
+- `s` -> `SIDEGRIP`
+- `i` -> print actuator info
+- `h` -> help
+- `q` -> quit
 
-## 7) Preflight
+Safety behavior:
 
-```bash
-python scripts/preflight.py --mode local
-python scripts/preflight.py --mode ascend
-```
+- startup auto `RELAX`
+- exit auto `RELAX` then disconnect
+
+## 5) Advanced Debug (Step-by-Step, Optional)
+
+Not recommended for daily usage, but kept for troubleshooting:
+
+- `scripts/pretrain_ninapro_db5.py` (`--pretrain_mode legacy53` only for debug fallback)
+- `scripts/finetune_event_onset.py`
+- `scripts/convert_event_onset.py`
+- `scripts/benchmark_event_runtime_ckpt.py`
+- `scripts/evaluate_ckpt.py`

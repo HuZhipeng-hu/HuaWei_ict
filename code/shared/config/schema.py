@@ -145,6 +145,10 @@ class TrainingConfig:
     test_ratio: float = 0.2
     kfold: Optional[int] = None
     num_workers: int = 2
+    freeze_emg_epochs: int = 0
+    unfreeze_last_blocks: bool = True
+    encoder_lr_ratio: float = 0.3
+    head_lr_ratio: float = 1.0
     loss: LossConfig = field(default_factory=LossConfig)
     sampler: SamplerConfig = field(default_factory=SamplerConfig)
     ema: EMAConfig = field(default_factory=EMAConfig)

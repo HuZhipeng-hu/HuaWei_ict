@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import scipy.io as sio
 
-from ninapro_db5.config import DB5FeatureConfig, DB5PretrainConfig
+from ninapro_db5.config import DB5Aligned3Config, DB5FeatureConfig, DB5MappingProfileConfig, DB5PretrainConfig
 from ninapro_db5.dataset import DB5PretrainDatasetLoader
 
 
@@ -125,3 +125,124 @@ def test_db5_label_mapping_keeps_exercises_distinct(tmp_path: Path):
     assert mapping[(1, 13)] != mapping[(2, 1)]
     assert set(item["class_name"] for item in metadata if item["local_label"] != 0) == {"E1_G13", "E2_G01"}
     assert int(labels.max()) + 1 == len(loader.get_class_names())
+
+
+def test_db5_aligned3_profile_filters_to_rest_fist_pinch(tmp_path: Path):
+    zip_path = tmp_path / "s1.zip"
+    _write_db5_zip(
+        zip_path,
+        exercise=1,
+        active_label=13,
+        member_name="s1/S1_E1_A1.mat",
+    )
+    _write_db5_zip(
+        zip_path,
+        exercise=1,
+        active_label=14,
+        member_name="s1/S1_E1_A2.mat",
+    )
+    cfg = DB5PretrainConfig(
+        data_dir=str(tmp_path),
+        zip_glob="s*.zip",
+        include_rest_class=True,
+        use_restimulus=True,
+        aligned3=DB5Aligned3Config(
+            enabled=True,
+            candidate_mapping_profiles=[
+                DB5MappingProfileConfig(
+                    name="p_test",
+                    fist=["E1_G13"],
+                    pinch=["E1_G14"],
+                )
+            ],
+            mapping_override=None,
+            min_samples_per_class=1,
+        ),
+        feature=_base_feature_config(),
+    )
+    loader = DB5PretrainDatasetLoader(tmp_path, cfg, pretrain_mode="aligned3")
+    _, labels, _, metadata = loader.load_all_with_sources(return_metadata=True)
+    report = loader.get_mapping_profile_report()
+
+    assert set(np.unique(labels).tolist()) == {0, 1, 2}
+    assert loader.get_class_names() == ["REST", "FIST", "PINCH"]
+    assert report["selected_profile"] == "p_test"
+    assert report["selected_counts"]["FIST"] >= 1
+    assert report["selected_counts"]["PINCH"] >= 1
+    assert set(item["class_name"] for item in metadata) <= {"REST", "FIST", "PINCH"}
+
+
+def test_db5_aligned3_fail_fast_when_mapping_lacks_samples(tmp_path: Path):
+    zip_path = tmp_path / "s1.zip"
+    _write_db5_zip(
+        zip_path,
+        exercise=1,
+        active_label=13,
+        member_name="s1/S1_E1_A1.mat",
+    )
+    cfg = DB5PretrainConfig(
+        data_dir=str(tmp_path),
+        zip_glob="s*.zip",
+        include_rest_class=True,
+        use_restimulus=True,
+        aligned3=DB5Aligned3Config(
+            enabled=True,
+            candidate_mapping_profiles=[
+                DB5MappingProfileConfig(
+                    name="bad",
+                    fist=["E1_G99"],
+                    pinch=["E1_G98"],
+                )
+            ],
+            mapping_override=None,
+            min_samples_per_class=1,
+        ),
+        feature=_base_feature_config(),
+    )
+    loader = DB5PretrainDatasetLoader(tmp_path, cfg, pretrain_mode="aligned3")
+    try:
+        loader.load_all_with_sources()
+    except RuntimeError as exc:
+        assert "No aligned3 mapping profile satisfies" in str(exc)
+    else:
+        raise AssertionError("Expected aligned3 mapping to fail fast when class coverage is missing")
+
+
+def test_db5_aligned3_without_rest_keeps_two_contiguous_classes(tmp_path: Path):
+    zip_path = tmp_path / "s1.zip"
+    _write_db5_zip(
+        zip_path,
+        exercise=1,
+        active_label=13,
+        member_name="s1/S1_E1_A1.mat",
+    )
+    _write_db5_zip(
+        zip_path,
+        exercise=1,
+        active_label=14,
+        member_name="s1/S1_E1_A2.mat",
+    )
+    cfg = DB5PretrainConfig(
+        data_dir=str(tmp_path),
+        zip_glob="s*.zip",
+        include_rest_class=False,
+        use_restimulus=True,
+        aligned3=DB5Aligned3Config(
+            enabled=True,
+            candidate_mapping_profiles=[
+                DB5MappingProfileConfig(
+                    name="p_test_no_rest",
+                    fist=["E1_G13"],
+                    pinch=["E1_G14"],
+                )
+            ],
+            mapping_override=None,
+            min_samples_per_class=1,
+        ),
+        feature=_base_feature_config(),
+    )
+    loader = DB5PretrainDatasetLoader(tmp_path, cfg, pretrain_mode="aligned3")
+    _, labels, _, _ = loader.load_all_with_sources(return_metadata=True)
+
+    assert set(np.unique(labels).tolist()) == {0, 1}
+    assert loader.get_class_names() == ["FIST", "PINCH"]

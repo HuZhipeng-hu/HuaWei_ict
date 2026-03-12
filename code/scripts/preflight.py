@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import sys
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -15,8 +17,8 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.config import load_event_runtime_config, load_event_training_config
+from event_onset.manifest import load_event_manifest_rows
 from shared.config import load_config
-
 
 @dataclass
 class Check:
@@ -24,10 +26,8 @@ class Check:
     name: str
     detail: str
 
-
 def has_module(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
-
 
 def _resolve_under_root(code_root: Path, raw_path: str | None) -> Path | None:
     if raw_path is None:
@@ -37,6 +37,13 @@ def _resolve_under_root(code_root: Path, raw_path: str | None) -> Path | None:
         return path
     return code_root / path
 
+def _resolve_data_arg(path_value: str | None, fallback: Path) -> Path:
+    if path_value is None:
+        return fallback
+    raw = Path(path_value)
+    if raw.is_absolute():
+        return raw
+    return (CODE_ROOT / raw).resolve()
 
 def collect_dependency_checks(mode: str) -> list[Check]:
     checks: list[Check] = []
@@ -58,8 +65,7 @@ def collect_dependency_checks(mode: str) -> list[Check]:
 
     return checks
 
-
-def collect_file_checks(code_root: Path, data_root: Path) -> list[Check]:
+def collect_file_checks(code_root: Path, wearer_data_root: Path, db5_data_root: Path) -> list[Check]:
     checks: list[Check] = []
     required_files = [
         code_root / "configs" / "pretrain_ninapro_db5.yaml",
@@ -70,13 +76,26 @@ def collect_file_checks(code_root: Path, data_root: Path) -> list[Check]:
         code_root / "scripts" / "finetune_event_onset.py",
         code_root / "scripts" / "convert_event_onset.py",
         code_root / "scripts" / "run_event_runtime.py",
+        code_root / "scripts" / "train_event_pipeline.py",
     ]
     for path in required_files:
         checks.append(Check("INFO" if path.exists() else "ERROR", f"file:{path.relative_to(code_root)}", "exists" if path.exists() else "missing"))
 
-    checks.append(Check("INFO" if data_root.exists() else "WARN", f"dir:{data_root}", "exists" if data_root.exists() else "missing (set --data_dir when running training)"))
+    checks.append(
+        Check(
+            "INFO" if wearer_data_root.exists() else "WARN",
+            f"dir:wearer_data={wearer_data_root}",
+            "exists" if wearer_data_root.exists() else "missing (set --wearer_data_dir)",
+        )
+    )
+    checks.append(
+        Check(
+            "INFO" if db5_data_root.exists() else "WARN",
+            f"dir:db5_data={db5_data_root}",
+            "exists" if db5_data_root.exists() else "missing (set --db5_data_dir)",
+        )
+    )
     return checks
-
 
 def collect_config_checks(code_root: Path) -> list[Check]:
     checks: list[Check] = []
@@ -137,15 +156,188 @@ def collect_config_checks(code_root: Path) -> list[Check]:
 
     return checks
 
+def collect_db5_checks(code_root: Path, db5_data_root: Path, *, skip_probe: bool) -> list[Check]:
+    checks: list[Check] = []
+    try:
+        import numpy as np
+        import scipy.io as sio
+
+        from ninapro_db5.config import load_db5_pretrain_config
+    except Exception as exc:
+        checks.append(Check("ERROR", "db5.import", f"failed to import DB5 modules: {exc}"))
+        return checks
+
+    cfg_path = code_root / "configs" / "pretrain_ninapro_db5.yaml"
+    cfg = load_db5_pretrain_config(cfg_path)
+    zip_files = sorted(db5_data_root.glob(cfg.zip_glob))
+    subject_count = len(zip_files)
+    checks.append(Check("INFO", "db5.subject_zip_count", str(subject_count)))
+    if subject_count <= 0:
+        checks.append(Check("ERROR", "db5.subject_zip_count", f"no files matched {cfg.zip_glob} under {db5_data_root}"))
+        return checks
+    if subject_count < 10:
+        checks.append(Check("WARN", "db5.subject_zip_count", f"expected ~=10 subjects, found {subject_count}"))
+
+    if skip_probe:
+        checks.append(Check("WARN", "db5.aligned3_probe", "skipped by --skip_db5_probe"))
+        return checks
+
+    def _iter_segments(labels: np.ndarray):
+        start = 0
+        current = int(labels[0])
+        for idx in range(1, labels.shape[0]):
+            value = int(labels[idx])
+            if value != current:
+                yield current, start, idx
+                start = idx
+                current = value
+        yield current, start, labels.shape[0]
+
+    def _gesture_key(exercise: int, local_label: int) -> str:
+        return f"E{int(exercise)}_G{int(local_label):02d}"
+
+    try:
+        action_segments: dict[str, int] = {}
+        rest_segments = 0
+        labels_key = "restimulus" if bool(cfg.use_restimulus) else "stimulus"
+        for zip_path in zip_files:
+            with zipfile.ZipFile(zip_path) as zf:
+                members = sorted(
+                    (item for item in zf.infolist() if item.filename.lower().endswith(".mat")),
+                    key=lambda item: item.filename,
+                )
+                for member in members:
+                    with zf.open(member) as handle:
+                        mat = sio.loadmat(io.BytesIO(handle.read()))
+                    labels = np.asarray(mat[labels_key]).reshape(-1).astype(np.int32)
+                    exercise = int(np.asarray(mat["exercise"]).reshape(-1)[0])
+                    if labels.size <= 0:
+                        continue
+                    for local_label, _, _ in _iter_segments(labels):
+                        if int(local_label) == 0:
+                            rest_segments += 1
+                        else:
+                            key = _gesture_key(exercise, int(local_label))
+                            action_segments[key] = int(action_segments.get(key, 0)) + 1
+
+        action_top_k = max(1, int(cfg.aligned3.onset_window_policy.action_top_k_per_segment))
+        rest_top_k = max(1, int(cfg.aligned3.onset_window_policy.rest_top_k_per_segment))
+        min_samples = int(cfg.aligned3.min_samples_per_class)
+        required_classes = ["FIST", "PINCH"] + (["REST"] if bool(cfg.include_rest_class) else [])
+
+        profile_scores: list[tuple[int, int, str, dict[str, int]]] = []
+        for profile in cfg.aligned3.candidate_mapping_profiles:
+            fist_est = int(sum(action_segments.get(key, 0) for key in profile.fist) * action_top_k)
+            pinch_est = int(sum(action_segments.get(key, 0) for key in profile.pinch) * action_top_k)
+            counts = {"FIST": fist_est, "PINCH": pinch_est}
+            if bool(cfg.include_rest_class):
+                counts["REST"] = int(rest_segments * rest_top_k)
+            min_required = min(counts.get(name, 0) for name in required_classes)
+            profile_scores.append((min_required, fist_est + pinch_est, profile.name, counts))
+
+        profile_scores.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        if not profile_scores:
+            checks.append(Check("ERROR", "db5.aligned3.selected_profile", "no candidate profiles configured"))
+            return checks
+        _, _, selected_name, selected_counts = profile_scores[0]
+        checks.append(Check("INFO", "db5.aligned3.selected_profile", selected_name))
+        checks.append(
+            Check(
+                "INFO",
+                "db5.aligned3.estimate_basis",
+                "segment_count * top_k_per_segment (fast estimate)",
+            )
+        )
+        for class_name in required_classes:
+            class_count = int(selected_counts.get(class_name, 0))
+            level = "INFO" if class_count >= min_samples else "WARN"
+            checks.append(
+                Check(
+                    level,
+                    f"db5.aligned3.estimated_count.{class_name}",
+                    f"{class_count} (min_required={min_samples})",
+                )
+            )
+    except Exception as exc:
+        checks.append(Check("ERROR", "db5.aligned3_probe", str(exc)))
+
+    return checks
+
+def collect_budget_checks(
+    code_root: Path,
+    wearer_data_root: Path,
+    *,
+    budget_per_class: int,
+    skip_probe: bool,
+) -> list[Check]:
+    checks: list[Check] = []
+    model_cfg, data_cfg, _, _ = load_event_training_config(code_root / "configs" / "training_event_onset.yaml")
+    del model_cfg
+    checks.append(Check("INFO", "budget.per_class", str(int(budget_per_class))))
+
+    manifest_path = Path(data_cfg.recordings_manifest_path)
+    if not manifest_path.is_absolute():
+        manifest_path = wearer_data_root / manifest_path
+    if not manifest_path.exists():
+        checks.append(Check("WARN", "budget.recordings_manifest", f"missing: {manifest_path}"))
+        return checks
+
+    rows = load_event_manifest_rows(manifest_path)
+    if not rows:
+        checks.append(Check("WARN", "budget.recordings_manifest", f"no rows: {manifest_path}"))
+        return checks
+
+    clip_counts: dict[str, int] = {}
+    for row in rows.values():
+        if str(row.get("capture_mode", "")) != data_cfg.capture_mode_filter:
+            continue
+        target_state = str(row.get("target_state", "")).strip().upper()
+        if not target_state:
+            continue
+        clip_counts[target_state] = int(clip_counts.get(target_state, 0)) + 1
+
+    if not clip_counts:
+        checks.append(Check("WARN", "budget.filtered_clips", "0 clips after capture_mode_filter"))
+        return checks
+
+    checks.append(Check("INFO", "budget.filtered_clip_total", str(sum(clip_counts.values()))))
+    if skip_probe:
+        checks.append(Check("WARN", "budget.window_estimate", "skipped by --skip_budget_probe"))
+        return checks
+
+    for class_name in ["RELAX", "FIST", "PINCH"]:
+        clips = int(clip_counts.get(class_name, 0))
+        per_clip = int(data_cfg.idle_top_k_windows_per_clip if class_name == "RELAX" else data_cfg.top_k_windows_per_clip)
+        estimated_windows = clips * max(1, per_clip)
+        selected = min(estimated_windows, int(max(0, budget_per_class)))
+        if estimated_windows <= 0:
+            level = "ERROR"
+        elif estimated_windows < int(budget_per_class):
+            level = "WARN"
+        else:
+            level = "INFO"
+        checks.append(
+            Check(
+                level,
+                f"budget.estimate.{class_name}",
+                f"clips={clips}, est_windows={estimated_windows}, selected={selected}",
+            )
+        )
+
+    return checks
 
 def print_checks(checks: Iterable[Check]) -> None:
     for item in checks:
         print(f"[{item.level}] {item.name}: {item.detail}")
 
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Event-onset preflight checks")
     parser.add_argument("--mode", choices=("local", "ascend"), default="local")
+    parser.add_argument("--db5_data_dir", default=None)
+    parser.add_argument("--wearer_data_dir", default=None)
+    parser.add_argument("--budget_per_class", type=int, default=60)
+    parser.add_argument("--skip_db5_probe", action="store_true")
+    parser.add_argument("--skip_budget_probe", action="store_true")
     args = parser.parse_args()
 
     checks: list[Check] = []
@@ -155,15 +347,27 @@ def main() -> int:
         checks.append(Check("ERROR", "python.version", "requires >=3.8"))
 
     code_root = CODE_ROOT
-    data_root = code_root.parent / "data"
+    wearer_data_root = _resolve_data_arg(args.wearer_data_dir, code_root.parent / "data")
+    db5_data_root = _resolve_data_arg(args.db5_data_dir, code_root.parent / "data_ninaproDB5")
+
     checks.extend(collect_dependency_checks(args.mode))
-    checks.extend(collect_file_checks(code_root, data_root))
+    checks.extend(collect_file_checks(code_root, wearer_data_root, db5_data_root))
     checks.extend(collect_config_checks(code_root))
+    checks.extend(collect_db5_checks(code_root, db5_data_root, skip_probe=bool(args.skip_db5_probe)))
+    checks.extend(
+        collect_budget_checks(
+            code_root,
+            wearer_data_root,
+            budget_per_class=int(args.budget_per_class),
+            skip_probe=bool(args.skip_budget_probe),
+        )
+    )
 
     print("=" * 72)
     print(f"Event-onset preflight mode={args.mode}")
     print(f"code_root={code_root}")
-    print(f"data_root={data_root}")
+    print(f"db5_data_root={db5_data_root}")
+    print(f"wearer_data_root={wearer_data_root}")
     print("=" * 72)
     print_checks(checks)
 
@@ -176,7 +380,6 @@ def main() -> int:
         return 1
     print("Preflight: PASSED")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

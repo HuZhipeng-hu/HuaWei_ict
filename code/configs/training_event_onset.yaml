@@ -20,6 +20,10 @@ training:
   test_ratio: 0.2
   kfold: null
   num_workers: 0
+  freeze_emg_epochs: 3
+  unfreeze_last_blocks: true
+  encoder_lr_ratio: 0.3
+  head_lr_ratio: 1.0
   loss:
     type: cb_focal
     focal_gamma: 1.5

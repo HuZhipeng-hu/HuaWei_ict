@@ -3,6 +3,26 @@ zip_glob: s*.zip
 include_rest_class: true
 use_restimulus: true
 
+aligned3:
+  enabled: true
+  candidate_mapping_profiles:
+    - name: p1
+      fist: [E1_G01, E2_G01, E3_G01]
+      pinch: [E1_G02, E2_G02, E3_G02]
+    - name: p2
+      fist: [E1_G13, E2_G13, E3_G13]
+      pinch: [E1_G14, E2_G14, E3_G14]
+    - name: p3
+      fist: [E1_G17, E2_G17, E3_G17]
+      pinch: [E1_G18, E2_G18, E3_G18]
+  mapping_override: null
+  min_samples_per_class: 60
+  onset_window_policy:
+    action_selection: peak_energy
+    rest_selection: low_energy
+    action_top_k_per_segment: 3
+    rest_top_k_per_segment: 1
+
 feature:
   source_sampling_rate_hz: 200
   target_sampling_rate_hz: 500

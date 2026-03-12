@@ -28,6 +28,7 @@ from training.trainer import Trainer
 SUMMARY_FIELDS = [
     "run_id",
     "checkpoint_path",
+    "pretrain_mode",
     "num_classes",
     "test_accuracy",
     "test_macro_f1",
@@ -40,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Pretrain EMG encoder on NinaPro DB5")
     parser.add_argument("--config", default="configs/pretrain_ninapro_db5.yaml")
     parser.add_argument("--data_dir", default=None)
+    parser.add_argument(
+        "--pretrain_mode",
+        default="aligned3",
+        choices=["aligned3", "legacy53"],
+        help="DB5 pretraining mode. aligned3 is task-aligned default; legacy53 kept for debug fallback.",
+    )
     parser.add_argument("--device_target", default="CPU", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)
     parser.add_argument(
@@ -124,6 +131,34 @@ def main() -> None:
         run_dir / "config_snapshots" / "effective_config.yaml",
         {
             "data_dir": data_dir,
+            "pretrain_mode": args.pretrain_mode,
+            "aligned3": {
+                "enabled": config.aligned3.enabled,
+                "min_samples_per_class": config.aligned3.min_samples_per_class,
+                "candidate_mapping_profiles": [
+                    {
+                        "name": profile.name,
+                        "fist": list(profile.fist),
+                        "pinch": list(profile.pinch),
+                    }
+                    for profile in config.aligned3.candidate_mapping_profiles
+                ],
+                "mapping_override": (
+                    None
+                    if config.aligned3.mapping_override is None
+                    else {
+                        "name": config.aligned3.mapping_override.name,
+                        "fist": list(config.aligned3.mapping_override.fist),
+                        "pinch": list(config.aligned3.mapping_override.pinch),
+                    }
+                ),
+                "onset_window_policy": {
+                    "action_selection": config.aligned3.onset_window_policy.action_selection,
+                    "rest_selection": config.aligned3.onset_window_policy.rest_selection,
+                    "action_top_k_per_segment": config.aligned3.onset_window_policy.action_top_k_per_segment,
+                    "rest_top_k_per_segment": config.aligned3.onset_window_policy.rest_top_k_per_segment,
+                },
+            },
             "feature": {
                 "source_sampling_rate_hz": config.feature.source_sampling_rate_hz,
                 "target_sampling_rate_hz": config.feature.target_sampling_rate_hz,
@@ -134,10 +169,17 @@ def main() -> None:
         },
     )
 
-    loader = DB5PretrainDatasetLoader(data_dir, config)
+    loader = DB5PretrainDatasetLoader(data_dir, config, pretrain_mode=args.pretrain_mode)
     samples, labels, source_ids = loader.load_all_with_sources()
     class_names = loader.get_class_names()
     logger.info("Loaded DB5 samples: %s labels=%d classes=%d", tuple(samples.shape), labels.shape[0], len(class_names))
+    mapping_profile_report = loader.get_mapping_profile_report()
+    dump_json(run_dir / "mapping_profile_report.json", mapping_profile_report)
+    if args.pretrain_mode == "aligned3":
+        logger.info(
+            "Aligned3 selected mapping profile: %s",
+            str(mapping_profile_report.get("selected_profile")),
+        )
     finite_mask = np.isfinite(samples)
     if not bool(np.all(finite_mask)):
         bad_count = int(np.size(samples) - np.count_nonzero(finite_mask))
@@ -194,6 +236,7 @@ def main() -> None:
     summary = {
         "run_id": run_id,
         "checkpoint_path": str(trainer.checkpoint_path),
+        "pretrain_mode": args.pretrain_mode,
         "num_classes": len(class_names),
         "test_accuracy": report["accuracy"],
         "test_macro_f1": report["macro_f1"],

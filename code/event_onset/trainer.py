@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -10,7 +11,13 @@ import numpy as np
 
 from event_onset.config import EventModelConfig
 from training.reporting import compute_classification_report
-from training.trainer import FocalLoss, LabelSmoothingCrossEntropy, ModelEMA, build_balanced_sample_indices, compute_class_balanced_weights
+from training.trainer import (
+    FocalLoss,
+    LabelSmoothingCrossEntropy,
+    ModelEMA,
+    build_balanced_sample_indices,
+    compute_class_balanced_weights,
+)
 
 try:
     import mindspore as ms
@@ -79,6 +86,46 @@ else:
             raise RuntimeError("MindSpore is required for EventWithLossCell")
 
 
+@dataclass(frozen=True)
+class TrainingPhase:
+    name: str
+    epochs: int
+
+
+def build_transfer_phase_schedule(total_epochs: int, freeze_emg_epochs: int) -> list[TrainingPhase]:
+    total = max(0, int(total_epochs))
+    freeze = max(0, min(int(freeze_emg_epochs), total))
+    if total <= 0:
+        return []
+    if freeze <= 0:
+        return [TrainingPhase(name="full", epochs=total)]
+    phases: list[TrainingPhase] = [TrainingPhase(name="head_only", epochs=freeze)]
+    remain = total - freeze
+    if remain > 0:
+        phases.append(TrainingPhase(name="unfreeze", epochs=remain))
+    return phases
+
+
+def is_encoder_param_name(name: str) -> bool:
+    lowered = str(name)
+    return lowered.startswith("emg_block1.") or lowered.startswith("emg_block2.") or lowered.startswith("imu_branch.")
+
+
+def is_head_param_name(name: str) -> bool:
+    return str(name).startswith("fusion.")
+
+
+def phase_trainable(name: str, phase_name: str, *, unfreeze_last_blocks: bool) -> bool:
+    if phase_name == "head_only":
+        return not is_encoder_param_name(name)
+    if phase_name == "unfreeze":
+        if not unfreeze_last_blocks:
+            return True
+        # Keep the first EMG block frozen, unfreeze later blocks and head.
+        return not str(name).startswith("emg_block1.")
+    return True
+
+
 class EventTrainer:
     def __init__(
         self,
@@ -120,10 +167,15 @@ class EventTrainer:
             return FocalLoss(self.num_classes, gamma=self.config.loss.focal_gamma, class_weights=Tensor(weights, ms.float32))
         raise ValueError(f"Unsupported loss type: {self.config.loss.type}")
 
-    def _build_lr(self, steps_per_epoch: int) -> List[float]:
-        total_steps = steps_per_epoch * self.config.epochs
-        warmup_steps = steps_per_epoch * self.config.warmup_epochs
-        base = float(self.config.learning_rate)
+    def _build_lr(self, steps_per_epoch: int, *, epochs: int, lr_scale: float = 1.0) -> List[float]:
+        if steps_per_epoch <= 0:
+            raise ValueError("steps_per_epoch must be > 0")
+        total_epochs = max(1, int(epochs))
+        total_steps = steps_per_epoch * total_epochs
+        warmup_epochs = min(int(self.config.warmup_epochs), total_epochs)
+        warmup_steps = steps_per_epoch * warmup_epochs
+        base = float(self.config.learning_rate) * float(lr_scale)
+
         lrs: List[float] = []
         for step in range(total_steps):
             if warmup_steps > 0 and step < warmup_steps:
@@ -136,14 +188,80 @@ class EventTrainer:
             lrs.append(float(lr))
         return lrs
 
-    def _build_optimizer(self, steps_per_epoch: int):
-        lr_schedule = self._build_lr(steps_per_epoch)
-        optimizer = nn.AdamWeightDecay(
-            self.model.trainable_params(),
-            learning_rate=lr_schedule,
-            weight_decay=float(self.config.weight_decay),
+    def _set_trainable_for_phase(self, phase_name: str) -> dict[str, int]:
+        trainable_total = 0
+        frozen_total = 0
+        for param in self.model.get_parameters():
+            enabled = phase_trainable(
+                param.name,
+                phase_name,
+                unfreeze_last_blocks=bool(self.config.unfreeze_last_blocks),
+            )
+            param.requires_grad = bool(enabled)
+            if enabled:
+                trainable_total += 1
+            else:
+                frozen_total += 1
+        return {"trainable_params": trainable_total, "frozen_params": frozen_total}
+
+    def _collect_trainable_groups(self) -> tuple[list, list]:
+        encoder_params = []
+        head_params = []
+        for param in self.model.get_parameters():
+            if not bool(getattr(param, "requires_grad", True)):
+                continue
+            if is_head_param_name(param.name):
+                head_params.append(param)
+            elif is_encoder_param_name(param.name):
+                encoder_params.append(param)
+            else:
+                # Default unknown parameters to head group so they are not starved by low LR.
+                head_params.append(param)
+        return encoder_params, head_params
+
+    def _build_optimizer_for_phase(self, *, phase_name: str, phase_epochs: int, steps_per_epoch: int):
+        if steps_per_epoch <= 0:
+            raise ValueError("Training dataset is empty; cannot build optimizer with zero steps per epoch.")
+
+        stats = self._set_trainable_for_phase(phase_name)
+        encoder_params, head_params = self._collect_trainable_groups()
+        if not encoder_params and not head_params:
+            raise RuntimeError(f"No trainable parameters after phase setup: {phase_name}")
+
+        wd = float(self.config.weight_decay)
+        if phase_name == "head_only":
+            head_lr = self._build_lr(
+                steps_per_epoch,
+                epochs=phase_epochs,
+                lr_scale=float(self.config.head_lr_ratio),
+            )
+            optimizer = nn.AdamWeightDecay(head_params, learning_rate=head_lr, weight_decay=wd)
+            return optimizer, head_lr, stats
+
+        head_lr = self._build_lr(
+            steps_per_epoch,
+            epochs=phase_epochs,
+            lr_scale=float(self.config.head_lr_ratio),
         )
-        return optimizer, lr_schedule
+        if not encoder_params:
+            optimizer = nn.AdamWeightDecay(head_params, learning_rate=head_lr, weight_decay=wd)
+            return optimizer, head_lr, stats
+
+        encoder_lr = self._build_lr(
+            steps_per_epoch,
+            epochs=phase_epochs,
+            lr_scale=float(self.config.encoder_lr_ratio),
+        )
+        param_groups = [
+            {"params": encoder_params, "lr": encoder_lr, "weight_decay": wd},
+            {"params": head_params, "lr": head_lr, "weight_decay": wd},
+        ]
+        optimizer = nn.AdamWeightDecay(
+            param_groups,
+            learning_rate=float(self.config.learning_rate),
+            weight_decay=wd,
+        )
+        return optimizer, head_lr, stats
 
     def _build_train_dataset_for_epoch(
         self,
@@ -173,8 +291,10 @@ class EventTrainer:
             pred = _argmax(logits).asnumpy()
             preds.append(pred.astype(np.int32))
             gts.append(label.asnumpy().astype(np.int32))
-        y_pred = np.concatenate(preds) if preds else np.empty(0, dtype=np.int32)
-        y_true = np.concatenate(gts) if gts else np.empty(0, dtype=np.int32)
+        if not preds:
+            return {"loss": 0.0, "acc": 0.0, "macro_f1": 0.0}
+        y_pred = np.concatenate(preds)
+        y_true = np.concatenate(gts)
         report = compute_classification_report(y_true, y_pred, self.class_names)
         return {
             "loss": float(np.mean(losses)) if losses else 0.0,
@@ -193,13 +313,14 @@ class EventTrainer:
     ) -> Dict[str, List[float]]:
         self.loss_fn = self._build_loss(train_labels)
         steps_per_epoch = int(np.ceil(len(train_labels) / self.config.batch_size))
-        self.optimizer, lr_schedule = self._build_optimizer(steps_per_epoch)
-        self.train_step = nn.TrainOneStepCell(EventWithLossCell(self.model, self.loss_fn), self.optimizer)
-        self.train_step.set_train(True)
-        val_dataset = create_event_dataset(val_emg, val_imu, val_labels, self.config.batch_size, shuffle=False)
+        phase_plan = build_transfer_phase_schedule(self.config.epochs, self.config.freeze_emg_epochs)
+        if not phase_plan:
+            raise ValueError("No training epochs configured.")
 
+        val_dataset = create_event_dataset(val_emg, val_imu, val_labels, self.config.batch_size, shuffle=False)
         history = {
             "epoch": [],
+            "phase": [],
             "train_loss": [],
             "train_acc": [],
             "val_loss": [],
@@ -207,60 +328,122 @@ class EventTrainer:
             "val_macro_f1": [],
             "lr": [],
         }
+        best_epoch = -1
+        best_val_acc = -1.0
         best_val_f1 = -1.0
         bad_epochs = 0
+        global_epoch = 0
 
-        for epoch in range(self.config.epochs):
-            dataset = self._build_train_dataset_for_epoch(train_emg, train_imu, train_labels, epoch)
-            train_losses: List[float] = []
-            train_preds: List[np.ndarray] = []
-            train_gts: List[np.ndarray] = []
-            for emg, imu, label in dataset.create_tuple_iterator():
-                loss = self.train_step(emg, imu, label)
-                train_losses.append(float(loss.asnumpy()))
-                logits = self.model(emg, imu)
-                train_preds.append(_argmax(logits).asnumpy().astype(np.int32))
-                train_gts.append(label.asnumpy().astype(np.int32))
-                if self._ema is not None:
-                    self._ema.update(self.model)
+        for phase in phase_plan:
+            phase_name = phase.name
+            if phase_name == "unfreeze":
+                phase_name = "unfreeze" if self.config.unfreeze_last_blocks else "full"
 
-            y_pred = np.concatenate(train_preds) if train_preds else np.empty(0, dtype=np.int32)
-            y_true = np.concatenate(train_gts) if train_gts else np.empty(0, dtype=np.int32)
-            train_report = compute_classification_report(y_true, y_pred, self.class_names)
-
-            backup = self._ema.apply(self.model) if self._ema is not None else None
-            metrics = self._evaluate(val_dataset)
-            if self._ema is not None and backup is not None:
-                self._ema.restore(self.model, backup)
-
-            history["epoch"].append(epoch + 1)
-            history["train_loss"].append(float(np.mean(train_losses)) if train_losses else 0.0)
-            history["train_acc"].append(float(train_report["accuracy"]))
-            history["val_loss"].append(metrics["loss"])
-            history["val_acc"].append(metrics["acc"])
-            history["val_macro_f1"].append(metrics["macro_f1"])
-            history["lr"].append(float(lr_schedule[min(epoch * steps_per_epoch, len(lr_schedule) - 1)]))
-
+            self.optimizer, phase_lr_schedule, phase_stats = self._build_optimizer_for_phase(
+                phase_name=phase_name,
+                phase_epochs=phase.epochs,
+                steps_per_epoch=steps_per_epoch,
+            )
+            self.train_step = nn.TrainOneStepCell(EventWithLossCell(self.model, self.loss_fn), self.optimizer)
+            self.train_step.set_train(True)
             logger.info(
-                "Epoch %03d/%03d train_loss=%.4f train_acc=%.4f val_loss=%.4f val_acc=%.4f val_f1=%.4f",
-                epoch + 1,
-                self.config.epochs,
-                history["train_loss"][-1],
-                history["train_acc"][-1],
-                metrics["loss"],
-                metrics["acc"],
-                metrics["macro_f1"],
+                "Start phase=%s epochs=%d trainable=%d frozen=%d",
+                phase_name,
+                phase.epochs,
+                phase_stats["trainable_params"],
+                phase_stats["frozen_params"],
             )
 
-            if metrics["macro_f1"] > best_val_f1:
-                best_val_f1 = metrics["macro_f1"]
-                bad_epochs = 0
-                save_checkpoint(self.model, str(self.checkpoint_path))
-            else:
-                bad_epochs += 1
+            local_step = 0
+            for _ in range(phase.epochs):
+                global_epoch += 1
+                dataset = self._build_train_dataset_for_epoch(train_emg, train_imu, train_labels, global_epoch)
+                train_losses: List[float] = []
+                train_preds: List[np.ndarray] = []
+                train_gts: List[np.ndarray] = []
 
-            if bad_epochs >= self.config.early_stopping_patience:
-                logger.info("Early stopping at epoch %d", epoch + 1)
-                break
+                for emg, imu, label in dataset.create_tuple_iterator():
+                    loss = self.train_step(emg, imu, label)
+                    train_losses.append(float(loss.asnumpy()))
+                    logits = self.model(emg, imu)
+                    train_preds.append(_argmax(logits).asnumpy().astype(np.int32))
+                    train_gts.append(label.asnumpy().astype(np.int32))
+                    if self._ema is not None:
+                        self._ema.update(self.model)
+                    local_step += 1
 
+                y_pred = np.concatenate(train_preds) if train_preds else np.empty(0, dtype=np.int32)
+                y_true = np.concatenate(train_gts) if train_gts else np.empty(0, dtype=np.int32)
+                train_report = compute_classification_report(y_true, y_pred, self.class_names)
+
+                backup = self._ema.apply(self.model) if self._ema is not None else None
+                metrics = self._evaluate(val_dataset)
+                if self._ema is not None and backup is not None:
+                    self._ema.restore(self.model, backup)
+
+                train_loss = float(np.mean(train_losses)) if train_losses else 0.0
+                train_acc = float(train_report["accuracy"]) if train_preds else 0.0
+                val_loss = metrics["loss"]
+                val_acc = metrics["acc"]
+                val_f1 = metrics["macro_f1"]
+                current_lr = float(phase_lr_schedule[min(max(local_step - 1, 0), len(phase_lr_schedule) - 1)])
+
+                history["epoch"].append(global_epoch)
+                history["phase"].append(phase_name)
+                history["train_loss"].append(train_loss)
+                history["train_acc"].append(train_acc)
+                history["val_loss"].append(val_loss)
+                history["val_acc"].append(val_acc)
+                history["val_macro_f1"].append(val_f1)
+                history["lr"].append(current_lr)
+
+                logger.info(
+                    "Epoch %03d/%03d phase=%s train_loss=%.4f train_acc=%.4f val_loss=%.4f val_acc=%.4f val_f1=%.4f lr=%.6f",
+                    global_epoch,
+                    self.config.epochs,
+                    phase_name,
+                    train_loss,
+                    train_acc,
+                    val_loss,
+                    val_acc,
+                    val_f1,
+                    current_lr,
+                )
+
+                improved = (val_f1 > best_val_f1 + 1e-6) or (
+                    abs(val_f1 - best_val_f1) <= 1e-6 and val_acc > best_val_acc + 1e-6
+                )
+                if improved:
+                    best_val_f1 = val_f1
+                    best_val_acc = val_acc
+                    best_epoch = global_epoch
+                    bad_epochs = 0
+                    self._save_best_checkpoint()
+                    logger.info(" New best model: epoch=%d val_f1=%.4f val_acc=%.4f", best_epoch, best_val_f1, best_val_acc)
+                else:
+                    bad_epochs += 1
+                    if bad_epochs >= self.config.early_stopping_patience:
+                        logger.info(
+                            "Early stopping: patience=%d best_epoch=%d best_val_f1=%.4f best_val_acc=%.4f",
+                            self.config.early_stopping_patience,
+                            best_epoch,
+                            best_val_f1,
+                            best_val_acc,
+                        )
+                        return history
+
+        logger.info(
+            "Training finished. best_epoch=%d best_val_f1=%.4f best_val_acc=%.4f",
+            best_epoch,
+            best_val_f1,
+            best_val_acc,
+        )
         return history
+
+    def _save_best_checkpoint(self) -> None:
+        if self._ema is not None:
+            backup = self._ema.apply(self.model)
+            save_checkpoint(self.model, str(self.checkpoint_path))
+            self._ema.restore(self.model, backup)
+        else:
+            save_checkpoint(self.model, str(self.checkpoint_path))

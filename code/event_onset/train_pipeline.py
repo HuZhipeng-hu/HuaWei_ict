@@ -37,6 +37,9 @@ OFFLINE_SUMMARY_FIELDS = [
     "augment_enabled",
     "augment_factor",
     "use_mixup",
+    "budget_per_class",
+    "budget_seed",
+    "used_pretrained_init",
     "test_accuracy",
     "test_macro_f1",
     "test_macro_recall",
@@ -71,6 +74,67 @@ def _apply_cli_overrides(args, model_cfg: EventModelConfig, train_cfg, augmentat
     if getattr(args, "pretrained_emg_checkpoint", None):
         model_cfg.pretrained_emg_checkpoint = args.pretrained_emg_checkpoint
     return model_cfg, train_cfg, augmentation_cfg
+
+
+def _apply_train_budget_to_manifest(
+    manifest: SplitManifest,
+    labels: np.ndarray,
+    class_names: Sequence[str],
+    *,
+    budget_per_class: int,
+    budget_seed: int,
+) -> tuple[SplitManifest, dict[str, dict[str, int]]]:
+    if budget_per_class <= 0:
+        raise ValueError("budget_per_class must be > 0")
+
+    rng = np.random.default_rng(int(budget_seed))
+    train_idx = np.asarray(manifest.train_indices, dtype=np.int32)
+    kept: list[int] = []
+    report: dict[str, dict[str, int]] = {}
+    missing_classes: list[str] = []
+    for class_id, class_name in enumerate(class_names):
+        class_train_idx = train_idx[labels[train_idx] == class_id]
+        available = int(class_train_idx.shape[0])
+        if available <= 0:
+            missing_classes.append(str(class_name))
+        selected = min(available, int(budget_per_class))
+        if selected > 0:
+            if available > selected:
+                chosen = rng.choice(class_train_idx, size=selected, replace=False)
+            else:
+                chosen = class_train_idx
+            kept.extend(int(idx) for idx in chosen.tolist())
+        report[class_name] = {"available": available, "selected": selected}
+
+    if missing_classes:
+        raise RuntimeError(
+            "Budgeting failed: train split has zero samples for classes: "
+            + ", ".join(missing_classes)
+        )
+
+    if not kept:
+        raise RuntimeError("Budgeted train subset is empty; check data quality and budget_per_class.")
+
+    # Preserve split metadata and only shrink train indices.
+    budget_manifest = SplitManifest(
+        train_indices=sorted(kept),
+        val_indices=list(manifest.val_indices),
+        test_indices=list(manifest.test_indices),
+        train_sources=list(manifest.train_sources),
+        val_sources=list(manifest.val_sources),
+        test_sources=list(manifest.test_sources),
+        seed=manifest.seed,
+        split_mode=manifest.split_mode,
+        manifest_strategy=manifest.manifest_strategy,
+        num_samples=manifest.num_samples,
+        val_ratio=manifest.val_ratio,
+        test_ratio=manifest.test_ratio,
+        class_distribution=dict(manifest.class_distribution),
+        group_keys_train=list(manifest.group_keys_train),
+        group_keys_val=list(manifest.group_keys_val),
+        group_keys_test=list(manifest.group_keys_test),
+    )
+    return budget_manifest, report
 
 
 def _save_history(history: dict, out_csv: str | Path) -> None:
@@ -290,6 +354,10 @@ def run_event_training(args) -> None:
                 "loss_type": train_cfg.loss.type,
                 "hard_mining_ratio": train_cfg.sampler.hard_mining_ratio,
                 "split_seed": train_cfg.split_seed,
+                "freeze_emg_epochs": train_cfg.freeze_emg_epochs,
+                "unfreeze_last_blocks": train_cfg.unfreeze_last_blocks,
+                "encoder_lr_ratio": train_cfg.encoder_lr_ratio,
+                "head_lr_ratio": train_cfg.head_lr_ratio,
             },
             "data": {
                 "label_mode": data_cfg.label_mode,
@@ -301,6 +369,8 @@ def run_event_training(args) -> None:
                 "top_k_windows_per_clip": data_cfg.top_k_windows_per_clip,
                 "idle_top_k_windows_per_clip": data_cfg.idle_top_k_windows_per_clip,
                 "use_imu": data_cfg.use_imu,
+                "budget_per_class": int(getattr(args, "budget_per_class", 0) or 0),
+                "budget_seed": int(getattr(args, "budget_seed", train_cfg.split_seed) or train_cfg.split_seed),
             },
         },
     )
@@ -337,6 +407,32 @@ def run_event_training(args) -> None:
     )
     if manifest_path:
         copy_config_snapshot(manifest_path, run_dir / "manifests" / Path(manifest_path).name)
+
+    budget_per_class = int(getattr(args, "budget_per_class", 0) or 0)
+    budget_seed = int(getattr(args, "budget_seed", train_cfg.split_seed) or train_cfg.split_seed)
+    if budget_per_class > 0:
+        manifest, budget_report = _apply_train_budget_to_manifest(
+            manifest,
+            labels,
+            label_spec.class_names,
+            budget_per_class=budget_per_class,
+            budget_seed=budget_seed,
+        )
+        dump_json(
+            run_dir / "manifests" / "train_budget_report.json",
+            {
+                "budget_per_class": budget_per_class,
+                "budget_seed": budget_seed,
+                "class_budget": budget_report,
+                "train_samples_after_budget": len(manifest.train_indices),
+            },
+        )
+        logger.info(
+            "Applied train budget: per_class=%d seed=%d train_samples=%d",
+            budget_per_class,
+            budget_seed,
+            len(manifest.train_indices),
+        )
 
     (train_emg, train_imu, train_y), (val_emg, val_imu, val_y), (test_emg, test_imu, test_y) = _split_arrays_by_manifest(
         emg_samples,
@@ -395,6 +491,9 @@ def run_event_training(args) -> None:
         "augment_enabled": False,
         "augment_factor": 1,
         "use_mixup": False,
+        "budget_per_class": int(budget_per_class),
+        "budget_seed": int(budget_seed),
+        "used_pretrained_init": bool(model_cfg.pretrained_emg_checkpoint),
         "test_accuracy": report["accuracy"],
         "test_macro_f1": report["macro_f1"],
         "test_macro_recall": report["macro_recall"],

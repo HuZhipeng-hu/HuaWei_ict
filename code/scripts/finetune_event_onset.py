@@ -47,6 +47,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest_strategy", default="v2", choices=["v1", "v2"])
     parser.add_argument("--quality_report_out", default=None)
     parser.add_argument("--eval_protocol", default="same_user_same_day_v1")
+    parser.add_argument(
+        "--budget_per_class",
+        type=int,
+        default=60,
+        help="Train-only sample budget per class (default: 60). Validation/test splits are unchanged.",
+    )
+    parser.add_argument(
+        "--budget_seed",
+        type=int,
+        default=42,
+        help="Random seed for budgeted train subset sampling.",
+    )
 
     parser.add_argument(
         "--pretrained_emg_checkpoint",
@@ -68,6 +80,11 @@ def main() -> None:
         logger.info("Using pretrained EMG checkpoint: %s", args.pretrained_emg_checkpoint)
     else:
         logger.warning("No pretrained EMG checkpoint supplied. Finetune will run from random initialization.")
+    logger.info(
+        "Budget mode: budget_per_class=%d budget_seed=%d",
+        int(args.budget_per_class),
+        int(args.budget_seed),
+    )
     run_event_training(args)
 
 
