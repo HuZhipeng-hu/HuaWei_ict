@@ -15,8 +15,14 @@ T = TypeVar("T")
 class DB5FeatureConfig:
     source_sampling_rate_hz: int = 200
     target_sampling_rate_hz: int = 500
-    use_first_myo_only: bool = True
-    first_myo_channel_count: int = 8
+    use_first_myo_only: bool = False
+    first_myo_channel_count: int = 16
+    lowcut_hz: float = 20.0
+    highcut_hz: float = 180.0
+    energy_min: float = 0.25
+    static_std_min: float = 0.08
+    clip_ratio_max: float = 0.08
+    saturation_abs: float = 126.0
     context_window_ms: int = 240
     window_step_ms: int = 80
     max_windows_per_segment: int = 6
@@ -43,7 +49,7 @@ class DB5FeatureConfig:
 class DB5PretrainConfig:
     data_dir: str = "../data_ninaproDB5"
     zip_glob: str = "s*.zip"
-    include_rest_class: bool = True
+    include_rest_class: bool = False
     use_restimulus: bool = True
     feature: DB5FeatureConfig = field(default_factory=DB5FeatureConfig)
     model_type: str = "db5_pretrain_full53"
@@ -118,7 +124,7 @@ def load_db5_pretrain_config(path: str | Path) -> DB5PretrainConfig:
     payload = {
         "data_dir": root.get("data_dir", "../data_ninaproDB5"),
         "zip_glob": root.get("zip_glob", "s*.zip"),
-        "include_rest_class": root.get("include_rest_class", True),
+        "include_rest_class": root.get("include_rest_class", False),
         "use_restimulus": root.get("use_restimulus", True),
         "feature": root.get("feature", {}),
         "model_type": root.get("model_type", "db5_pretrain_full53"),
@@ -133,4 +139,3 @@ def load_db5_pretrain_config(path: str | Path) -> DB5PretrainConfig:
         "test_ratio": root.get("test_ratio", 0.15),
     }
     return _dict_to_dataclass(payload, DB5PretrainConfig)
-

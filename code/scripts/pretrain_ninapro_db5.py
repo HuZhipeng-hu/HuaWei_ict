@@ -31,10 +31,22 @@ SUMMARY_FIELDS = [
     "checkpoint_path",
     "foundation_version",
     "num_classes",
+    "best_val_epoch",
+    "best_val_acc",
+    "best_val_macro_f1",
     "test_accuracy",
     "test_macro_f1",
     "test_macro_recall",
     "top_confusion_pair",
+    "include_rest_class",
+    "use_first_myo_only",
+    "first_myo_channel_count",
+    "lowcut_hz",
+    "highcut_hz",
+    "energy_min",
+    "static_std_min",
+    "clip_ratio_max",
+    "saturation_abs",
 ]
 
 
@@ -59,11 +71,51 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--batch_size", type=int, default=None, help="Override training.batch_size from config")
     parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=None,
+        help="Override training.learning_rate from config.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Override training.epochs from config.",
+    )
+    parser.add_argument(
+        "--early_stopping_patience",
+        type=int,
+        default=None,
+        help="Override training.early_stopping_patience from config.",
+    )
+    parser.add_argument("--base_channels", type=int, default=None, help="Override model base channels.")
+    parser.add_argument("--classifier_hidden_dim", type=int, default=None, help="Override classifier hidden dim.")
+    parser.add_argument("--include_rest_class", choices=["true", "false"], default=None)
+    parser.add_argument("--use_first_myo_only", choices=["true", "false"], default=None)
+    parser.add_argument("--first_myo_channel_count", type=int, default=None)
+    parser.add_argument("--lowcut_hz", type=float, default=None)
+    parser.add_argument("--highcut_hz", type=float, default=None)
+    parser.add_argument("--energy_min", type=float, default=None)
+    parser.add_argument("--static_std_min", type=float, default=None)
+    parser.add_argument("--clip_ratio_max", type=float, default=None)
+    parser.add_argument("--saturation_abs", type=float, default=None)
+    parser.add_argument(
         "--foundation_dir",
         default="artifacts/foundation/db5_full53",
         help="Fixed foundation artifact directory.",
     )
     return parser
+
+
+def _parse_bool_arg(raw: str | None) -> bool | None:
+    if raw is None:
+        return None
+    lowered = str(raw).strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {raw!r}")
 
 
 def _save_history(history: dict, out_csv: str | Path) -> None:
@@ -83,6 +135,26 @@ def _top_confusion_pair_text(report: dict) -> str:
         return ""
     pair = pairs[0]
     return f"{pair['pair'][0]}<->{pair['pair'][1]}:{pair['count']}"
+
+
+def _best_validation_from_history(history: dict) -> tuple[int, float, float]:
+    val_f1 = [float(v) for v in history.get("val_macro_f1", [])]
+    val_acc = [float(v) for v in history.get("val_acc", [])]
+    epochs = [int(v) for v in history.get("epoch", [])]
+    if not (val_f1 and val_acc and epochs):
+        return -1, 0.0, 0.0
+    best_idx = max(range(len(epochs)), key=lambda i: (val_f1[i], val_acc[i]))
+    return int(epochs[best_idx]), float(val_acc[best_idx]), float(val_f1[best_idx])
+
+
+def _validate_label_alignment(labels: np.ndarray, class_names: list[str]) -> None:
+    unique_labels = sorted({int(value) for value in np.asarray(labels, dtype=np.int32).tolist()})
+    expected_labels = list(range(len(class_names)))
+    if unique_labels != expected_labels:
+        raise RuntimeError(
+            "Class/label alignment mismatch: "
+            f"unique_labels={unique_labels}, expected={expected_labels}, class_names={class_names}"
+        )
 
 
 def _maybe_enable_launch_blocking(enabled: bool) -> None:
@@ -111,7 +183,11 @@ def _publish_foundation(
     foundation_ckpt = foundation_dir / "checkpoints" / "db5_full53_foundation.ckpt"
     foundation_ckpt.parent.mkdir(parents=True, exist_ok=True)
     source_ckpt = Path(summary["checkpoint_path"])
-    shutil.copy2(source_ckpt, foundation_ckpt)
+    if foundation_ckpt.exists():
+        foundation_ckpt.chmod(0o644)
+        foundation_ckpt.unlink()
+    shutil.copyfile(source_ckpt, foundation_ckpt)
+    foundation_ckpt.chmod(0o644)
 
     manifest = {
         "foundation_version": config_version,
@@ -143,6 +219,55 @@ def main() -> None:
         if args.batch_size <= 0:
             raise ValueError("--batch_size must be > 0")
         config.training.batch_size = int(args.batch_size)
+    if args.learning_rate is not None:
+        if args.learning_rate <= 0:
+            raise ValueError("--learning_rate must be > 0")
+        config.training.learning_rate = float(args.learning_rate)
+    if args.epochs is not None:
+        if args.epochs <= 0:
+            raise ValueError("--epochs must be > 0")
+        config.training.epochs = int(args.epochs)
+    if args.early_stopping_patience is not None:
+        if args.early_stopping_patience <= 0:
+            raise ValueError("--early_stopping_patience must be > 0")
+        config.training.early_stopping_patience = int(args.early_stopping_patience)
+    if args.base_channels is not None:
+        if args.base_channels <= 0:
+            raise ValueError("--base_channels must be > 0")
+        config.base_channels = int(args.base_channels)
+    if args.classifier_hidden_dim is not None:
+        if args.classifier_hidden_dim <= 0:
+            raise ValueError("--classifier_hidden_dim must be > 0")
+        config.classifier_hidden_dim = int(args.classifier_hidden_dim)
+    include_rest_override = _parse_bool_arg(args.include_rest_class)
+    if include_rest_override is not None:
+        config.include_rest_class = bool(include_rest_override)
+    use_first_myo_only_override = _parse_bool_arg(args.use_first_myo_only)
+    if use_first_myo_only_override is not None:
+        config.feature.use_first_myo_only = bool(use_first_myo_only_override)
+    if args.first_myo_channel_count is not None:
+        if args.first_myo_channel_count <= 0:
+            raise ValueError("--first_myo_channel_count must be > 0")
+        config.feature.first_myo_channel_count = int(args.first_myo_channel_count)
+    if args.lowcut_hz is not None:
+        config.feature.lowcut_hz = float(args.lowcut_hz)
+    if args.highcut_hz is not None:
+        config.feature.highcut_hz = float(args.highcut_hz)
+    if args.energy_min is not None:
+        config.feature.energy_min = float(args.energy_min)
+    if args.static_std_min is not None:
+        config.feature.static_std_min = float(args.static_std_min)
+    if args.clip_ratio_max is not None:
+        config.feature.clip_ratio_max = float(args.clip_ratio_max)
+    if args.saturation_abs is not None:
+        config.feature.saturation_abs = float(args.saturation_abs)
+    if config.feature.lowcut_hz <= 0 or config.feature.highcut_hz <= config.feature.lowcut_hz:
+        raise ValueError(
+            f"Invalid bandpass settings: lowcut_hz={config.feature.lowcut_hz}, "
+            f"highcut_hz={config.feature.highcut_hz}"
+        )
+    if config.feature.clip_ratio_max < 0 or config.feature.clip_ratio_max > 1:
+        raise ValueError(f"clip_ratio_max must be in [0,1], got {config.feature.clip_ratio_max}")
     data_dir = args.data_dir or config.data_dir
     run_id, run_dir = ensure_run_dir(args.run_root, args.run_id, default_tag="db5_pretrain_full53")
     logger = logging.getLogger("ninapro_db5.pretrain")
@@ -164,12 +289,29 @@ def main() -> None:
             "data_dir": data_dir,
             "coverage": "full53",
             "foundation_version": config.foundation_version,
+            "include_rest_class": bool(config.include_rest_class),
+            "use_restimulus": bool(config.use_restimulus),
+            "base_channels": int(config.base_channels),
+            "classifier_hidden_dim": int(config.classifier_hidden_dim),
+            "training": {
+                "epochs": int(config.training.epochs),
+                "batch_size": int(config.training.batch_size),
+                "learning_rate": float(config.training.learning_rate),
+                "early_stopping_patience": int(config.training.early_stopping_patience),
+            },
             "feature": {
                 "source_sampling_rate_hz": config.feature.source_sampling_rate_hz,
                 "target_sampling_rate_hz": config.feature.target_sampling_rate_hz,
                 "context_window_ms": config.feature.context_window_ms,
                 "window_step_ms": config.feature.window_step_ms,
                 "use_first_myo_only": config.feature.use_first_myo_only,
+                "first_myo_channel_count": config.feature.first_myo_channel_count,
+                "lowcut_hz": config.feature.lowcut_hz,
+                "highcut_hz": config.feature.highcut_hz,
+                "energy_min": config.feature.energy_min,
+                "static_std_min": config.feature.static_std_min,
+                "clip_ratio_max": config.feature.clip_ratio_max,
+                "saturation_abs": config.feature.saturation_abs,
             },
         },
     )
@@ -177,6 +319,9 @@ def main() -> None:
     loader = DB5PretrainDatasetLoader(data_dir, config)
     samples, labels, source_ids = loader.load_all_with_sources()
     class_names = loader.get_class_names()
+    window_diagnostics = loader.get_window_diagnostics()
+    dump_json(run_dir / "db5_window_diagnostics.json", window_diagnostics)
+    _validate_label_alignment(labels, class_names)
     logger.info("Loaded DB5 samples: %s labels=%d classes=%d", tuple(samples.shape), labels.shape[0], len(class_names))
     finite_mask = np.isfinite(samples)
     if not bool(np.all(finite_mask)):
@@ -219,6 +364,7 @@ def main() -> None:
     history = trainer.train(train_x, train_y, val_x, val_y)
     history_path = run_dir / "training_history.csv"
     _save_history(history, history_path)
+    best_val_epoch, best_val_acc, best_val_f1 = _best_validation_from_history(history)
 
     _set_device(mode=args.ms_mode, target=args.device_target, device_id=args.device_id)
     best_model = load_db5_model_from_checkpoint(trainer.checkpoint_path, config, num_classes=len(class_names))
@@ -231,10 +377,22 @@ def main() -> None:
         "checkpoint_path": str(trainer.checkpoint_path),
         "foundation_version": config.foundation_version,
         "num_classes": len(class_names),
+        "best_val_epoch": int(best_val_epoch),
+        "best_val_acc": float(best_val_acc),
+        "best_val_macro_f1": float(best_val_f1),
         "test_accuracy": report["accuracy"],
         "test_macro_f1": report["macro_f1"],
         "test_macro_recall": report["macro_recall"],
         "top_confusion_pair": _top_confusion_pair_text(report),
+        "include_rest_class": bool(config.include_rest_class),
+        "use_first_myo_only": bool(config.feature.use_first_myo_only),
+        "first_myo_channel_count": int(config.feature.first_myo_channel_count),
+        "lowcut_hz": float(config.feature.lowcut_hz),
+        "highcut_hz": float(config.feature.highcut_hz),
+        "energy_min": float(config.feature.energy_min),
+        "static_std_min": float(config.feature.static_std_min),
+        "clip_ratio_max": float(config.feature.clip_ratio_max),
+        "saturation_abs": float(config.feature.saturation_abs),
     }
     dump_json(run_dir / "offline_summary.json", summary)
     append_csv_row(Path(args.run_root) / "db5_pretrain_results.csv", SUMMARY_FIELDS, summary)
@@ -258,6 +416,7 @@ def main() -> None:
             "evaluation_outputs": outputs,
             "elapsed_minutes": (time.time() - start) / 60.0,
             "class_names": class_names,
+            "window_diagnostics_path": str(run_dir / "db5_window_diagnostics.json"),
             "foundation_manifest_path": str(Path(args.foundation_dir) / "foundation_manifest.json"),
         },
     )
@@ -265,4 +424,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

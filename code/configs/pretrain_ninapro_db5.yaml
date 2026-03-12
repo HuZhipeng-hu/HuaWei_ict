@@ -1,14 +1,20 @@
 data_dir: ../data_ninaproDB5
 zip_glob: s*.zip
-include_rest_class: true
+include_rest_class: false
 use_restimulus: true
 foundation_version: db5_full53_v1
 
 feature:
   source_sampling_rate_hz: 200
   target_sampling_rate_hz: 500
-  use_first_myo_only: true
-  first_myo_channel_count: 8
+  use_first_myo_only: false
+  first_myo_channel_count: 16
+  lowcut_hz: 20.0
+  highcut_hz: 180.0
+  energy_min: 0.25
+  static_std_min: 0.08
+  clip_ratio_max: 0.08
+  saturation_abs: 126.0
   context_window_ms: 240
   window_step_ms: 80
   max_windows_per_segment: 6
@@ -18,22 +24,22 @@ feature:
   emg_n_fft: 96
   emg_freq_bins: 24
 
-base_channels: 16
+base_channels: 32
 use_se: true
 dropout_rate: 0.3
-classifier_hidden_dim: 64
+classifier_hidden_dim: 128
 split_seed: 42
 val_ratio: 0.15
 test_ratio: 0.15
 
 training:
-  epochs: 40
+  epochs: 80
   batch_size: 64
   learning_rate: 0.0005
   weight_decay: 0.0003
   label_smoothing: 0.05
   warmup_epochs: 3
-  early_stopping_patience: 8
+  early_stopping_patience: 12
   split_seed: 42
   val_ratio: 0.15
   test_ratio: 0.15

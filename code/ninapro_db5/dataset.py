@@ -37,6 +37,8 @@ class DB5PretrainDatasetLoader:
             {
                 "sampling_rate": config.feature.target_sampling_rate_hz,
                 "num_channels": config.feature.first_myo_channel_count,
+                "lowcut": config.feature.lowcut_hz,
+                "highcut": config.feature.highcut_hz,
                 "target_length": config.feature.target_window_samples,
                 "segment_length": config.feature.target_window_samples,
                 "segment_stride": config.feature.target_window_samples,
@@ -52,6 +54,16 @@ class DB5PretrainDatasetLoader:
         )
         self._class_name_by_label: dict[int, str] = {}
         self._gesture_label_map: dict[tuple[int, int], int] = {}
+        self._window_diagnostics: dict[str, Any] = {
+            "totals": {
+                "segments": 0,
+                "raw_candidates": 0,
+                "passed_quality": 0,
+                "selected": 0,
+                "filtered_by_quality": 0,
+            },
+            "per_class": {},
+        }
 
     def _zip_files(self) -> list[Path]:
         files = sorted(self.data_dir.glob(self.config.zip_glob))
@@ -91,19 +103,82 @@ class DB5PretrainDatasetLoader:
             resampled[:, ch] = np.interp(dst, src, signal[:, ch]).astype(np.float32)
         return resampled
 
-    def _select_windows(self, segment_signal: np.ndarray, *, allow_many: int) -> list[np.ndarray]:
+    @staticmethod
+    def _window_energy(window: np.ndarray) -> float:
+        return float(np.mean(np.abs(window)))
+
+    @staticmethod
+    def _window_std(window: np.ndarray) -> float:
+        return float(np.mean(np.std(window, axis=0)))
+
+    @staticmethod
+    def _window_clip_ratio(window: np.ndarray, saturation_abs: float) -> float:
+        return float(np.mean(np.abs(window) >= float(saturation_abs)))
+
+    def _select_windows(
+        self,
+        segment_signal: np.ndarray,
+        *,
+        allow_many: int,
+        local_label: int,
+    ) -> tuple[list[tuple[np.ndarray, dict[str, float]]], dict[str, int]]:
         window = int(self.config.feature.source_window_samples)
         step = int(self.config.feature.source_step_samples)
         if segment_signal.shape[0] < window:
-            return []
+            return [], {
+                "raw_candidates": 0,
+                "passed_quality": 0,
+                "selected": 0,
+                "filtered_by_quality": 0,
+            }
         starts = list(range(0, segment_signal.shape[0] - window + 1, step))
         if not starts:
             starts = [0]
-        windows = [self._resample_window(segment_signal[start : start + window]) for start in starts]
-        if len(windows) > allow_many:
-            positions = np.linspace(0, len(windows) - 1, allow_many, dtype=int).tolist()
-            windows = [windows[pos] for pos in positions]
-        return windows
+        is_rest = int(local_label) == 0
+        candidates: list[tuple[np.ndarray, dict[str, float], float]] = []
+        for start in starts:
+            raw_window = segment_signal[start : start + window]
+            energy = self._window_energy(raw_window)
+            mean_std = self._window_std(raw_window)
+            clip_ratio = self._window_clip_ratio(raw_window, self.config.feature.saturation_abs)
+            if clip_ratio > float(self.config.feature.clip_ratio_max):
+                continue
+
+            if is_rest:
+                if energy > float(self.config.feature.energy_min):
+                    continue
+                if mean_std > float(self.config.feature.static_std_min):
+                    continue
+                score = -(energy + mean_std + clip_ratio * 10.0)
+            else:
+                if energy < float(self.config.feature.energy_min):
+                    continue
+                if mean_std < float(self.config.feature.static_std_min):
+                    continue
+                score = energy + mean_std - clip_ratio * 10.0
+
+            candidates.append(
+                (
+                    self._resample_window(raw_window),
+                    {
+                        "energy": float(energy),
+                        "mean_std": float(mean_std),
+                        "clip_ratio": float(clip_ratio),
+                    },
+                    float(score),
+                )
+            )
+
+        candidates.sort(key=lambda item: item[2], reverse=True)
+        selected = candidates[: int(max(0, allow_many))]
+        output = [(window_item, metrics) for window_item, metrics, _score in selected]
+        diag = {
+            "raw_candidates": int(len(starts)),
+            "passed_quality": int(len(candidates)),
+            "selected": int(len(output)),
+            "filtered_by_quality": int(max(0, len(starts) - len(candidates))),
+        }
+        return output, diag
 
     @staticmethod
     def _gesture_key(exercise: int, local_label: int) -> str:
@@ -159,18 +234,44 @@ class DB5PretrainDatasetLoader:
                     repetition = int(np.max(repetitions[start:end])) if end > start else 0
                     if local_label == 0 and not self.config.include_rest_class:
                         continue
+                    global_label, class_name = self._global_label(exercise, int(local_label))
                     allow_many = int(
                         self.config.feature.max_rest_windows_per_segment
                         if local_label == 0
                         else self.config.feature.max_windows_per_segment
                     )
-                    windows = self._select_windows(segment, allow_many=allow_many)
-                    if not windows:
-                        continue
-                    global_label, class_name = self._global_label(exercise, int(local_label))
+                    windows, selection_diag = self._select_windows(
+                        segment,
+                        allow_many=allow_many,
+                        local_label=int(local_label),
+                    )
                     self._class_name_by_label[int(global_label)] = class_name
+                    totals = self._window_diagnostics["totals"]
+                    totals["segments"] += 1
+                    totals["raw_candidates"] += int(selection_diag["raw_candidates"])
+                    totals["passed_quality"] += int(selection_diag["passed_quality"])
+                    totals["selected"] += int(selection_diag["selected"])
+                    totals["filtered_by_quality"] += int(selection_diag["filtered_by_quality"])
+                    per_class = self._window_diagnostics["per_class"].setdefault(
+                        class_name,
+                        {
+                            "segments": 0,
+                            "raw_candidates": 0,
+                            "passed_quality": 0,
+                            "selected": 0,
+                            "filtered_by_quality": 0,
+                        },
+                    )
+                    per_class["segments"] += 1
+                    per_class["raw_candidates"] += int(selection_diag["raw_candidates"])
+                    per_class["passed_quality"] += int(selection_diag["passed_quality"])
+                    per_class["selected"] += int(selection_diag["selected"])
+                    per_class["filtered_by_quality"] += int(selection_diag["filtered_by_quality"])
+                    if not windows:
+                        segment_index += 1
+                        continue
 
-                    for win_idx, window in enumerate(windows):
+                    for win_idx, (window, quality_metrics) in enumerate(windows):
                         feature = self._stft_pipeline.process_window(window)
                         source_id = (
                             f"{subject}|{Path(member.filename).stem}|label={local_label}|rep={repetition}|"
@@ -185,6 +286,9 @@ class DB5PretrainDatasetLoader:
                             "class_name": class_name,
                             "global_label": int(global_label),
                             "repetition": repetition,
+                            "window_energy": float(quality_metrics["energy"]),
+                            "window_std": float(quality_metrics["mean_std"]),
+                            "window_clip_ratio": float(quality_metrics["clip_ratio"]),
                         }
                         yield DB5WindowRecord(
                             feature=feature,
@@ -201,6 +305,16 @@ class DB5PretrainDatasetLoader:
     ):
         self._class_name_by_label.clear()
         self._gesture_label_map.clear()
+        self._window_diagnostics = {
+            "totals": {
+                "segments": 0,
+                "raw_candidates": 0,
+                "passed_quality": 0,
+                "selected": 0,
+                "filtered_by_quality": 0,
+            },
+            "per_class": {},
+        }
         features: list[np.ndarray] = []
         labels: list[int] = []
         source_ids: list[str] = []
@@ -229,3 +343,10 @@ class DB5PretrainDatasetLoader:
             names.append(name)
         return names
 
+    def get_window_diagnostics(self) -> dict[str, Any]:
+        totals = dict(self._window_diagnostics.get("totals", {}))
+        per_class = {
+            str(name): dict(values)
+            for name, values in (self._window_diagnostics.get("per_class", {}) or {}).items()
+        }
+        return {"totals": totals, "per_class": per_class}
