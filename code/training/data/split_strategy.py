@@ -56,11 +56,10 @@ def _distribute_groups_per_class(
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
-    train_idx: list[int] = []
-    val_idx: list[int] = []
-    test_idx: list[int] = []
+    group_assignment: Dict[object, str] = {}
+    class_ids = np.unique(labels)
 
-    for class_id in np.unique(labels):
+    for class_id in class_ids:
         class_mask = labels == class_id
         class_groups = np.unique(groups[class_mask])
         rng.shuffle(class_groups)
@@ -71,27 +70,62 @@ def _distribute_groups_per_class(
         n_val = min(n_val, max(0, n_groups - 1))
         n_test = min(n_test, max(0, n_groups - n_val - 1))
 
-        val_groups = set(class_groups[:n_val])
-        test_groups = set(class_groups[n_val : n_val + n_test])
-        train_groups = set(class_groups[n_val + n_test :])
+        fixed_val = sum(1 for g in class_groups if group_assignment.get(g) == "val")
+        fixed_test = sum(1 for g in class_groups if group_assignment.get(g) == "test")
+        fixed_train = sum(1 for g in class_groups if group_assignment.get(g) == "train")
+        unassigned = [g for g in class_groups if g not in group_assignment]
+        rng.shuffle(unassigned)
 
-        if not train_groups and class_groups.size > 0:
+        need_val = max(0, n_val - fixed_val)
+        need_test = max(0, n_test - fixed_test)
+
+        # Keep at least one train group for this class whenever possible.
+        must_reserve_for_train = 0 if fixed_train > 0 else 1
+        max_take = max(0, len(unassigned) - must_reserve_for_train)
+        if need_val + need_test > max_take:
+            overflow = need_val + need_test - max_take
+            take_from_test = min(need_test, overflow)
+            need_test -= take_from_test
+            overflow -= take_from_test
+            if overflow > 0:
+                take_from_val = min(need_val, overflow)
+                need_val -= take_from_val
+
+        cursor = 0
+        for g in unassigned[cursor : cursor + need_val]:
+            group_assignment[g] = "val"
+        cursor += need_val
+        for g in unassigned[cursor : cursor + need_test]:
+            group_assignment[g] = "test"
+        cursor += need_test
+        for g in unassigned[cursor:]:
+            group_assignment[g] = "train"
+
+        # If still no train group (all groups were pre-assigned to val/test),
+        # force one group into train to avoid empty train class.
+        has_train_now = any(group_assignment.get(g) == "train" for g in class_groups)
+        if not has_train_now and n_groups > 0:
             fallback_group = class_groups[-1]
-            train_groups.add(fallback_group)
-            val_groups.discard(fallback_group)
-            test_groups.discard(fallback_group)
+            group_assignment[fallback_group] = "train"
 
-        class_indices = np.where(class_mask)[0]
-        for idx in class_indices:
-            g = groups[idx]
-            if g in val_groups:
-                val_idx.append(int(idx))
-            elif g in test_groups:
-                test_idx.append(int(idx))
-            else:
-                train_idx.append(int(idx))
+    # Assign any unseen groups to train by default (defensive).
+    for g in np.unique(groups):
+        if g not in group_assignment:
+            group_assignment[g] = "train"
 
-    return np.array(train_idx, dtype=int), np.array(val_idx, dtype=int), np.array(test_idx, dtype=int)
+    train_idx: list[int] = []
+    val_idx: list[int] = []
+    test_idx: list[int] = []
+    for idx, g in enumerate(groups):
+        split = group_assignment.get(g, "train")
+        if split == "val":
+            val_idx.append(int(idx))
+        elif split == "test":
+            test_idx.append(int(idx))
+        else:
+            train_idx.append(int(idx))
+
+    return np.asarray(train_idx, dtype=int), np.asarray(val_idx, dtype=int), np.asarray(test_idx, dtype=int)
 
 
 def _extract_v2_group_key(source_id: str, metadata: Optional[Dict]) -> str:
