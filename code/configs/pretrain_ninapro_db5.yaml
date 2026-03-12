@@ -67,5 +67,5 @@ training:
     hard_mining_ratio: 0.2
     confusion_pairs: []
   ema:
-    enabled: true
+    enabled: false
     decay: 0.999
