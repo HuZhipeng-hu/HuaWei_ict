@@ -1,7 +1,7 @@
 training_config: configs/training_event_onset.yaml
 checkpoint_path: checkpoints/event_onset_best.ckpt
 output_path: models/event_onset.mindir
-device_target: CPU
+device_target: Ascend
 
 inputs:
   emg_shape: [1, 8, 24, 3]

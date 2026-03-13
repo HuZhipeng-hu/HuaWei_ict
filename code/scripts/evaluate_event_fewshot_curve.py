@@ -19,6 +19,7 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.head_expansion import normalize_action_keys
+from shared.config import load_config
 from shared.run_utils import dump_json, ensure_run_dir
 
 
@@ -62,6 +63,35 @@ def _append_recordings_manifest_arg(cmd: list[str], recordings_manifest: str | N
     if not raw:
         return cmd
     return [*cmd, "--recordings_manifest", raw]
+
+
+def _resolve_recordings_manifest_path_for_fewshot(
+    *,
+    data_dir: str,
+    config_path: str,
+    manifest_arg: str | None,
+) -> str:
+    if str(manifest_arg or "").strip():
+        raw = Path(str(manifest_arg).strip())
+    else:
+        root = load_config(config_path)
+        data_cfg = dict(root.get("data", {}) or {})
+        default_rel = str(data_cfg.get("recordings_manifest_path") or "recordings_manifest.csv")
+        raw = Path(default_rel)
+
+    candidates = [raw]
+    if not raw.is_absolute():
+        candidates.insert(0, Path(data_dir) / raw)
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return str(candidate.resolve())
+
+    expected = candidates[0]
+    raise FileNotFoundError(
+        "Few-shot evaluation requires recordings manifest with event metadata. "
+        f"Missing file: {expected}. "
+        "Fix: pass --recordings_manifest <path/to/recordings_manifest.csv>."
+    )
 
 
 def _load_json(path: Path) -> dict:
@@ -288,6 +318,22 @@ def main() -> None:
 
     run_rows: list[FewshotRunResult] = []
     matrix_commands: list[str] = []
+    stage = "manifest_check"
+    try:
+        args.recordings_manifest = _resolve_recordings_manifest_path_for_fewshot(
+            data_dir=str(args.data_dir),
+            config_path=str(args.config),
+            manifest_arg=args.recordings_manifest,
+        )
+    except Exception as exc:
+        next_cmd = (
+            "python scripts/evaluate_event_fewshot_curve.py "
+            f"--config {args.config} --data_dir {args.data_dir} "
+            "--recordings_manifest <path/to/recordings_manifest.csv>"
+        )
+        _write_failure_report(report_dir, stage=stage, root_cause=str(exc), next_command=next_cmd)
+        raise
+
     stage = "fewshot_curve"
     try:
         for budget in budgets:

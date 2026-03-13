@@ -6,6 +6,7 @@ from scripts.evaluate_event_fewshot_curve import (
     _aggregate_budget_rows,
     _choose_best_budget,
     _choose_elbow_budget,
+    _resolve_recordings_manifest_path_for_fewshot,
 )
 
 
@@ -38,3 +39,44 @@ def test_append_recordings_manifest_arg_only_when_path_provided() -> None:
 
     cmd_without = _append_recordings_manifest_arg(base, None)
     assert cmd_without == base
+
+
+def test_resolve_recordings_manifest_for_fewshot_prefers_explicit_path(tmp_path) -> None:
+    manifest = tmp_path / "explicit_manifest.csv"
+    manifest.write_text("relative_path\n", encoding="utf-8")
+    config = tmp_path / "cfg.yaml"
+    config.write_text("data:\n  recordings_manifest_path: recordings_manifest.csv\n", encoding="utf-8")
+    resolved = _resolve_recordings_manifest_path_for_fewshot(
+        data_dir=str(tmp_path),
+        config_path=str(config),
+        manifest_arg=str(manifest),
+    )
+    assert resolved.endswith("explicit_manifest.csv")
+
+
+def test_resolve_recordings_manifest_for_fewshot_uses_config_default(tmp_path) -> None:
+    manifest = tmp_path / "recordings_manifest.csv"
+    manifest.write_text("relative_path\n", encoding="utf-8")
+    config = tmp_path / "cfg.yaml"
+    config.write_text("data:\n  recordings_manifest_path: recordings_manifest.csv\n", encoding="utf-8")
+    resolved = _resolve_recordings_manifest_path_for_fewshot(
+        data_dir=str(tmp_path),
+        config_path=str(config),
+        manifest_arg=None,
+    )
+    assert resolved.endswith("recordings_manifest.csv")
+
+
+def test_resolve_recordings_manifest_for_fewshot_missing_raises_clear_error(tmp_path) -> None:
+    config = tmp_path / "cfg.yaml"
+    config.write_text("data:\n  recordings_manifest_path: recordings_manifest.csv\n", encoding="utf-8")
+    try:
+        _resolve_recordings_manifest_path_for_fewshot(
+            data_dir=str(tmp_path),
+            config_path=str(config),
+            manifest_arg=None,
+        )
+    except FileNotFoundError as exc:
+        assert "Few-shot evaluation requires recordings manifest" in str(exc)
+        return
+    raise AssertionError("expected FileNotFoundError")

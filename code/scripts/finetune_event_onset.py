@@ -12,6 +12,7 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.train_pipeline import run_event_training
+from shared.config import load_config
 
 
 def _parse_optional_bool(value: str) -> bool:
@@ -27,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Finetune event-onset model on wearer data")
     parser.add_argument("--config", default="configs/training_event_onset.yaml")
     parser.add_argument("--data_dir", default="../data")
-    parser.add_argument("--device_target", default="CPU", choices=["CPU", "GPU", "Ascend"])
+    parser.add_argument("--device_target", default="Ascend", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)
     parser.add_argument("--run_id", default=None)
     parser.add_argument("--run_root", default="artifacts/runs")
@@ -95,6 +96,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_recordings_manifest_path(*, data_dir: str, config_path: str, manifest_arg: str | None) -> str:
+    if str(manifest_arg or "").strip():
+        raw = Path(str(manifest_arg).strip())
+    else:
+        root = load_config(config_path)
+        data_cfg = dict(root.get("data", {}) or {})
+        default_rel = str(data_cfg.get("recordings_manifest_path") or "recordings_manifest.csv")
+        raw = Path(default_rel)
+
+    candidates = [raw]
+    if not raw.is_absolute():
+        candidates.insert(0, Path(data_dir) / raw)
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return str(candidate.resolve())
+
+    expected = candidates[0]
+    raise FileNotFoundError(
+        "Event-onset finetune requires recordings manifest with event metadata. "
+        f"Missing file: {expected}. "
+        "Fix: pass --recordings_manifest <path/to/recordings_manifest.csv>."
+    )
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -113,6 +138,12 @@ def main() -> None:
             args.incremental_from_checkpoint,
             args.incremental_old_target_db5_keys or "(not provided)",
         )
+    args.recordings_manifest = _resolve_recordings_manifest_path(
+        data_dir=str(args.data_dir),
+        config_path=str(args.config),
+        manifest_arg=args.recordings_manifest,
+    )
+    logger.info("Using recordings_manifest: %s", args.recordings_manifest)
     logger.info(
         "Budget mode: budget_per_class=%d budget_seed=%d",
         int(args.budget_per_class),

@@ -77,6 +77,18 @@ def _build_model_metadata(
     }
 
 
+def _ensure_checkpoint_readable(path: str | Path) -> Path:
+    ckpt = Path(path)
+    if not ckpt.exists() or not ckpt.is_file():
+        raise FileNotFoundError(
+            f"Checkpoint file not found: {ckpt}. "
+            "Fix: pass --checkpoint <path/to/event_onset_best.ckpt>."
+        )
+    if ckpt.stat().st_size <= 0:
+        raise ValueError(f"Checkpoint file is empty: {ckpt}")
+    return ckpt
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Convert event-onset checkpoint to MindIR")
     parser.add_argument("--config", default="configs/conversion_event_onset.yaml")
@@ -84,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--output", default=None, help="Output MindIR path")
     parser.add_argument("--metadata_output", default=None, help="Output metadata JSON path")
-    parser.add_argument("--device_target", default=None, choices=["CPU", "GPU", "Ascend"])
+    parser.add_argument("--device_target", default="Ascend", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--emg_input_shape", default=None, help="Override EMG shape like 1,8,24,3")
     parser.add_argument("--imu_input_shape", default=None, help="Override IMU shape like 1,6,16")
     parser.add_argument(
@@ -122,6 +134,8 @@ def main() -> None:
         or str(Path(output_path).with_suffix(".model_metadata.json"))
     )
     device_target = args.device_target or raw.get("device_target", "CPU")
+
+    checkpoint_path = str(_ensure_checkpoint_readable(checkpoint_path))
 
     model_cfg, data_cfg, _, _ = load_event_training_config(training_config)
     if args.target_db5_keys:

@@ -5,6 +5,7 @@ import pytest
 
 from scripts.pretrain_ninapro_db5_repr import (
     _build_class_source_balanced_indices,
+    _resolve_existing_recordings_manifest,
     _resolve_augmentation_params,
     _resolve_repr_objective,
     _resolve_sampler_mode,
@@ -64,3 +65,26 @@ def test_source_balanced_indices_cover_all_classes_per_batch_when_possible() -> 
         batch_classes = set(labels[batch].tolist())
         assert {0, 1, 2}.issubset(batch_classes)
 
+
+def test_resolve_existing_recordings_manifest_prefers_explicit_path(tmp_path) -> None:
+    manifest = tmp_path / "explicit_manifest.csv"
+    manifest.write_text("relative_path\n", encoding="utf-8")
+    config = tmp_path / "cfg.yaml"
+    config.write_text("data:\n  recordings_manifest_path: recordings_manifest.csv\n", encoding="utf-8")
+    resolved = _resolve_existing_recordings_manifest(
+        data_dir=str(tmp_path),
+        config_path=str(config),
+        manifest_arg=str(manifest),
+    )
+    assert resolved.endswith("explicit_manifest.csv")
+
+
+def test_resolve_existing_recordings_manifest_missing_raises_clear_error(tmp_path) -> None:
+    config = tmp_path / "cfg.yaml"
+    config.write_text("data:\n  recordings_manifest_path: recordings_manifest.csv\n", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="run_downstream_fewshot=true requires recordings manifest"):
+        _resolve_existing_recordings_manifest(
+            data_dir=str(tmp_path),
+            config_path=str(config),
+            manifest_arg=None,
+        )

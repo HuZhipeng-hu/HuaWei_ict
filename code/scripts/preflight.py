@@ -74,11 +74,13 @@ def collect_file_checks(code_root: Path, wearer_data_root: Path, db5_data_root: 
         code_root / "configs" / "training_event_onset.yaml",
         code_root / "configs" / "conversion_event_onset.yaml",
         code_root / "configs" / "runtime_event_onset.yaml",
-        code_root / "scripts" / "pretrain_ninapro_db5.py",
+        code_root / "scripts" / "pretrain_db5_repr_method_matrix.py",
+        code_root / "scripts" / "pretrain_ninapro_db5_repr.py",
         code_root / "scripts" / "finetune_event_onset.py",
         code_root / "scripts" / "convert_event_onset.py",
         code_root / "scripts" / "run_event_runtime.py",
-        code_root / "scripts" / "train_event_pipeline.py",
+        code_root / "scripts" / "evaluate_ckpt.py",
+        code_root / "scripts" / "benchmark_event_runtime_ckpt.py",
     ]
     for path in required_files:
         checks.append(Check("INFO" if path.exists() else "ERROR", f"file:{path.relative_to(code_root)}", "exists" if path.exists() else "missing"))
