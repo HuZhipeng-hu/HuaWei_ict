@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from scripts.pretrain_db5_experiment_matrix import _missing_summary_fields, _rank_key, _should_skip_run4
+from scripts.pretrain_db5_experiment_matrix import _missing_summary_fields, _parse_args, _rank_key, _should_skip_run4
 from scripts.pretrain_ninapro_db5 import (
     _best_validation_from_history,
     _build_referee_card_content,
@@ -79,3 +79,9 @@ def test_build_referee_card_content_contains_repro_statement() -> None:
     assert "无需个人校准数据" in content
     assert "best_val_macro_f1" in content
     assert "db5_pretrain_best.ckpt" in content
+
+
+def test_matrix_default_quality_gate_warning_policy(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["pretrain_db5_experiment_matrix.py"])
+    args = _parse_args()
+    assert args.quality_gate_fail_on_warning == "false"

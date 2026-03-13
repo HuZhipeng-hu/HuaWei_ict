@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from scripts.pretrain_db5_quality_gate import (
+    _parse_args,
     _count_log_markers,
     _group_leakage_present,
     _validate_smoke_outputs,
@@ -92,3 +93,9 @@ def test_validate_smoke_outputs_reports_leakage_and_empty_classes(tmp_path) -> N
     assert "group leakage detected in manifest" in joined
     assert "split diagnostics reports empty classes" in joined
     assert "train has empty classes" in joined
+
+
+def test_quality_gate_default_is_error_only(monkeypatch) -> None:
+    monkeypatch.setattr("sys.argv", ["pretrain_db5_quality_gate.py"])
+    args = _parse_args()
+    assert args.fail_on_warning == "false"

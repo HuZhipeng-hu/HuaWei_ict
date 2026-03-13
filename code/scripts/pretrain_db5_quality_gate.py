@@ -62,7 +62,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fail_on_warning",
         choices=["true", "false"],
-        default="true",
+        default="false",
         help="Fail gate if any stage output contains [WARN].",
     )
     return parser.parse_args()

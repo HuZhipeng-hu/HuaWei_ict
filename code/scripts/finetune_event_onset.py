@@ -70,6 +70,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional DB5 pretrained checkpoint for EMG encoder warm start.",
     )
+    parser.add_argument(
+        "--incremental_from_checkpoint",
+        default=None,
+        help="Optional previous event-onset checkpoint for incremental head expansion.",
+    )
+    parser.add_argument(
+        "--incremental_old_target_db5_keys",
+        default=None,
+        help="Comma-separated old action keys used by incremental_from_checkpoint (RELAX is implicit).",
+    )
+    parser.add_argument(
+        "--incremental_head_only",
+        type=_parse_optional_bool,
+        default=True,
+        help="When true, prioritize head-only phase before unfreezing for incremental action extension.",
+    )
+    parser.add_argument(
+        "--incremental_init_seed",
+        type=int,
+        default=42,
+        help="Seed used for incremental-class head row initialization.",
+    )
     return parser
 
 
@@ -85,6 +107,12 @@ def main() -> None:
         logger.info("Using pretrained EMG checkpoint: %s", args.pretrained_emg_checkpoint)
     else:
         logger.warning("No pretrained EMG checkpoint supplied. Finetune will run from random initialization.")
+    if args.incremental_from_checkpoint:
+        logger.info(
+            "Incremental mode enabled: checkpoint=%s old_target_db5_keys=%s",
+            args.incremental_from_checkpoint,
+            args.incremental_old_target_db5_keys or "(not provided)",
+        )
     logger.info(
         "Budget mode: budget_per_class=%d budget_seed=%d",
         int(args.budget_per_class),

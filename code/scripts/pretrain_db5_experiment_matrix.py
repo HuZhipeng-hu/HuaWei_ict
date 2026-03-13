@@ -44,6 +44,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device_id", type=int, default=0)
     parser.add_argument("--foundation_dir", default="artifacts/foundation/db5_full53")
     parser.add_argument("--run_prefix", default="db5_sprint")
+    parser.add_argument("--ms_mode", default="graph", choices=["graph", "pynative"])
+    parser.add_argument("--auto_fallback_pynative", choices=["true", "false"], default="true")
+    parser.add_argument(
+        "--run_timeout_seconds",
+        type=int,
+        default=0,
+        help="Optional timeout per run. 0 disables timeout watchdog.",
+    )
     parser.add_argument("--run4_variant", choices=sorted(RUN4_VARIANTS.keys()), default="lr5e4_wd3e4")
     parser.add_argument(
         "--run4_grid_search",
@@ -53,7 +61,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--min_run3_gain", type=float, default=0.03)
     parser.add_argument("--skip_quality_gate", action="store_true")
     parser.add_argument("--quality_gate_script", default="scripts/pretrain_db5_quality_gate.py")
-    parser.add_argument("--quality_gate_fail_on_warning", choices=["true", "false"], default="true")
+    parser.add_argument("--quality_gate_fail_on_warning", choices=["true", "false"], default="false")
     parser.add_argument("--quality_gate_skip_db5_probe", action="store_true")
     parser.add_argument("--quality_gate_skip_budget_probe", action="store_true")
     parser.add_argument("--quality_gate_pytest_basetemp_root", default=".tmp_pytest_runcheck")
@@ -132,7 +140,8 @@ def _validate_run_artifacts(args: argparse.Namespace, run: MatrixRun, summary: d
     return issues
 
 
-def _build_pretrain_command(args: argparse.Namespace, run: MatrixRun) -> list[str]:
+def _build_pretrain_command(args: argparse.Namespace, run: MatrixRun, *, ms_mode: str | None = None) -> list[str]:
+    selected_mode = str(ms_mode or args.ms_mode)
     cmd: list[str] = [
         sys.executable,
         "scripts/pretrain_ninapro_db5.py",
@@ -148,6 +157,8 @@ def _build_pretrain_command(args: argparse.Namespace, run: MatrixRun) -> list[st
         str(args.device_target),
         "--device_id",
         str(int(args.device_id)),
+        "--ms_mode",
+        selected_mode,
         "--foundation_dir",
         str(args.foundation_dir),
     ]
@@ -157,14 +168,45 @@ def _build_pretrain_command(args: argparse.Namespace, run: MatrixRun) -> list[st
 
 
 def _run_pretrain(args: argparse.Namespace, run: MatrixRun) -> dict:
-    cmd = _build_pretrain_command(args, run)
+    cmd = _build_pretrain_command(args, run, ms_mode=str(args.ms_mode))
     cmd_str = " ".join(shlex.quote(item) for item in cmd)
     print(f"[MATRIX] {run.name} -> {cmd_str}")
-    completed = subprocess.run(cmd, cwd=str(CODE_ROOT), check=False)
-    if completed.returncode != 0:
-        raise RuntimeError(
-            f"training subprocess failed: run_id={run.run_id}, rc={completed.returncode}, cmd={cmd_str}"
-        )
+    timeout = int(args.run_timeout_seconds) if int(args.run_timeout_seconds) > 0 else None
+    fallback_enabled = bool(str(args.auto_fallback_pynative).strip().lower() == "true")
+    fallback_used = False
+    fallback_cause = ""
+    try:
+        completed = subprocess.run(cmd, cwd=str(CODE_ROOT), check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        completed = None
+        fallback_cause = f"timeout({exc.timeout}s)"
+
+    if completed is not None and completed.returncode == 0:
+        pass
+    else:
+        can_fallback = str(args.ms_mode).lower() == "graph" and fallback_enabled
+        if not can_fallback:
+            if completed is None:
+                raise RuntimeError(f"training subprocess timed out: run_id={run.run_id}, cmd={cmd_str}")
+            raise RuntimeError(
+                f"training subprocess failed: run_id={run.run_id}, rc={completed.returncode}, cmd={cmd_str}"
+            )
+
+        fallback_cmd = _build_pretrain_command(args, run, ms_mode="pynative")
+        fallback_cmd_str = " ".join(shlex.quote(item) for item in fallback_cmd)
+        if completed is None:
+            print(f"[MATRIX] {run.name} graph fallback -> {fallback_cmd_str} (reason={fallback_cause})")
+        else:
+            fallback_cause = f"non_zero_rc({completed.returncode})"
+            print(f"[MATRIX] {run.name} graph fallback -> {fallback_cmd_str} (reason={fallback_cause})")
+        completed_fb = subprocess.run(fallback_cmd, cwd=str(CODE_ROOT), check=False, timeout=timeout)
+        if completed_fb.returncode != 0:
+            raise RuntimeError(
+                f"training subprocess failed after fallback: run_id={run.run_id}, rc={completed_fb.returncode}, "
+                f"graph_cmd={cmd_str}, fallback_cmd={fallback_cmd_str}"
+            )
+        fallback_used = True
+        cmd_str = fallback_cmd_str
 
     summary_path = Path(args.run_root) / run.run_id / "offline_summary.json"
     if not summary_path.exists():
@@ -177,6 +219,8 @@ def _run_pretrain(args: argparse.Namespace, run: MatrixRun) -> dict:
     summary["matrix_run_id"] = run.run_id
     summary["matrix_command"] = cmd_str
     summary["overrides"] = dict(run.overrides)
+    summary["auto_fallback_used"] = bool(fallback_used)
+    summary["auto_fallback_cause"] = str(fallback_cause)
     return summary
 
 

@@ -23,6 +23,35 @@ from shared.models.blocks import ParallelConvBlock, _check_mindspore
 
 if MINDSPORE_AVAILABLE:
 
+    class DB5EncoderNet(nn.Cell):
+        """EMG encoder used by both classification and representation pretraining."""
+
+        def __init__(self, config: DB5PretrainConfig):
+            super().__init__()
+            self.block1 = ParallelConvBlock(
+                config.feature.first_myo_channel_count,
+                config.base_channels,
+                use_se=config.use_se,
+            )
+            self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+            self.block2 = ParallelConvBlock(
+                config.base_channels * 3,
+                config.base_channels * 2,
+                use_se=config.use_se,
+            )
+            self.global_pool = GlobalAvgPool2DCompat()
+            self.flatten = nn.Flatten()
+            self.dropout = nn.Dropout(p=config.dropout_rate)
+
+        def construct(self, x):
+            x = self.block1(x)
+            x = self.pool(x)
+            x = self.block2(x)
+            x = self.global_pool(x)
+            x = self.flatten(x)
+            x = self.dropout(x)
+            return x
+
     class DB5PretrainNet(nn.Cell):
         def __init__(self, config: DB5PretrainConfig, num_classes: int):
             super().__init__()
@@ -61,9 +90,18 @@ if MINDSPORE_AVAILABLE:
 
 else:
 
+    class DB5EncoderNet:
+        def __init__(self, *_args, **_kwargs):
+            _check_mindspore()
+
     class DB5PretrainNet:
         def __init__(self, *_args, **_kwargs):
             _check_mindspore()
+
+
+def build_db5_encoder_model(config: DB5PretrainConfig) -> Any:
+    _check_mindspore()
+    return DB5EncoderNet(config)
 
 
 def build_db5_pretrain_model(config: DB5PretrainConfig, num_classes: int) -> Any:

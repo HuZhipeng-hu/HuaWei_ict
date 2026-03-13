@@ -14,6 +14,11 @@ import numpy as np
 
 from event_onset.config import EventModelConfig, load_event_training_config
 from event_onset.dataset import EventClipDatasetLoader
+from event_onset.head_expansion import (
+    build_event_class_names,
+    expand_classifier_rows,
+    normalize_action_keys,
+)
 from event_onset.evaluate import load_and_evaluate_event
 from event_onset.model import build_event_model
 from event_onset.trainer import EventTrainer
@@ -41,6 +46,9 @@ OFFLINE_SUMMARY_FIELDS = [
     "budget_seed",
     "used_pretrained_init",
     "target_db5_keys",
+    "incremental_mode",
+    "incremental_reused_class_count",
+    "incremental_new_class_count",
     "test_accuracy",
     "test_macro_f1",
     "test_macro_recall",
@@ -85,6 +93,109 @@ def _apply_data_cli_overrides(args, data_cfg):
             raise ValueError("--target_db5_keys provided but no valid keys parsed.")
         data_cfg.target_db5_keys = keys
     return data_cfg
+
+
+def _apply_incremental_phase_policy(train_cfg, *, enabled: bool) -> None:
+    if not enabled:
+        return
+    total_epochs = max(1, int(train_cfg.epochs))
+    default_freeze = max(2, int(round(total_epochs * 0.35)))
+    freeze_epochs = max(int(train_cfg.freeze_emg_epochs), default_freeze)
+    if freeze_epochs >= total_epochs:
+        freeze_epochs = max(0, total_epochs - 1)
+    train_cfg.freeze_emg_epochs = int(freeze_epochs)
+
+
+def _infer_old_class_names(
+    *,
+    explicit_old_keys: Sequence[str],
+    new_class_names: Sequence[str],
+    old_output_rows: int,
+) -> list[str]:
+    explicit = list(build_event_class_names(explicit_old_keys)) if explicit_old_keys else []
+    if explicit:
+        return explicit
+    if old_output_rows <= 0:
+        return []
+    inferred = list(new_class_names[: int(old_output_rows)])
+    if not inferred:
+        inferred = ["RELAX"]
+    return inferred
+
+
+def _apply_incremental_checkpoint(
+    model,
+    *,
+    checkpoint_path: str,
+    old_action_keys: Sequence[str],
+    new_class_names: Sequence[str],
+    init_seed: int,
+) -> dict[str, object]:
+    try:
+        from mindspore import Tensor, load_checkpoint
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("Incremental checkpoint loading requires MindSpore.") from exc
+
+    param_dict = load_checkpoint(str(checkpoint_path))
+    current_params = {param.name: param for param in model.get_parameters()}
+    loaded = 0
+    skipped = 0
+    expansion_summary: dict[str, object] | None = None
+    pending_head_weight = None
+    pending_head_bias = None
+
+    for source_name, source_value in param_dict.items():
+        target = current_params.get(source_name)
+        if target is None:
+            skipped += 1
+            continue
+        if tuple(int(v) for v in target.shape) == tuple(int(v) for v in source_value.shape):
+            target.set_data(source_value)
+            loaded += 1
+            continue
+        if source_name == "fusion.3.weight":
+            pending_head_weight = source_value
+            continue
+        if source_name == "fusion.3.bias":
+            pending_head_bias = source_value
+            continue
+        skipped += 1
+
+    head_weight = current_params.get("fusion.3.weight")
+    head_bias = current_params.get("fusion.3.bias")
+    if pending_head_weight is not None and head_weight is not None:
+        old_weight_np = pending_head_weight.asnumpy().astype(np.float32)
+        old_bias_np = pending_head_bias.asnumpy().astype(np.float32) if pending_head_bias is not None else None
+        old_class_names = _infer_old_class_names(
+            explicit_old_keys=old_action_keys,
+            new_class_names=new_class_names,
+            old_output_rows=int(old_weight_np.shape[0]),
+        )
+        expanded_weight, expanded_bias, stats = expand_classifier_rows(
+            old_weight=old_weight_np,
+            old_bias=old_bias_np,
+            target_weight=head_weight.asnumpy().astype(np.float32),
+            target_bias=head_bias.asnumpy().astype(np.float32) if head_bias is not None else None,
+            old_class_names=old_class_names,
+            new_class_names=new_class_names,
+            init_seed=int(init_seed),
+        )
+        head_weight.set_data(Tensor(expanded_weight, dtype=head_weight.dtype))
+        loaded += 1
+        if head_bias is not None and expanded_bias is not None:
+            head_bias.set_data(Tensor(expanded_bias, dtype=head_bias.dtype))
+            loaded += 1
+        expansion_summary = stats.to_dict()
+        expansion_summary["old_class_names"] = old_class_names
+        expansion_summary["new_class_names"] = list(new_class_names)
+
+    return {
+        "loaded": int(loaded),
+        "skipped": int(skipped),
+        "expanded_head": bool(expansion_summary is not None),
+        "expansion": expansion_summary or {},
+        "checkpoint_path": str(checkpoint_path),
+    }
 
 
 def _apply_train_budget_to_manifest(
@@ -350,6 +461,11 @@ def run_event_training(args) -> None:
     data_cfg = _apply_data_cli_overrides(args, data_cfg)
     label_spec = get_label_mode_spec(data_cfg.label_mode, data_cfg.target_db5_keys)
     model_cfg.num_classes = int(len(label_spec.class_names))
+    incremental_checkpoint = str(getattr(args, "incremental_from_checkpoint", "") or "").strip()
+    incremental_old_action_keys = normalize_action_keys(getattr(args, "incremental_old_target_db5_keys", None))
+    incremental_head_only = bool(getattr(args, "incremental_head_only", True))
+    if incremental_checkpoint:
+        _apply_incremental_phase_policy(train_cfg, enabled=incremental_head_only)
 
     dump_yaml(
         run_dir / "config_snapshots" / "effective_overrides.yaml",
@@ -385,6 +501,13 @@ def run_event_training(args) -> None:
                 "use_imu": data_cfg.use_imu,
                 "budget_per_class": int(getattr(args, "budget_per_class", 0) or 0),
                 "budget_seed": int(getattr(args, "budget_seed", train_cfg.split_seed) or train_cfg.split_seed),
+            },
+            "incremental": {
+                "enabled": bool(incremental_checkpoint),
+                "checkpoint_path": incremental_checkpoint,
+                "old_target_db5_keys": list(incremental_old_action_keys),
+                "head_only_priority": bool(incremental_head_only),
+                "init_seed": int(getattr(args, "incremental_init_seed", 42)),
             },
         },
     )
@@ -468,6 +591,23 @@ def run_event_training(args) -> None:
             transferred["loaded"],
             transferred["skipped"],
         )
+    incremental_transfer: dict[str, object] = {"enabled": False}
+    if incremental_checkpoint:
+        incremental_transfer = _apply_incremental_checkpoint(
+            model,
+            checkpoint_path=incremental_checkpoint,
+            old_action_keys=incremental_old_action_keys,
+            new_class_names=label_spec.class_names,
+            init_seed=int(getattr(args, "incremental_init_seed", 42)),
+        )
+        incremental_transfer["enabled"] = True
+        logger.info(
+            "Loaded incremental checkpoint from %s (loaded=%s skipped=%s expanded_head=%s)",
+            incremental_checkpoint,
+            incremental_transfer.get("loaded"),
+            incremental_transfer.get("skipped"),
+            incremental_transfer.get("expanded_head"),
+        )
     trainer = EventTrainer(model, model_cfg, train_cfg, label_spec.class_names, output_dir=str(run_dir))
     history = trainer.train(train_emg, train_imu, train_y, val_emg, val_imu, val_y)
     history_path = run_dir / "training_history.csv"
@@ -509,6 +649,13 @@ def run_event_training(args) -> None:
         "budget_seed": int(budget_seed),
         "used_pretrained_init": bool(model_cfg.pretrained_emg_checkpoint),
         "target_db5_keys": ",".join(data_cfg.target_db5_keys),
+        "incremental_mode": bool(incremental_checkpoint),
+        "incremental_reused_class_count": int(
+            ((incremental_transfer.get("expansion") or {}).get("reused_class_count", 0))
+        ),
+        "incremental_new_class_count": int(
+            ((incremental_transfer.get("expansion") or {}).get("new_class_count", 0))
+        ),
         "test_accuracy": report["accuracy"],
         "test_macro_f1": report["macro_f1"],
         "test_macro_recall": report["macro_recall"],
@@ -516,6 +663,16 @@ def run_event_training(args) -> None:
     }
     dump_json(run_dir / "offline_summary.json", summary)
     append_csv_row(Path(args.run_root) / "offline_results.csv", OFFLINE_SUMMARY_FIELDS, summary)
+    incremental_template = (
+        "python scripts/finetune_event_onset.py "
+        f"--config {args.config} "
+        f"--data_dir {args.data_dir} "
+        f"--target_db5_keys {','.join(data_cfg.target_db5_keys)} "
+        "--incremental_from_checkpoint <previous_event_ckpt> "
+        "--incremental_old_target_db5_keys <old_action_keys_csv> "
+        f"--budget_per_class {int(budget_per_class)} "
+        f"--budget_seed {int(budget_seed)}"
+    )
     dump_json(
         run_dir / "run_metadata.json",
         {
@@ -526,6 +683,8 @@ def run_event_training(args) -> None:
             "quality_report": str(q_path),
             "training_history": str(history_path),
             "evaluation_outputs": report_paths,
+            "incremental_transfer": incremental_transfer,
+            "incremental_command_template": incremental_template,
             "elapsed_minutes": (time.time() - start) / 60.0,
         },
     )
