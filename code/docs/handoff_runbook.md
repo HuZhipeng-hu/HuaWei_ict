@@ -1,58 +1,71 @@
-# Event-Onset Handoff Runbook
+﻿# Handoff Runbook (Cloud + PI)
 
-This runbook is for handing off the event-onset production pipeline to a target machine.
+This runbook is the deployment handoff baseline.
 
-## 1) Environment
+## 1) Cloud: Pretrain
 
-- Python >= 3.8
-- Required: `numpy`, `scipy`, `pyyaml`
-- Target deployment: `mindspore`, `mindspore_lite`
-- Optional hardware libs: `pyserial`, `smbus2`
-
-## 2) Preflight
-
-Local:
-
-```powershell
-python scripts/preflight.py --mode local
+```bash
+python scripts/pretrain_db5_repr_method_matrix.py \
+  --pretrain_config configs/pretrain_ninapro_db5.yaml \
+  --db5_data_dir ../data_ninaproDB5 \
+  --run_root artifacts/runs \
+  --run_prefix db5_repr_stage2_v1 \
+  --device_target Ascend \
+  --device_id 0 \
+  --fewshot_mode off
 ```
 
-Target:
+## 2) Cloud: Finetune
 
-```powershell
-python scripts/preflight.py --mode ascend
+```bash
+python scripts/finetune_event_onset.py \
+  --config configs/training_event_onset.yaml \
+  --data_dir ../data \
+  --recordings_manifest ../data/recordings_manifest.csv \
+  --pretrained_emg_checkpoint <foundation_ckpt_path> \
+  --run_root artifacts/runs \
+  --run_id event_finetune_v1
 ```
 
-## 3) Training + Conversion Chain
+## 3) Cloud: Convert
 
-```powershell
-python scripts/pretrain_ninapro_db5.py --config configs/pretrain_ninapro_db5.yaml --data_dir ../data_ninaproDB5 --run_id db5_pretrain_v1
-python scripts/finetune_event_onset.py --config configs/training_event_onset.yaml --data_dir ../data --pretrained_emg_checkpoint artifacts/runs/db5_pretrain_v1/checkpoints/db5_pretrain_best.ckpt --run_id event_finetune_v1
-python scripts/convert_event_onset.py --config configs/conversion_event_onset.yaml --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt --run_id event_convert_v1
+```bash
+python scripts/convert_event_onset.py \
+  --config configs/conversion_event_onset.yaml \
+  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
+  --run_root artifacts/runs \
+  --run_id event_convert_v1
 ```
 
-## 4) Runtime Benchmark
+## 4) PI: Runtime
 
-```powershell
-python scripts/benchmark_event_runtime_ckpt.py --training_config configs/training_event_onset.yaml --runtime_config configs/runtime_event_onset.yaml --data_dir ../data --backend both --output artifacts/event_runtime_benchmark_compare.json
-```
-
-## 5) Runtime Startup
-
-Standalone smoke:
-
-```powershell
-python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend lite --standalone --duration_sec 10
-```
-
-Real hardware:
-
-```powershell
+```bash
 python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend lite
 ```
 
-## 6) Deployment Artifacts
+Standalone smoke:
 
-- `models/event_onset.mindir`
-- `models/event_onset.model_metadata.json`
-- `configs/runtime_event_onset.yaml`
+```bash
+python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend lite --standalone --duration_sec 10
+```
+
+## 5) Optional Evaluation
+
+```bash
+python scripts/evaluate_ckpt.py \
+  --config configs/training_event_onset.yaml \
+  --data_dir ../data \
+  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt
+
+python scripts/benchmark_event_runtime_ckpt.py \
+  --training_config configs/training_event_onset.yaml \
+  --runtime_config configs/runtime_event_onset.yaml \
+  --data_dir ../data \
+  --backend both \
+  --output artifacts/event_runtime_benchmark_compare.json
+```
+
+## 6) Scope Boundary
+
+- This repo: model training/conversion/runtime
+- App side: data upload to cloud and model return to PI

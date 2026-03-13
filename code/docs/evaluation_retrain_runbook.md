@@ -1,84 +1,71 @@
-# Event-Onset Retrain + Deploy Runbook
+﻿# Evaluation and Retrain Runbook (Core 4 Chain)
 
-This runbook defines the production workflow for the event-onset branch.
+## Workflow
 
-## 1) DB5 Pretrain
+1. Cloud pretrain (DB5 public)
+2. Cloud finetune (wearer private)
+3. Cloud convert (MindIR + metadata)
+4. PI runtime deployment
+
+## Commands
+
+### Pretrain
 
 ```bash
-python scripts/pretrain_ninapro_db5.py \
-  --config configs/pretrain_ninapro_db5.yaml \
-  --data_dir ../data_ninaproDB5 \
-  --run_id db5_pretrain_v1
+python scripts/pretrain_db5_repr_method_matrix.py \
+  --pretrain_config configs/pretrain_ninapro_db5.yaml \
+  --db5_data_dir ../data_ninaproDB5 \
+  --run_root artifacts/runs \
+  --run_prefix db5_repr_stage2_v1 \
+  --device_target Ascend \
+  --device_id 0 \
+  --fewshot_mode off
 ```
 
-## 2) Wearer Finetune
+### Finetune
 
 ```bash
 python scripts/finetune_event_onset.py \
   --config configs/training_event_onset.yaml \
   --data_dir ../data \
-  --pretrained_emg_checkpoint artifacts/runs/db5_pretrain_v1/checkpoints/db5_pretrain_best.ckpt \
+  --recordings_manifest ../data/recordings_manifest.csv \
+  --pretrained_emg_checkpoint <foundation_ckpt_path> \
+  --run_root artifacts/runs \
   --run_id event_finetune_v1
 ```
 
-## 3) Evaluate Checkpoint
-
-```bash
-python scripts/evaluate_ckpt.py \
-  --config configs/training_event_onset.yaml \
-  --data_dir ../data \
-  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
-  --split_manifest artifacts/splits/event_onset_split_manifest.json
-```
-
-## 4) Convert to MindIR
+### Convert
 
 ```bash
 python scripts/convert_event_onset.py \
   --config configs/conversion_event_onset.yaml \
   --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
+  --run_root artifacts/runs \
   --run_id event_convert_v1
 ```
 
-Conversion outputs:
-
-- `models/event_onset.mindir`
-- `models/event_onset.model_metadata.json`
-
-## 5) Runtime Benchmark (CKPT vs Lite)
-
-```bash
-python scripts/benchmark_event_runtime_ckpt.py \
-  --training_config configs/training_event_onset.yaml \
-  --runtime_config configs/runtime_event_onset.yaml \
-  --data_dir ../data \
-  --backend both \
-  --output artifacts/event_runtime_benchmark_compare.json
-```
-
-## 6) Deploy and Run on Orange Pi
-
-Copy `models/event_onset.mindir`, `models/event_onset.model_metadata.json`, and
-`configs/runtime_event_onset.yaml` to target machine.
-
-Production run:
+### Runtime
 
 ```bash
 python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend lite
 ```
 
-Debug run (non-production):
+## Quality Checks
 
 ```bash
-python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend ckpt
+python scripts/preflight.py --mode local --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
+python scripts/preflight.py --mode ascend --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
 ```
 
-## 7) Merge Gate
+Optional:
 
-Before merging to `master`, verify:
+```bash
+python scripts/evaluate_ckpt.py --config configs/training_event_onset.yaml --data_dir ../data --checkpoint <event_best_ckpt>
+python scripts/benchmark_event_runtime_ckpt.py --training_config configs/training_event_onset.yaml --runtime_config configs/runtime_event_onset.yaml --data_dir ../data --backend both --output artifacts/event_runtime_benchmark_compare.json
+```
 
-- `transition_hit_rate_mindir >= transition_hit_rate_ckpt - 0.03`
-- `false_trigger_rate_mindir <= false_trigger_rate_ckpt + 0.03`
-- `state_hold_accuracy_mindir >= state_hold_accuracy_ckpt - 0.03`
-- `release_accuracy_mindir >= release_accuracy_ckpt - 0.03`
-- `latency_p95_mindir <= latency_p95_ckpt * 1.30`
+## Notes
+
+- Cloud side outputs are authoritative artifacts.
+- PI side only consumes converted model package for inference.
+- App transport (upload/download) is out of scope for this codebase.

@@ -1,81 +1,110 @@
-# NeuroGrip DB5 Foundation (Public Repro First)
+﻿# NeuroGrip Cloud-to-PI Pipeline (Core 4 Chain)
 
-本仓库当前默认复现口径是：
+This repository now uses a single production path:
 
-- 公共轨（评委开箱）：只依赖 NinaPro DB5，完成 foundation 表征预训练。
-- 内部轨（可选附加）：在有 `recordings_manifest.csv` 的前提下运行 few-shot 迁移评估。
+- Cloud (Huawei Cloud): pretrain, finetune, convert
+- PI device: runtime inference and actuation only
+- App side (out of scope here): upload wearer data to cloud and return converted model to PI
 
-few-shot 是小样本微调评估，不是预训练本体的必需步骤。
+## Responsibility Split
 
-## 1) 公共轨：一条命令开箱复现（推荐）
+### Cloud side (this repo)
+1. DB5 foundation pretraining
+2. Wearer finetuning (using uploaded private clips)
+3. CKPT -> MindIR conversion
+
+### PI side (this repo)
+1. Load MindIR + metadata
+2. Read armband stream
+3. Trigger actuator by predicted class/state
+
+### App side (not in this repo)
+1. Upload private finetune data to cloud
+2. Download converted model package and deliver to PI
+
+## Core 4 Entrypoints
+
+- Pretrain: `scripts/pretrain_db5_repr_method_matrix.py`
+- Finetune: `scripts/finetune_event_onset.py`
+- Convert: `scripts/convert_event_onset.py`
+- Runtime: `scripts/run_event_runtime.py`
+
+## Cloud Commands
+
+### 1) Pretrain (public DB5 only)
 
 ```bash
 python scripts/pretrain_db5_repr_method_matrix.py \
   --pretrain_config configs/pretrain_ninapro_db5.yaml \
   --db5_data_dir ../data_ninaproDB5 \
   --run_root artifacts/runs \
-  --run_prefix db5_public_repro_v1 \
+  --run_prefix db5_repr_stage2_v1 \
   --device_target Ascend \
   --device_id 0 \
-  --foundation_dir artifacts/foundation/db5_full53 \
   --fewshot_mode off
 ```
 
-说明：
-
-- `fewshot_mode=off` 为默认值，缺少 `recordings_manifest.csv` 也不会失败。
-- 矩阵会按公共排序规则自动选出最佳预训练轮次：
-  - `best_val_macro_f1` 优先
-  - 平手看 `best_val_acc`
-  - 再看 `test_macro_f1`
-- 关键产物：
-  - `artifacts/runs/<run_prefix>_summary/db5_repr_method_matrix_summary.json`
-  - `artifacts/runs/<run_prefix>_summary/db5_repr_method_matrix_summary.csv`
-  - `artifacts/runs/<run_prefix>_summary/referee_repro_card.md`
-
-## 2) 内部轨：few-shot 迁移评估（可选）
-
-仅当你有事件数据与 `recordings_manifest.csv` 时启用：
+### 2) Finetune (wearer private data)
 
 ```bash
-python scripts/pretrain_db5_repr_method_matrix.py \
-  --pretrain_config configs/pretrain_ninapro_db5.yaml \
-  --fewshot_config configs/training_event_onset.yaml \
-  --db5_data_dir ../data_ninaproDB5 \
-  --wearer_data_dir ../data \
-  --recordings_manifest /path/to/recordings_manifest.csv \
+python scripts/finetune_event_onset.py \
+  --config configs/training_event_onset.yaml \
+  --data_dir ../data \
+  --recordings_manifest ../data/recordings_manifest.csv \
+  --pretrained_emg_checkpoint <foundation_ckpt_path> \
   --run_root artifacts/runs \
-  --run_prefix db5_internal_repro_v1 \
-  --device_target Ascend \
-  --device_id 0 \
-  --foundation_dir artifacts/foundation/db5_full53 \
-  --fewshot_mode on \
-  --target_db5_keys E1_G01,E1_G02,E1_G03,E1_G04 \
-  --budgets 10,20,35,60 \
-  --seeds 11,22,33
+  --run_id event_finetune_v1
 ```
 
-说明：
+### 3) Convert to MindIR
 
-- `fewshot_mode=on` 会强制检查 `--recordings_manifest`。
-- 如果要“有则跑、无则跳过”，可用 `--fewshot_mode auto`。
+```bash
+python scripts/convert_event_onset.py \
+  --config configs/conversion_event_onset.yaml \
+  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
+  --run_root artifacts/runs \
+  --run_id event_convert_v1
+```
 
-## 3) 运行前预检
+## PI Runtime Command
+
+```bash
+python scripts/run_event_runtime.py \
+  --config configs/runtime_event_onset.yaml \
+  --backend lite
+```
+
+Standalone smoke:
+
+```bash
+python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend lite --standalone --duration_sec 10
+```
+
+## Key Artifacts
+
+Cloud outputs:
+- Foundation checkpoint
+- Finetuned event checkpoint
+- `models/event_onset.mindir`
+- `models/event_onset.model_metadata.json`
+- run summaries under `artifacts/runs/*`
+
+PI inputs:
+- `event_onset.mindir`
+- `event_onset.model_metadata.json`
+- `configs/runtime_event_onset.yaml`
+- `configs/event_actuation_mapping.yaml`
+
+## Preflight
 
 ```bash
 python scripts/preflight.py --mode local --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
 python scripts/preflight.py --mode ascend --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
 ```
 
-## 4) 常用脚本
+## Repository Hygiene
 
-- `scripts/pretrain_ninapro_db5_repr.py`：单轮 DB5 表征预训练
-- `scripts/pretrain_db5_repr_method_matrix.py`：方法矩阵（公共轨/内部轨）
-- `scripts/evaluate_event_fewshot_curve.py`：单独 few-shot 预算曲线评估
-- `scripts/preflight.py`：环境与数据前置检查
-
-## 5) 仓库卫生约定
-
-- `code/artifacts/runs/` 与 `code/artifacts/splits/*.json` 为运行产物，不入库。
-- `.ipynb_checkpoints/` 与 `__pycache__/` 不入库。
-- 若需保留结果用于汇报，请导出到仓库外部或发布工件系统。
+Generated run outputs and temp caches are not source-of-truth and should not be committed:
+- `code/artifacts/runs/**`
+- `code/artifacts/splits/*.json`
+- `**/__pycache__/`, `*.pyc`, `.ipynb_checkpoints/`, `.tmp_pytest*`
