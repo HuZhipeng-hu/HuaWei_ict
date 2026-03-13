@@ -6,6 +6,8 @@ import pytest
 
 from scripts.pretrain_db5_repr_method_matrix import (
     _compute_recommended_budget,
+    _parse_float_grid,
+    _parse_int_grid,
     _pretrain_rank_key,
     _rank_key,
     _resolve_fewshot_plan,
@@ -87,3 +89,23 @@ def test_pretrain_rank_key_prefers_val_f1_then_val_acc_then_test_f1() -> None:
     ]
     ranked = sorted(rows, key=_pretrain_rank_key)
     assert ranked[0]["pretrain_best_val_macro_f1"] == 0.11
+
+
+def test_parse_float_grid_parses_comma_values() -> None:
+    values = _parse_float_grid("0.05, 0.07,0.10", name="temperature_grid")
+    assert values == [0.05, 0.07, 0.10]
+
+
+def test_parse_int_grid_parses_comma_values() -> None:
+    values = _parse_int_grid("3,5,11", name="knn_k_grid")
+    assert values == [3, 5, 11]
+
+
+def test_parse_float_grid_rejects_empty() -> None:
+    with pytest.raises(ValueError, match="temperature_grid must contain at least one numeric value"):
+        _parse_float_grid(" , ", name="temperature_grid")
+
+
+def test_parse_int_grid_rejects_empty() -> None:
+    with pytest.raises(ValueError, match="knn_k_grid must contain at least one integer value"):
+        _parse_int_grid(" , ", name="knn_k_grid")

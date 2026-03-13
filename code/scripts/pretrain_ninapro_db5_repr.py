@@ -32,6 +32,7 @@ from ninapro_db5.repr_pretrain_utils import (
     resolve_repr_objective as _resolve_repr_objective,
     resolve_sampler_mode as _resolve_sampler_mode,
 )
+from shared.config import load_config
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, dump_yaml, ensure_run_dir
 from training.data.split_strategy import build_manifest
 from training.reporting import compute_classification_report, save_classification_report
@@ -672,6 +673,13 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         },
     )
 
+    sampler_cfg = config.training.sampler
+    sampler_snapshot = {
+        "type": str(getattr(sampler_cfg, "type", "")),
+        "hard_mining_ratio": float(getattr(sampler_cfg, "hard_mining_ratio", 0.0) or 0.0),
+        "confusion_pairs": list(getattr(sampler_cfg, "confusion_pairs", []) or []),
+    }
+
     summary = {
         "run_id": run_id,
         "checkpoint_path": str(encoder_ckpt_path),
@@ -687,6 +695,7 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         "projection_dim": int(args.projection_dim),
         "knn_k": int(args.knn_k),
         "sampler_mode": sampler_mode,
+        "sampler_snapshot": sampler_snapshot,
         "augmentation_profile": str(aug_params["profile"]),
         "augment_scale_min": float(aug_params["scale_min"]),
         "augment_scale_max": float(aug_params["scale_max"]),
@@ -782,16 +791,51 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fewshot_script", default="scripts/evaluate_event_fewshot_curve.py")
     parser.add_argument("--fewshot_config", default="configs/training_event_onset.yaml")
     parser.add_argument("--fewshot_data_dir", default="../data")
+    parser.add_argument("--fewshot_recordings_manifest", default=None)
     parser.add_argument("--fewshot_target_db5_keys", default="E1_G01,E1_G02,E1_G03,E1_G04")
     parser.add_argument("--fewshot_budgets", default="10,20,35,60")
     parser.add_argument("--fewshot_seeds", default="11,22,33")
     return parser
 
 
+def _resolve_existing_recordings_manifest(
+    *,
+    data_dir: str,
+    config_path: str,
+    manifest_arg: str | None,
+) -> str:
+    if str(manifest_arg or "").strip():
+        raw = Path(str(manifest_arg).strip())
+    else:
+        root = load_config(config_path)
+        data_cfg = dict(root.get("data", {}) or {})
+        default_rel = str(data_cfg.get("recordings_manifest_path") or "recordings_manifest.csv")
+        raw = Path(default_rel)
+
+    candidates = [raw]
+    if not raw.is_absolute():
+        candidates.insert(0, Path(data_dir) / raw)
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return str(candidate.resolve())
+
+    expected = candidates[0]
+    raise FileNotFoundError(
+        "run_downstream_fewshot=true requires recordings manifest with event metadata. "
+        f"Missing file: {expected}. "
+        "Fix: pass --fewshot_recordings_manifest <path/to/recordings_manifest.csv>."
+    )
+
+
 def _run_optional_fewshot(args: argparse.Namespace, *, encoder_checkpoint: str, run_dir: Path) -> None:
     enabled = bool(str(args.run_downstream_fewshot).strip().lower() == "true")
     if not enabled:
         return
+    manifest_path = _resolve_existing_recordings_manifest(
+        data_dir=str(args.fewshot_data_dir),
+        config_path=str(args.fewshot_config),
+        manifest_arg=args.fewshot_recordings_manifest,
+    )
     cmd = [
         sys.executable,
         str(args.fewshot_script),
@@ -815,6 +859,8 @@ def _run_optional_fewshot(args: argparse.Namespace, *, encoder_checkpoint: str, 
         str(args.fewshot_budgets),
         "--seeds",
         str(args.fewshot_seeds),
+        "--recordings_manifest",
+        str(manifest_path),
     ]
     subprocess.run(cmd, cwd=str(CODE_ROOT), check=True)
 

@@ -1,4 +1,4 @@
-"""Run DB5 representation pretraining method matrix with data-budget plateau early stop."""
+"""Run DB5 representation pretraining stage-2 matrix (pretrain-only, 4 rounds)."""
 
 from __future__ import annotations
 
@@ -15,65 +15,14 @@ CODE_ROOT = Path(__file__).resolve().parent.parent
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
+from ninapro_db5.config import load_db5_pretrain_config
+from ninapro_db5.dataset import DB5PretrainDatasetLoader
+from ninapro_db5.evaluate import _set_device
+from ninapro_db5.model import build_db5_encoder_model
+from scripts import pretrain_ninapro_db5_repr as repr_script
 from shared.run_utils import dump_json
+from training.data.split_strategy import build_manifest
 
-
-ROUND_LIBRARY: list[dict[str, object]] = [
-    {
-        "name": "baseline_supcon",
-        "repr_objective": "supcon",
-        "sampler_mode": "class_balanced",
-        "augmentation_profile": "mild",
-        "ce_weight": 0.0,
-        "learning_rate": 5e-4,
-        "weight_decay": 3e-4,
-    },
-    {
-        "name": "source_balanced_strong_aug",
-        "repr_objective": "supcon",
-        "sampler_mode": "class_source_balanced",
-        "augmentation_profile": "strong",
-        "ce_weight": 0.0,
-        "learning_rate": 5e-4,
-        "weight_decay": 3e-4,
-    },
-    {
-        "name": "joint_supcon_ce",
-        "repr_objective": "supcon_ce",
-        "sampler_mode": "class_source_balanced",
-        "augmentation_profile": "strong",
-        "ce_weight": 0.35,
-        "learning_rate": 5e-4,
-        "weight_decay": 3e-4,
-    },
-    {
-        "name": "joint_lr3e4",
-        "repr_objective": "supcon_ce",
-        "sampler_mode": "class_source_balanced",
-        "augmentation_profile": "strong",
-        "ce_weight": 0.35,
-        "learning_rate": 3e-4,
-        "weight_decay": 3e-4,
-    },
-    {
-        "name": "joint_wd1e3",
-        "repr_objective": "supcon_ce",
-        "sampler_mode": "class_source_balanced",
-        "augmentation_profile": "strong",
-        "ce_weight": 0.35,
-        "learning_rate": 3e-4,
-        "weight_decay": 1e-3,
-    },
-    {
-        "name": "joint_lr8e4",
-        "repr_objective": "supcon_ce",
-        "sampler_mode": "class_source_balanced",
-        "augmentation_profile": "strong",
-        "ce_weight": 0.35,
-        "learning_rate": 8e-4,
-        "weight_decay": 3e-4,
-    },
-]
 
 PUBLIC_RANK_RULE = "best_val_macro_f1 desc, best_val_acc desc, test_macro_f1 desc"
 FEWSHOT_RANK_RULE = "recommended_budget asc, macro_f1_mean desc, acc_mean desc, macro_f1_std asc"
@@ -110,6 +59,7 @@ def _write_csv(path: Path, rows: list[dict], fields: list[str]) -> None:
             writer.writerow({field: row.get(field) for field in fields})
 
 
+# Backward-compatible helpers retained for existing tests and downstream imports.
 def _compute_recommended_budget(curve_rows: list[dict], tolerance: float) -> tuple[int, dict]:
     if not curve_rows:
         raise RuntimeError("few-shot curve rows are empty.")
@@ -169,34 +119,305 @@ def _pretrain_rank_key(row: dict) -> tuple[float, float, float]:
     return (-val_f1, -val_acc, -test_f1)
 
 
+def _parse_float_grid(raw: str, *, name: str) -> list[float]:
+    values = []
+    for token in str(raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        values.append(float(token))
+    if not values:
+        raise ValueError(f"{name} must contain at least one numeric value")
+    return values
+
+
+def _parse_int_grid(raw: str, *, name: str) -> list[int]:
+    values = []
+    for token in str(raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        values.append(int(token))
+    if not values:
+        raise ValueError(f"{name} must contain at least one integer value")
+    return values
+
+
+def _safe_float_token(value: float) -> str:
+    token = f"{float(value):.4f}".rstrip("0").rstrip(".")
+    return token.replace("-", "m").replace(".", "p")
+
+
+def _as_pretrain_row(*, phase: str, candidate: str, run_id: str, summary: dict, temperature: float, projection_dim: int, knn_k: int) -> dict:
+    return {
+        "phase": phase,
+        "candidate": candidate,
+        "run_id": str(run_id),
+        "temperature": float(temperature),
+        "projection_dim": int(projection_dim),
+        "knn_k": int(knn_k),
+        "repr_objective": str(summary.get("repr_objective", "supcon")),
+        "sampler_mode": str(summary.get("sampler_mode", "class_source_balanced")),
+        "augmentation_profile": str(summary.get("augmentation_profile", "strong")),
+        "learning_rate": float(summary.get("learning_rate", 0.0) or 0.0),
+        "weight_decay": float(summary.get("weight_decay", 0.0) or 0.0),
+        "pretrain_best_val_macro_f1": float(summary.get("best_val_macro_f1", 0.0) or 0.0),
+        "pretrain_best_val_acc": float(summary.get("best_val_acc", 0.0) or 0.0),
+        "pretrain_test_macro_f1": float(summary.get("test_macro_f1", 0.0) or 0.0),
+        "pretrain_test_accuracy": float(summary.get("test_accuracy", 0.0) or 0.0),
+        "checkpoint_path": str(summary.get("checkpoint_path", "")),
+        "pretrain_summary_path": str(summary.get("offline_summary_path", "")),
+        "selected": False,
+    }
+
+
+def _build_pretrain_cmd(
+    args: argparse.Namespace,
+    *,
+    run_id: str,
+    temperature: float,
+    projection_dim: int,
+    knn_k: int,
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        "scripts/pretrain_ninapro_db5_repr.py",
+        "--config",
+        str(args.pretrain_config),
+        "--data_dir",
+        str(args.db5_data_dir),
+        "--run_root",
+        str(args.run_root),
+        "--run_id",
+        str(run_id),
+        "--device_target",
+        str(args.device_target),
+        "--device_id",
+        str(int(args.device_id)),
+        "--foundation_dir",
+        str(args.foundation_dir),
+        "--ms_mode",
+        str(args.ms_mode),
+        "--repr_objective",
+        "supcon",
+        "--sampler_mode",
+        "class_source_balanced",
+        "--augmentation_profile",
+        "strong",
+        "--ce_weight",
+        "0.0",
+        "--label_smoothing",
+        str(float(args.label_smoothing)),
+        "--learning_rate",
+        str(float(args.learning_rate)),
+        "--weight_decay",
+        str(float(args.weight_decay)),
+        "--epochs",
+        str(int(args.epochs)),
+        "--early_stopping_patience",
+        str(int(args.early_stopping_patience)),
+        "--temperature",
+        str(float(temperature)),
+        "--projection_dim",
+        str(int(projection_dim)),
+        "--knn_k",
+        str(int(knn_k)),
+        "--run_downstream_fewshot",
+        "false",
+    ]
+    if args.batch_size is not None:
+        cmd.extend(["--batch_size", str(int(args.batch_size))])
+    if args.manifest_use_source_metadata is not None:
+        cmd.extend(["--manifest_use_source_metadata", str(args.manifest_use_source_metadata).lower()])
+    return cmd
+
+
+def _run_pretrain_candidate(
+    *,
+    args: argparse.Namespace,
+    phase: str,
+    candidate: str,
+    run_id: str,
+    temperature: float,
+    projection_dim: int,
+    knn_k: int,
+) -> tuple[dict, str]:
+    stage = f"{phase}_{candidate}"
+    cmd = _build_pretrain_cmd(
+        args,
+        run_id=run_id,
+        temperature=temperature,
+        projection_dim=projection_dim,
+        knn_k=knn_k,
+    )
+    cmd_str = _run_checked(stage, cmd)
+    summary_path = Path(args.run_root) / run_id / "offline_summary.json"
+    summary = _load_json(summary_path)
+    summary["offline_summary_path"] = str(summary_path)
+    row = _as_pretrain_row(
+        phase=phase,
+        candidate=candidate,
+        run_id=run_id,
+        summary=summary,
+        temperature=temperature,
+        projection_dim=projection_dim,
+        knn_k=knn_k,
+    )
+    if not str(row.get("checkpoint_path", "")).strip():
+        raise RuntimeError(f"missing checkpoint_path in {summary_path}")
+    return row, cmd_str
+
+
+def _pick_best_pretrain(rows: list[dict]) -> dict:
+    if not rows:
+        raise RuntimeError("no pretrain rows available for ranking")
+    return sorted(rows, key=_pretrain_rank_key)[0]
+
+
+def _run4_knn_robustness(
+    *,
+    args: argparse.Namespace,
+    checkpoint_path: str,
+    knn_grid: list[int],
+    run_dir: Path,
+) -> dict:
+    config = load_db5_pretrain_config(str(args.pretrain_config))
+    config.data_dir = str(args.db5_data_dir)
+    if args.batch_size is not None:
+        config.training.batch_size = int(args.batch_size)
+    if args.manifest_use_source_metadata is not None:
+        config.manifest_use_source_metadata = bool(args.manifest_use_source_metadata)
+
+    loader = DB5PretrainDatasetLoader(str(config.data_dir), config)
+    samples, labels, source_ids, source_metadata = loader.load_all_with_sources(return_metadata=True)
+    class_names = loader.get_class_names()
+    if not class_names:
+        raise RuntimeError("DB5 class_names is empty in run4 evaluation.")
+
+    manifest = build_manifest(
+        labels,
+        source_ids,
+        seed=config.split_seed,
+        split_mode="grouped_file",
+        val_ratio=config.val_ratio,
+        test_ratio=config.test_ratio,
+        num_classes=len(class_names),
+        class_names=class_names,
+        manifest_strategy="v2",
+        source_metadata=source_metadata if config.manifest_use_source_metadata else None,
+    )
+    if repr_script._has_group_leakage(manifest):
+        raise RuntimeError("Group leakage detected in run4 kNN robustness manifest.")
+
+    train_idx = manifest.train_indices
+    val_idx = manifest.val_indices
+    test_idx = manifest.test_indices
+    train_x, train_y = samples[train_idx], labels[train_idx]
+    val_x, val_y = samples[val_idx], labels[val_idx]
+    test_x, test_y = samples[test_idx], labels[test_idx]
+
+    _set_device(mode=str(args.ms_mode), target=str(args.device_target), device_id=int(args.device_id))
+    encoder = build_db5_encoder_model(config)
+
+    try:
+        from mindspore import load_checkpoint, load_param_into_net
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("MindSpore is required for run4 kNN robustness evaluation") from exc
+
+    ckpt = str(checkpoint_path).strip()
+    if not ckpt:
+        raise RuntimeError("run4 robustness evaluation requires non-empty checkpoint path")
+    params = load_checkpoint(ckpt)
+    load_param_into_net(encoder, params)
+    encoder.set_train(False)
+
+    grid_rows: list[dict] = []
+    for k in knn_grid:
+        val_report = repr_script._evaluate_repr_knn(
+            encoder,
+            train_x=train_x,
+            train_y=train_y,
+            eval_x=val_x,
+            eval_y=val_y,
+            class_names=class_names,
+            batch_size=int(config.training.batch_size),
+            knn_k=int(k),
+        )
+        test_report = repr_script._evaluate_repr_knn(
+            encoder,
+            train_x=train_x,
+            train_y=train_y,
+            eval_x=test_x,
+            eval_y=test_y,
+            class_names=class_names,
+            batch_size=int(config.training.batch_size),
+            knn_k=int(k),
+        )
+        grid_rows.append(
+            {
+                "knn_k": int(k),
+                "val_macro_f1": float(val_report.get("macro_f1", 0.0)),
+                "val_acc": float(val_report.get("accuracy", 0.0)),
+                "test_macro_f1": float(test_report.get("macro_f1", 0.0)),
+                "test_accuracy": float(test_report.get("accuracy", 0.0)),
+            }
+        )
+
+    def _grid_rank_key(row: dict) -> tuple[float, float, float]:
+        return (
+            -float(row.get("val_macro_f1", 0.0)),
+            -float(row.get("val_acc", 0.0)),
+            -float(row.get("test_macro_f1", 0.0)),
+        )
+
+    best_row = sorted(grid_rows, key=_grid_rank_key)[0]
+    payload = {
+        "status": "completed",
+        "checkpoint_path": ckpt,
+        "rank_rule": PUBLIC_RANK_RULE,
+        "rows": grid_rows,
+        "best": best_row,
+    }
+    dump_json(run_dir / "run4_knn_robustness.json", payload)
+    _write_csv(
+        run_dir / "run4_knn_robustness.csv",
+        grid_rows,
+        fields=["knn_k", "val_macro_f1", "val_acc", "test_macro_f1", "test_accuracy"],
+    )
+    return payload
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DB5 representation method matrix. Public reproducibility mode is default (few-shot disabled); "
-            "few-shot can be enabled explicitly."
+            "DB5 representation pretraining stage-2 matrix: "
+            "Run1 baseline -> Run2 temperature search -> Run3 projection search -> Run4 kNN robustness."
         )
     )
     parser.add_argument("--run_root", default="artifacts/runs")
-    parser.add_argument("--run_prefix", default="db5_repr_matrix_v1")
+    parser.add_argument("--run_prefix", default="db5_repr_stage2_v1")
     parser.add_argument("--pretrain_config", default="configs/pretrain_ninapro_db5.yaml")
-    parser.add_argument("--fewshot_config", default="configs/training_event_onset.yaml")
     parser.add_argument("--db5_data_dir", default="../data_ninaproDB5")
-    parser.add_argument("--wearer_data_dir", default="../data")
-    parser.add_argument("--recordings_manifest", default=None)
-    parser.add_argument("--fewshot_mode", default="off", choices=["off", "auto", "on"])
     parser.add_argument("--foundation_dir", default="artifacts/foundation/db5_full53")
-    parser.add_argument("--target_db5_keys", default="E1_G01,E1_G02,E1_G03,E1_G04")
-    parser.add_argument("--budgets", default="10,20,35,60")
-    parser.add_argument("--seeds", default="11,22,33")
     parser.add_argument("--device_target", default="Ascend", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)
-    parser.add_argument("--max_rounds", type=int, default=6)
-    parser.add_argument("--plateau_patience", type=int, default=2)
-    parser.add_argument("--budget_tolerance", type=float, default=0.02)
-    parser.add_argument("--label_smoothing", type=float, default=0.1)
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--ms_mode", default="graph", choices=["graph", "pynative"])
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--early_stopping_patience", type=int, default=15)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--learning_rate", type=float, default=5e-4)
+    parser.add_argument("--weight_decay", type=float, default=3e-4)
+    parser.add_argument("--label_smoothing", type=float, default=0.1)
+    parser.add_argument("--baseline_temperature", type=float, default=0.07)
+    parser.add_argument("--baseline_projection_dim", type=int, default=128)
+    parser.add_argument("--baseline_knn_k", type=int, default=5)
+    parser.add_argument("--temperature_grid", default="0.05,0.07,0.10")
+    parser.add_argument("--projection_dim_grid", default="128,192,256")
+    parser.add_argument("--knn_k_grid", default="3,5,11")
+    parser.add_argument("--min_val_f1_gain", type=float, default=0.01)
+    parser.add_argument("--fewshot_mode", default="off", choices=["off", "auto", "on"])
+    parser.add_argument("--recordings_manifest", default=None)
+    parser.add_argument("--manifest_use_source_metadata", choices=["true", "false"], default=None)
     return parser
 
 
@@ -207,231 +428,168 @@ def main() -> None:
     run_dir = run_root / f"{args.run_prefix}_summary"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    round_specs = ROUND_LIBRARY[: max(1, int(args.max_rounds))]
+    temperature_grid = _parse_float_grid(args.temperature_grid, name="temperature_grid")
+    projection_grid = _parse_int_grid(args.projection_dim_grid, name="projection_dim_grid")
+    knn_grid = _parse_int_grid(args.knn_k_grid, name="knn_k_grid")
+
     rows: list[dict] = []
     commands: list[dict] = []
-    plateau_streak = 0
-    prev_budget: int | None = None
-    stopped_early = False
-    stop_reason = ""
     last_stage = "setup"
     last_cmd = ""
-    default_public_command = (
-        "python scripts/pretrain_db5_repr_method_matrix.py "
-        f"--pretrain_config {args.pretrain_config} --db5_data_dir {args.db5_data_dir} "
-        f"--run_root {args.run_root} --run_prefix {args.run_prefix} "
-        f"--device_target {args.device_target} --device_id {int(args.device_id)} --fewshot_mode off"
-    )
+    low_return_zone = False
+    stop_reason = ""
+    run4_payload: dict | None = None
+
     fewshot_mode = str(args.fewshot_mode).strip().lower()
-    run_fewshot = False
-    fewshot_status = "skipped"
-    fewshot_skip_reason = ""
+    if fewshot_mode != "off":
+        fewshot_status = "skipped"
+        fewshot_skip_reason = "stage2 matrix is pretrain-only; few-shot is intentionally disabled"
+    else:
+        fewshot_status = "skipped"
+        fewshot_skip_reason = "fewshot_mode=off"
 
     try:
-        last_stage = "fewshot_gate"
-        run_fewshot, fewshot_status, fewshot_skip_reason = _resolve_fewshot_plan(
-            mode=fewshot_mode,
-            recordings_manifest=args.recordings_manifest,
+        # Run-1: baseline reproducibility rerun (fixed backbone + baseline hyperparams).
+        last_stage = "run_1_baseline"
+        run1_id = f"{args.run_prefix}_r1_base"
+        row1, cmd_str = _run_pretrain_candidate(
+            args=args,
+            phase="run_1",
+            candidate="baseline",
+            run_id=run1_id,
+            temperature=float(args.baseline_temperature),
+            projection_dim=int(args.baseline_projection_dim),
+            knn_k=int(args.baseline_knn_k),
         )
-        if not run_fewshot and not fewshot_skip_reason:
-            fewshot_skip_reason = f"fewshot_mode={fewshot_mode}"
+        row1["selected"] = True
+        last_cmd = cmd_str
+        rows.append(row1)
+        commands.append({"stage": last_stage, "command": cmd_str})
 
-        for idx, spec in enumerate(round_specs, start=1):
-            last_stage = f"round_{idx}_pretrain"
-            pretrain_run_id = f"{args.run_prefix}_r{idx}_repr"
-            pretrain_cmd = [
-                sys.executable,
-                "scripts/pretrain_ninapro_db5_repr.py",
-                "--config",
-                str(args.pretrain_config),
-                "--data_dir",
-                str(args.db5_data_dir),
-                "--run_root",
-                str(args.run_root),
-                "--run_id",
-                pretrain_run_id,
-                "--device_target",
-                str(args.device_target),
-                "--device_id",
-                str(int(args.device_id)),
-                "--foundation_dir",
-                str(args.foundation_dir),
-                "--ms_mode",
-                str(args.ms_mode),
-                "--repr_objective",
-                str(spec["repr_objective"]),
-                "--sampler_mode",
-                str(spec["sampler_mode"]),
-                "--augmentation_profile",
-                str(spec["augmentation_profile"]),
-                "--ce_weight",
-                str(float(spec["ce_weight"])),
-                "--label_smoothing",
-                str(float(args.label_smoothing)),
-                "--learning_rate",
-                str(float(spec["learning_rate"])),
-                "--weight_decay",
-                str(float(spec["weight_decay"])),
-                "--run_downstream_fewshot",
-                "false",
-            ]
-            if args.epochs is not None:
-                pretrain_cmd.extend(["--epochs", str(int(args.epochs))])
-            if args.batch_size is not None:
-                pretrain_cmd.extend(["--batch_size", str(int(args.batch_size))])
-            last_cmd = _run_checked(last_stage, pretrain_cmd)
-            commands.append({"stage": last_stage, "command": last_cmd})
-            pretrain_summary = _load_json(run_root / pretrain_run_id / "offline_summary.json")
-            encoder_ckpt = str(pretrain_summary.get("checkpoint_path", "")).strip()
-            if not encoder_ckpt:
-                raise RuntimeError(f"missing checkpoint_path in {pretrain_run_id}/offline_summary.json")
-
-            row = {
-                "round": int(idx),
-                "name": str(spec["name"]),
-                "pretrain_run_id": pretrain_run_id,
-                "fewshot_run_id": "",
-                "repr_objective": str(spec["repr_objective"]),
-                "sampler_mode": str(spec["sampler_mode"]),
-                "augmentation_profile": str(spec["augmentation_profile"]),
-                "learning_rate": float(spec["learning_rate"]),
-                "weight_decay": float(spec["weight_decay"]),
-                "pretrain_best_val_macro_f1": float(pretrain_summary.get("best_val_macro_f1", 0.0)),
-                "pretrain_best_val_acc": float(pretrain_summary.get("best_val_acc", 0.0)),
-                "pretrain_test_macro_f1": float(pretrain_summary.get("test_macro_f1", 0.0)),
-                "pretrain_test_accuracy": float(pretrain_summary.get("test_accuracy", 0.0)),
-                "encoder_checkpoint_path": encoder_ckpt,
-                "pretrain_summary_path": str(run_root / pretrain_run_id / "offline_summary.json"),
-                "fewshot_status": fewshot_status if not run_fewshot else "enabled",
-                "fewshot_skip_reason": fewshot_skip_reason if not run_fewshot else "",
-                "recommended_budget": None,
-                "recommended_macro_f1_mean": None,
-                "recommended_acc_mean": None,
-                "recommended_macro_f1_std": None,
-                "best_budget": None,
-                "plateau_streak": int(plateau_streak),
-                "fewshot_report_path": "",
-            }
-
-            if run_fewshot:
-                last_stage = f"round_{idx}_fewshot"
-                fewshot_run_id = f"{args.run_prefix}_r{idx}_fewshot"
-                fewshot_cmd = [
-                    sys.executable,
-                    "scripts/evaluate_event_fewshot_curve.py",
-                    "--config",
-                    str(args.fewshot_config),
-                    "--data_dir",
-                    str(args.wearer_data_dir),
-                    "--run_root",
-                    str(args.run_root),
-                    "--run_id",
-                    fewshot_run_id,
-                    "--device_target",
-                    str(args.device_target),
-                    "--device_id",
-                    str(int(args.device_id)),
-                    "--pretrained_emg_checkpoint",
-                    encoder_ckpt,
-                    "--target_db5_keys",
-                    str(args.target_db5_keys),
-                    "--budgets",
-                    str(args.budgets),
-                    "--seeds",
-                    str(args.seeds),
-                    "--recordings_manifest",
-                    str(args.recordings_manifest).strip(),
-                ]
-                last_cmd = _run_checked(last_stage, fewshot_cmd)
-                commands.append({"stage": last_stage, "command": last_cmd})
-                fewshot_report = _load_json(run_root / fewshot_run_id / "downstream_fewshot_report.json")
-                curve_rows = list(fewshot_report.get("curve_summary") or [])
-                recommended_budget, recommended_row = _compute_recommended_budget(
-                    curve_rows,
-                    tolerance=float(args.budget_tolerance),
-                )
-                plateau_streak = _update_plateau_streak(
-                    previous_budget=prev_budget,
-                    current_budget=int(recommended_budget),
-                    current_streak=plateau_streak,
-                )
-                row.update(
-                    {
-                        "fewshot_run_id": fewshot_run_id,
-                        "fewshot_status": "enabled",
-                        "recommended_budget": int(recommended_budget),
-                        "recommended_macro_f1_mean": float(recommended_row.get("macro_f1_mean", 0.0)),
-                        "recommended_acc_mean": float(recommended_row.get("acc_mean", 0.0)),
-                        "recommended_macro_f1_std": float(recommended_row.get("macro_f1_std", 0.0)),
-                        "best_budget": int(fewshot_report.get("best_budget", recommended_budget)),
-                        "best_budget_row": dict(fewshot_report.get("best_budget_row") or {}),
-                        "recommended_budget_row": recommended_row,
-                        "plateau_streak": int(plateau_streak),
-                        "fewshot_report_path": str(run_root / fewshot_run_id / "downstream_fewshot_report.json"),
-                    }
-                )
-                prev_budget = int(recommended_budget)
-
+        # Run-2: temperature search (3 points)
+        run2_rows: list[dict] = []
+        for temp in temperature_grid:
+            token = _safe_float_token(temp)
+            run_id = f"{args.run_prefix}_r2_t_{token}"
+            last_stage = f"run_2_temperature_{token}"
+            row, cmd_str = _run_pretrain_candidate(
+                args=args,
+                phase="run_2",
+                candidate=f"temp_{token}",
+                run_id=run_id,
+                temperature=float(temp),
+                projection_dim=int(args.baseline_projection_dim),
+                knn_k=int(args.baseline_knn_k),
+            )
+            run2_rows.append(row)
+            last_cmd = cmd_str
             rows.append(row)
-            if run_fewshot and plateau_streak >= int(args.plateau_patience):
-                stopped_early = True
-                stop_reason = (
-                    f"recommended budget did not improve for {int(args.plateau_patience)} consecutive rounds"
-                )
-                break
+            commands.append({"stage": last_stage, "command": cmd_str})
+        best_run2 = _pick_best_pretrain(run2_rows)
+        best_run2["selected"] = True
+
+        # Run-3: projection search (3 points) conditioned on best temperature.
+        run3_rows: list[dict] = []
+        best_temp = float(best_run2["temperature"])
+        for proj in projection_grid:
+            run_id = f"{args.run_prefix}_r3_p_{int(proj)}"
+            last_stage = f"run_3_projection_{int(proj)}"
+            row, cmd_str = _run_pretrain_candidate(
+                args=args,
+                phase="run_3",
+                candidate=f"proj_{int(proj)}",
+                run_id=run_id,
+                temperature=best_temp,
+                projection_dim=int(proj),
+                knn_k=int(args.baseline_knn_k),
+            )
+            run3_rows.append(row)
+            last_cmd = cmd_str
+            rows.append(row)
+            commands.append({"stage": last_stage, "command": cmd_str})
+        best_run3 = _pick_best_pretrain(run3_rows)
+        best_run3["selected"] = True
+
+        run3_gain = float(best_run3["pretrain_best_val_macro_f1"]) - float(row1["pretrain_best_val_macro_f1"])
+        if run3_gain < float(args.min_val_f1_gain):
+            low_return_zone = True
+            stop_reason = (
+                f"run3 gain below threshold: gain={run3_gain:.4f} < min_val_f1_gain={float(args.min_val_f1_gain):.4f}"
+            )
+        else:
+            # Run-4: kNN robustness grid on Run-3 best checkpoint (evaluation-only, no retraining).
+            last_stage = "run_4_knn_robustness"
+            checkpoint_path = str(best_run3.get("checkpoint_path", "")).strip()
+            if not checkpoint_path:
+                raise RuntimeError("run_4_knn_robustness requires non-empty checkpoint_path from run_3 best")
+            run4_payload = _run4_knn_robustness(
+                args=args,
+                checkpoint_path=checkpoint_path,
+                knn_grid=knn_grid,
+                run_dir=run_dir,
+            )
+            commands.append(
+                {
+                    "stage": last_stage,
+                    "command": "internal_eval:run_4_knn_robustness",
+                    "checkpoint_path": checkpoint_path,
+                    "knn_grid": knn_grid,
+                }
+            )
 
     except Exception as exc:
+        default_cmd = (
+            "python scripts/pretrain_db5_repr_method_matrix.py "
+            f"--run_prefix {args.run_prefix} --db5_data_dir {args.db5_data_dir} --fewshot_mode off"
+        )
         dump_json(
             run_dir / "repr_method_matrix_failure_report.json",
             {
                 "status": "failed",
                 "stage": str(last_stage),
                 "root_cause": str(exc),
-                "next_command": str(last_cmd or default_public_command),
+                "next_command": str(last_cmd or default_cmd),
                 "generated_at_unix": int(time.time()),
             },
         )
         raise
 
     if not rows:
-        raise RuntimeError("no successful method-matrix rounds.")
-    best_pretrain = sorted(rows, key=_pretrain_rank_key)[0]
-    fewshot_rows = [row for row in rows if row.get("recommended_budget") is not None]
-    best_fewshot = sorted(fewshot_rows, key=_rank_key)[0] if fewshot_rows else None
-    elapsed_minutes = float((time.time() - start_ts) / 60.0)
+        raise RuntimeError("no successful stage2 pretrain rows")
 
-    public_cmd_template = (
-        "python scripts/pretrain_db5_repr_method_matrix.py "
-        "--fewshot_mode off --db5_data_dir ../data_ninaproDB5 --run_prefix <run_id>"
-    )
-    internal_cmd_template = (
-        "python scripts/pretrain_db5_repr_method_matrix.py "
-        "--fewshot_mode on --recordings_manifest <path/to/recordings_manifest.csv> "
-        "--db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data --run_prefix <run_id>"
-    )
+    best_pretrain = _pick_best_pretrain(rows)
+    elapsed_minutes = float((time.time() - start_ts) / 60.0)
 
     matrix_payload = {
         "run_prefix": str(args.run_prefix),
         "fewshot_mode": fewshot_mode,
-        "fewshot_status": "enabled" if run_fewshot else fewshot_status,
-        "fewshot_skip_reason": "" if run_fewshot else fewshot_skip_reason,
-        "recordings_manifest": str(args.recordings_manifest or ""),
+        "fewshot_status": fewshot_status,
+        "fewshot_skip_reason": fewshot_skip_reason,
         "public_rank_rule": PUBLIC_RANK_RULE,
         "fewshot_rank_rule": FEWSHOT_RANK_RULE,
-        "budget_tolerance": float(args.budget_tolerance),
-        "plateau_patience": int(args.plateau_patience),
-        "max_rounds": int(args.max_rounds),
-        "stopped_early": bool(stopped_early),
-        "stop_reason": str(stop_reason),
-        "best_pretrain_run": best_pretrain,
-        "best_pretrain_round": int(best_pretrain["round"]),
-        "best_fewshot_run": best_fewshot,
-        "best_fewshot_round": int(best_fewshot["round"]) if best_fewshot else None,
-        "recommended_budget": int(best_fewshot["recommended_budget"]) if best_fewshot else None,
-        "command_templates": {
-            "public_pretrain_only": public_cmd_template,
-            "internal_with_fewshot": internal_cmd_template,
+        "fixed_backbone": {
+            "repr_objective": "supcon",
+            "sampler_mode": "class_source_balanced",
+            "augmentation_profile": "strong",
+            "ce_weight": 0.0,
         },
+        "search_space": {
+            "temperature_grid": temperature_grid,
+            "projection_dim_grid": projection_grid,
+            "knn_k_grid": knn_grid,
+        },
+        "run_1_baseline": row1,
+        "run_2_best": best_run2,
+        "run_3_best": best_run3,
+        "run3_minus_run1_val_f1_gain": float(
+            float(best_run3["pretrain_best_val_macro_f1"]) - float(row1["pretrain_best_val_macro_f1"])
+        ),
+        "min_val_f1_gain_threshold": float(args.min_val_f1_gain),
+        "entered_low_return_zone": bool(low_return_zone),
+        "stop_reason": str(stop_reason),
+        "run_4_knn_robustness": run4_payload,
+        "best_pretrain_run": best_pretrain,
+        "best_pretrain_run_id": str(best_pretrain.get("run_id", "")),
         "rows": rows,
         "commands": commands,
         "elapsed_minutes": elapsed_minutes,
@@ -441,8 +599,13 @@ def main() -> None:
         run_dir / "db5_repr_method_matrix_summary.csv",
         rows,
         fields=[
-            "round",
-            "name",
+            "phase",
+            "candidate",
+            "selected",
+            "run_id",
+            "temperature",
+            "projection_dim",
+            "knn_k",
             "repr_objective",
             "sampler_mode",
             "augmentation_profile",
@@ -452,55 +615,50 @@ def main() -> None:
             "pretrain_best_val_acc",
             "pretrain_test_macro_f1",
             "pretrain_test_accuracy",
-            "fewshot_status",
-            "fewshot_skip_reason",
-            "recommended_budget",
-            "recommended_macro_f1_mean",
-            "recommended_acc_mean",
-            "recommended_macro_f1_std",
-            "best_budget",
-            "plateau_streak",
-            "pretrain_run_id",
-            "fewshot_run_id",
-            "encoder_checkpoint_path",
+            "checkpoint_path",
             "pretrain_summary_path",
-            "fewshot_report_path",
         ],
     )
 
     card = "\n".join(
         [
-            "# DB5 Repr Method Matrix Repro Card",
+            "# DB5 Repr Stage-2 Matrix Repro Card",
             "",
             "## Goal",
-            "- public reproducibility: foundation pretraining with DB5 only",
-            "- few-shot is optional transfer evaluation (internal extension)",
-            "- no personal calibration data required",
+            "- strengthen DB5 foundation representation pretraining",
+            "- keep public reproducibility track pretrain-only",
             "",
-            "## Public Track (Default)",
-            f"- fewshot_mode: `{fewshot_mode}`",
-            f"- best_pretrain_round: `{best_pretrain['round']}` ({best_pretrain['name']})",
-            f"- best_val_macro_f1: `{float(best_pretrain.get('pretrain_best_val_macro_f1', 0.0)):.4f}`",
-            f"- best_val_acc: `{float(best_pretrain.get('pretrain_best_val_acc', 0.0)):.4f}`",
-            f"- test_macro_f1: `{float(best_pretrain.get('pretrain_test_macro_f1', 0.0)):.4f}`",
-            f"- encoder_checkpoint: `{best_pretrain['encoder_checkpoint_path']}`",
+            "## Fixed Backbone",
+            "- repr_objective: `supcon`",
+            "- sampler_mode: `class_source_balanced`",
+            "- augmentation_profile: `strong`",
+            "",
+            "## Stage Results",
+            f"- run_1_baseline: `{row1['run_id']}` val_f1={float(row1['pretrain_best_val_macro_f1']):.4f}",
+            f"- run_2_best: `{best_run2['run_id']}` temp={float(best_run2['temperature']):.4f} val_f1={float(best_run2['pretrain_best_val_macro_f1']):.4f}",
+            f"- run_3_best: `{best_run3['run_id']}` proj={int(best_run3['projection_dim'])} val_f1={float(best_run3['pretrain_best_val_macro_f1']):.4f}",
+            f"- run3_gain_vs_run1: `{float(best_run3['pretrain_best_val_macro_f1']) - float(row1['pretrain_best_val_macro_f1']):.4f}`",
+            f"- low_return_zone: `{bool(low_return_zone)}`",
+            f"- stop_reason: `{stop_reason}`",
+            f"- run_4_status: `{'completed' if run4_payload else 'skipped'}`",
+            f"- run_4_best_knn_k: `{int(run4_payload['best']['knn_k']) if run4_payload else ''}`",
+            "",
+            "## Best Pretrain",
+            f"- run_id: `{best_pretrain['run_id']}`",
+            f"- best_val_macro_f1: `{float(best_pretrain['pretrain_best_val_macro_f1']):.4f}`",
+            f"- best_val_acc: `{float(best_pretrain['pretrain_best_val_acc']):.4f}`",
+            f"- test_macro_f1: `{float(best_pretrain['pretrain_test_macro_f1']):.4f}`",
+            f"- checkpoint: `{best_pretrain['checkpoint_path']}`",
             f"- public_rank_rule: `{PUBLIC_RANK_RULE}`",
             "",
-            "## Internal Few-shot Track",
-            f"- fewshot_status: `{'enabled' if run_fewshot else fewshot_status}`",
-            f"- fewshot_skip_reason: `{'' if run_fewshot else fewshot_skip_reason}`",
-            f"- recommended_budget: `{int(best_fewshot['recommended_budget']) if best_fewshot else ''}`",
-            f"- fewshot_rank_rule: `{FEWSHOT_RANK_RULE}`",
-            "",
             "## Commands",
-            f"- public_pretrain_only: `{public_cmd_template}`",
-            f"- internal_with_fewshot: `{internal_cmd_template}`",
+            "- public_pretrain_only: `python scripts/pretrain_db5_repr_method_matrix.py --fewshot_mode off --db5_data_dir ../data_ninaproDB5 --run_prefix <run_id>`",
             "",
             "## Artifacts",
-            f"- stopped_early: `{stopped_early}`",
-            f"- stop_reason: `{stop_reason}`",
             f"- summary_json: `{run_dir / 'db5_repr_method_matrix_summary.json'}`",
             f"- summary_csv: `{run_dir / 'db5_repr_method_matrix_summary.csv'}`",
+            f"- run4_knn_json: `{run_dir / 'run4_knn_robustness.json'}`",
+            f"- run4_knn_csv: `{run_dir / 'run4_knn_robustness.csv'}`",
         ]
     )
     (run_dir / "referee_repro_card.md").write_text(card, encoding="utf-8")
