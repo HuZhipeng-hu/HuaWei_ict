@@ -37,6 +37,9 @@ public class EmgWebSocketHandler extends TextWebSocketHandler {
     /** 当前处理的路径类型 (session → "device" | "app") */
     private final Map<String, String> sessionTypes = new ConcurrentHashMap<>();
 
+    /** App 客户端当前选择的训练手势 (sessionId → gesture) */
+    private final Map<String, String> selectedGestures = new ConcurrentHashMap<>();
+
     @Autowired
     @Lazy
     private EmgDataService emgDataService;
@@ -81,6 +84,7 @@ public class EmgWebSocketHandler extends TextWebSocketHandler {
             log.info("[WS] 设备端断开: {}", sessionId);
         } else if ("app".equals(type)) {
             appSessions.remove(sessionId);
+            selectedGestures.remove(sessionId); // 清理手势选择信息
             log.info("[WS] App断开: {} | 剩余App连接: {}", sessionId, appSessions.size());
         }
     }
@@ -133,7 +137,7 @@ public class EmgWebSocketHandler extends TextWebSocketHandler {
     }
 
     /**
-     * 处理 App 客户端消息（如请求历史数据）
+     * 处理 App 客户端消息（获取最新数据、选择训练手势等）
      */
     private void handleAppMessage(WebSocketSession session, String payload) {
         try {
@@ -141,9 +145,34 @@ public class EmgWebSocketHandler extends TextWebSocketHandler {
             String action = json.getString("action");
 
             if ("get_latest".equals(action)) {
+                // 请求最新数据
                 Map<String, Object> latest = emgDataService.getLatestFrame();
                 session.sendMessage(new TextMessage(JSON.toJSONString(latest)));
+                
+            } else if ("select_gesture".equals(action)) {
+                // 选择训练手势
+                String gesture = json.getString("gesture");
+                String sessionId = session.getId();
+                selectedGestures.put(sessionId, gesture);
+                log.info("[WS] App [{}] 选择手势: {}", sessionId, gesture);
+                
+                // 发送确认消息
+                JSONObject ack = new JSONObject();
+                ack.put("type", "gesture_selected");
+                ack.put("gesture", gesture);
+                ack.put("timestamp", System.currentTimeMillis());
+                session.sendMessage(new TextMessage(ack.toJSONString()));
+                
+            } else if ("start_training".equals(action)) {
+                // 开始训练（可选：记录训练状态）
+                String gesture = selectedGestures.getOrDefault(session.getId(), "unknown");
+                log.info("[WS] App [{}] 开始训练手势: {}", session.getId(), gesture);
+                
+            } else if ("stop_training".equals(action)) {
+                // 停止训练
+                log.info("[WS] App [{}] 停止训练", session.getId());
             }
+            
             // 可扩展更多 App 端交互命令
         } catch (Exception e) {
             log.error("[WS] 解析App消息失败: {}", e.getMessage());
@@ -169,6 +198,29 @@ public class EmgWebSocketHandler extends TextWebSocketHandler {
                 appSessions.remove(id);
             }
         });
+    }
+
+    // ======================== 工具方法 ========================
+
+    /**
+     * 获取指定会话当前选择的手势
+     */
+    public String getSelectedGesture(String sessionId) {
+        return selectedGestures.get(sessionId);
+    }
+
+    /**
+     * 向特定App客户端发送消息
+     */
+    public void sendToApp(String sessionId, String message) {
+        WebSocketSession session = appSessions.get(sessionId);
+        if (session != null && session.isOpen()) {
+            try {
+                session.sendMessage(new TextMessage(message));
+            } catch (IOException e) {
+                log.warn("发送消息到App [{}] 失败: {}", sessionId, e.getMessage());
+            }
+        }
     }
 
     /**

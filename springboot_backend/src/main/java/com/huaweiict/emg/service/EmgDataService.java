@@ -40,7 +40,7 @@ public class EmgDataService extends ServiceImpl<EmgFrameMapper, EmgFrame> {
     @Autowired
     private EmgWebSocketHandler webSocketHandler;
 
-    /** 写入缓冲队列 */
+    /** 写入缓冲队列（已废弃，新架构不再自动保存） */
     private final ConcurrentLinkedQueue<EmgFrame> writeBuffer = new ConcurrentLinkedQueue<>();
 
     /** 上一次检测到的手势（用于事件去重） */
@@ -48,23 +48,30 @@ public class EmgDataService extends ServiceImpl<EmgFrameMapper, EmgFrame> {
 
     /** 最新一帧数据缓存（供 REST API 查询） */
     private volatile Map<String, Object> latestFrame = new HashMap<>();
+    
+    /** 
+     * 数据缓存队列（用于数据标注）
+     * 保留最近10分钟的数据，供App标注时使用
+     * 假设 50fps，10分钟 = 30000 帧
+     */
+    private final int MAX_CACHE_SIZE = 30000;
+    private final ArrayList<Map<String, Object>> dataCache = new ArrayList<>(MAX_CACHE_SIZE);
 
     // ======================== 数据接收 ========================
 
     /**
      * 处理单帧数据（来自 WebSocket 或 HTTP）
+     * 
+     * 新架构：
+     * - 数据默认【不】保存到MySQL
+     * - 仅缓存在内存中，供App标注时使用
+     * - App发起标注请求后才保存到emg_labeled_data表
      */
     public void processFrame(String deviceId, EmgFrameDTO dto) {
-        // 1. 构建实体
-        EmgFrame frame = convertToEntity(deviceId, dto);
-
-        // 2. 加入写入缓冲（异步批量写入）
-        writeBuffer.add(frame);
-
-        // 3. 更新最新帧缓存
+        // 1. 构建帧数据Map
         Map<String, Object> frameMap = new HashMap<>();
-        frameMap.put("deviceId", deviceId);
-        frameMap.put("deviceTs", dto.getDevice_ts());
+        frameMap.put("device_id", deviceId);
+        frameMap.put("device_ts", dto.getDevice_ts());
         frameMap.put("emg", dto.getEmg());
         frameMap.put("acc", dto.getAcc());
         frameMap.put("gyro", dto.getGyro());
@@ -72,13 +79,24 @@ public class EmgDataService extends ServiceImpl<EmgFrameMapper, EmgFrame> {
         frameMap.put("battery", dto.getBattery());
         frameMap.put("gesture", dto.getGesture());
         frameMap.put("confidence", dto.getConfidence());
-        frameMap.put("serverTime", LocalDateTime.now().toString());
+        frameMap.put("server_time", LocalDateTime.now());
+        frameMap.put("timestamp", System.currentTimeMillis());
+        
+        // 2. 添加到缓存（FIFO，满了删除最旧的）
+        synchronized (dataCache) {
+            if (dataCache.size() >= MAX_CACHE_SIZE) {
+                dataCache.remove(0);  // 删除最旧的数据
+            }
+            dataCache.add(frameMap);
+        }
+        
+        // 3. 更新最新帧缓存（供REST API快速查询）
         latestFrame = frameMap;
 
         // 4. 实时推送至所有连接的 App 客户端
         webSocketHandler.broadcastToApps(JSON.toJSONString(frameMap));
 
-        // 5. 手势事件检测
+        // 5. 手势事件检测（保留原有逻辑）
         if (dto.getGesture() != null && !dto.getGesture().equals(lastGesture)
                 && !"unknown".equals(dto.getGesture())) {
             saveGestureEvent(deviceId, dto.getGesture(), dto.getConfidence());
@@ -124,19 +142,19 @@ public class EmgDataService extends ServiceImpl<EmgFrameMapper, EmgFrame> {
     // ======================== 手势事件 ========================
 
     private void saveGestureEvent(String deviceId, String gesture, Float confidence) {
-        GestureEvent event = new GestureEvent();
-        event.setDeviceId(deviceId);
-        event.setGesture(gesture);
-        event.setConfidence(confidence);
-        event.setEventTime(LocalDateTime.now());
         try {
+            GestureEvent event = new GestureEvent();
+            event.setDeviceId(deviceId);
+            event.setGesture(gesture);
+            event.setConfidence(confidence);
+            event.setEventTime(LocalDateTime.now());
             gestureEventMapper.insert(event);
         } catch (Exception e) {
-            log.error("写入手势事件失败: {}", e.getMessage());
+            log.error("保存手势事件失败: {}", e.getMessage());
         }
     }
 
-    // ======================== 查询接口 ========================
+    // ======================== 缓存查询接口 ========================
 
     /**
      * 获取最新一帧
@@ -144,6 +162,63 @@ public class EmgDataService extends ServiceImpl<EmgFrameMapper, EmgFrame> {
     public Map<String, Object> getLatestFrame() {
         return latestFrame;
     }
+    
+    /**
+     * 从缓存中获取指定时间范围的帧数据
+     * 用于数据标注功能
+     * 
+     * @param deviceId 设备ID
+     * @param startTime 开始时间
+     * @param endTime 结束时间
+     * @return 帧数据列表
+     */
+    public List<Map<String, Object>> getCachedFrames(String deviceId, LocalDateTime startTime, LocalDateTime endTime) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        
+        synchronized (dataCache) {
+            for (Map<String, Object> frame : dataCache) {
+                // 检查设备ID
+                if (!deviceId.equals(frame.get("device_id"))) {
+                    continue;
+                }
+                
+                // 检查时间范围
+                LocalDateTime frameTime = (LocalDateTime) frame.get("server_time");
+                if (frameTime != null && 
+                    !frameTime.isBefore(startTime) && 
+                    !frameTime.isAfter(endTime)) {
+                    result.add(new HashMap<>(frame));  // 返回副本，避免外部修改
+                }
+            }
+        }
+        
+        log.debug("从缓存获取数据: 设备={}, 时间范围={}~{}, 帧数={}", 
+                deviceId, startTime, endTime, result.size());
+        
+        return result;
+    }
+    
+    /**
+     * 获取缓存统计信息
+     */
+    public Map<String, Object> getCacheStatistics() {
+        synchronized (dataCache) {
+            Map<String, Object> stats = new HashMap<>();
+            stats.put("cache_size", dataCache.size());
+            stats.put("max_cache_size", MAX_CACHE_SIZE);
+            
+            if (!dataCache.isEmpty()) {
+                LocalDateTime oldest = (LocalDateTime) dataCache.get(0).get("server_time");
+                LocalDateTime newest = (LocalDateTime) dataCache.get(dataCache.size() - 1).get("server_time");
+                stats.put("oldest_time", oldest);
+                stats.put("newest_time", newest);
+            }
+            
+            return stats;
+        }
+    }
+
+    // ======================== 查询接口 ========================
 
     /**
      * 查询历史数据
