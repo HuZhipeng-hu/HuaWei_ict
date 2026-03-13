@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from scripts.pretrain_db5_repr_method_matrix import (
     _compute_recommended_budget,
+    _pretrain_rank_key,
     _rank_key,
+    _resolve_fewshot_plan,
     _update_plateau_streak,
 )
 
@@ -44,3 +50,40 @@ def test_update_plateau_streak_increments_when_budget_not_improving() -> None:
     assert _update_plateau_streak(previous_budget=35, current_budget=60, current_streak=1) == 2
     assert _update_plateau_streak(previous_budget=35, current_budget=20, current_streak=2) == 0
 
+
+def test_resolve_fewshot_plan_off_and_auto_without_manifest() -> None:
+    enabled, status, reason = _resolve_fewshot_plan(mode="off", recordings_manifest=None)
+    assert enabled is False
+    assert status == "skipped"
+    assert "fewshot_mode=off" in reason
+
+    enabled, status, reason = _resolve_fewshot_plan(mode="auto", recordings_manifest=None)
+    assert enabled is False
+    assert status == "skipped"
+    assert "not provided" in reason
+
+
+def test_resolve_fewshot_plan_on_requires_existing_manifest(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="requires --recordings_manifest"):
+        _resolve_fewshot_plan(mode="on", recordings_manifest=None)
+
+    missing = tmp_path / "missing_manifest.csv"
+    with pytest.raises(RuntimeError, match="requires existing recordings_manifest"):
+        _resolve_fewshot_plan(mode="on", recordings_manifest=str(missing))
+
+    ok = tmp_path / "recordings_manifest.csv"
+    ok.write_text("relative_path\n", encoding="utf-8")
+    enabled, status, reason = _resolve_fewshot_plan(mode="on", recordings_manifest=str(ok))
+    assert enabled is True
+    assert status == "enabled"
+    assert reason == ""
+
+
+def test_pretrain_rank_key_prefers_val_f1_then_val_acc_then_test_f1() -> None:
+    rows = [
+        {"pretrain_best_val_macro_f1": 0.10, "pretrain_best_val_acc": 0.20, "pretrain_test_macro_f1": 0.50},
+        {"pretrain_best_val_macro_f1": 0.10, "pretrain_best_val_acc": 0.21, "pretrain_test_macro_f1": 0.40},
+        {"pretrain_best_val_macro_f1": 0.11, "pretrain_best_val_acc": 0.19, "pretrain_test_macro_f1": 0.10},
+    ]
+    ranked = sorted(rows, key=_pretrain_rank_key)
+    assert ranked[0]["pretrain_best_val_macro_f1"] == 0.11

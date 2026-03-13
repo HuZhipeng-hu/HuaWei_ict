@@ -75,6 +75,9 @@ ROUND_LIBRARY: list[dict[str, object]] = [
     },
 ]
 
+PUBLIC_RANK_RULE = "best_val_macro_f1 desc, best_val_acc desc, test_macro_f1 desc"
+FEWSHOT_RANK_RULE = "recommended_budget asc, macro_f1_mean desc, acc_mean desc, macro_f1_std asc"
+
 
 def _format_cmd(cmd: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
@@ -119,6 +122,29 @@ def _compute_recommended_budget(curve_rows: list[dict], tolerance: float) -> tup
     return int(sorted_rows[-1]["budget"]), sorted_rows[-1]
 
 
+def _resolve_fewshot_plan(*, mode: str, recordings_manifest: str | None) -> tuple[bool, str, str]:
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode not in {"off", "auto", "on"}:
+        raise ValueError(f"Invalid fewshot_mode={mode!r}, expected one of: off/auto/on")
+
+    raw_manifest = str(recordings_manifest or "").strip()
+    if normalized_mode == "off":
+        return False, "skipped", "fewshot_mode=off"
+
+    if not raw_manifest:
+        if normalized_mode == "auto":
+            return False, "skipped", "recordings_manifest not provided"
+        raise RuntimeError("fewshot_mode=on requires --recordings_manifest <path>")
+
+    manifest_path = Path(raw_manifest)
+    if not manifest_path.exists() or not manifest_path.is_file():
+        if normalized_mode == "auto":
+            return False, "skipped", f"recordings_manifest not found: {manifest_path}"
+        raise RuntimeError(f"fewshot_mode=on requires existing recordings_manifest, got: {manifest_path}")
+
+    return True, "enabled", ""
+
+
 def _update_plateau_streak(*, previous_budget: int | None, current_budget: int, current_streak: int) -> int:
     if previous_budget is None:
         return 0
@@ -136,9 +162,19 @@ def _rank_key(row: dict) -> tuple[float, float, float, float]:
     return (float(rec_budget), -macro_f1, -acc, std)
 
 
+def _pretrain_rank_key(row: dict) -> tuple[float, float, float]:
+    val_f1 = float(row.get("pretrain_best_val_macro_f1", 0.0))
+    val_acc = float(row.get("pretrain_best_val_acc", 0.0))
+    test_f1 = float(row.get("pretrain_test_macro_f1", 0.0))
+    return (-val_f1, -val_acc, -test_f1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="DB5 representation method matrix prioritized by few-shot data burden reduction."
+        description=(
+            "DB5 representation method matrix. Public reproducibility mode is default (few-shot disabled); "
+            "few-shot can be enabled explicitly."
+        )
     )
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_prefix", default="db5_repr_matrix_v1")
@@ -147,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db5_data_dir", default="../data_ninaproDB5")
     parser.add_argument("--wearer_data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default=None)
+    parser.add_argument("--fewshot_mode", default="off", choices=["off", "auto", "on"])
     parser.add_argument("--foundation_dir", default="artifacts/foundation/db5_full53")
     parser.add_argument("--target_db5_keys", default="E1_G01,E1_G02,E1_G03,E1_G04")
     parser.add_argument("--budgets", default="10,20,35,60")
@@ -179,8 +216,26 @@ def main() -> None:
     stop_reason = ""
     last_stage = "setup"
     last_cmd = ""
+    default_public_command = (
+        "python scripts/pretrain_db5_repr_method_matrix.py "
+        f"--pretrain_config {args.pretrain_config} --db5_data_dir {args.db5_data_dir} "
+        f"--run_root {args.run_root} --run_prefix {args.run_prefix} "
+        f"--device_target {args.device_target} --device_id {int(args.device_id)} --fewshot_mode off"
+    )
+    fewshot_mode = str(args.fewshot_mode).strip().lower()
+    run_fewshot = False
+    fewshot_status = "skipped"
+    fewshot_skip_reason = ""
 
     try:
+        last_stage = "fewshot_gate"
+        run_fewshot, fewshot_status, fewshot_skip_reason = _resolve_fewshot_plan(
+            mode=fewshot_mode,
+            recordings_manifest=args.recordings_manifest,
+        )
+        if not run_fewshot and not fewshot_skip_reason:
+            fewshot_skip_reason = f"fewshot_mode={fewshot_mode}"
+
         for idx, spec in enumerate(round_specs, start=1):
             last_stage = f"round_{idx}_pretrain"
             pretrain_run_id = f"{args.run_prefix}_r{idx}_repr"
@@ -231,72 +286,94 @@ def main() -> None:
             if not encoder_ckpt:
                 raise RuntimeError(f"missing checkpoint_path in {pretrain_run_id}/offline_summary.json")
 
-            last_stage = f"round_{idx}_fewshot"
-            fewshot_run_id = f"{args.run_prefix}_r{idx}_fewshot"
-            fewshot_cmd = [
-                sys.executable,
-                "scripts/evaluate_event_fewshot_curve.py",
-                "--config",
-                str(args.fewshot_config),
-                "--data_dir",
-                str(args.wearer_data_dir),
-                "--run_root",
-                str(args.run_root),
-                "--run_id",
-                fewshot_run_id,
-                "--device_target",
-                str(args.device_target),
-                "--device_id",
-                str(int(args.device_id)),
-                "--pretrained_emg_checkpoint",
-                encoder_ckpt,
-                "--target_db5_keys",
-                str(args.target_db5_keys),
-                "--budgets",
-                str(args.budgets),
-                "--seeds",
-                str(args.seeds),
-            ]
-            if str(args.recordings_manifest or "").strip():
-                fewshot_cmd.extend(["--recordings_manifest", str(args.recordings_manifest).strip()])
-            last_cmd = _run_checked(last_stage, fewshot_cmd)
-            commands.append({"stage": last_stage, "command": last_cmd})
-            fewshot_report = _load_json(run_root / fewshot_run_id / "downstream_fewshot_report.json")
-
-            curve_rows = list(fewshot_report.get("curve_summary") or [])
-            recommended_budget, recommended_row = _compute_recommended_budget(
-                curve_rows,
-                tolerance=float(args.budget_tolerance),
-            )
-            plateau_streak = _update_plateau_streak(
-                previous_budget=prev_budget,
-                current_budget=int(recommended_budget),
-                current_streak=plateau_streak,
-            )
-
             row = {
                 "round": int(idx),
                 "name": str(spec["name"]),
                 "pretrain_run_id": pretrain_run_id,
-                "fewshot_run_id": fewshot_run_id,
+                "fewshot_run_id": "",
                 "repr_objective": str(spec["repr_objective"]),
                 "sampler_mode": str(spec["sampler_mode"]),
                 "augmentation_profile": str(spec["augmentation_profile"]),
                 "learning_rate": float(spec["learning_rate"]),
                 "weight_decay": float(spec["weight_decay"]),
-                "recommended_budget": int(recommended_budget),
-                "recommended_budget_row": recommended_row,
-                "best_budget": int(fewshot_report.get("best_budget", recommended_budget)),
-                "best_budget_row": dict(fewshot_report.get("best_budget_row") or {}),
-                "plateau_streak": int(plateau_streak),
+                "pretrain_best_val_macro_f1": float(pretrain_summary.get("best_val_macro_f1", 0.0)),
+                "pretrain_best_val_acc": float(pretrain_summary.get("best_val_acc", 0.0)),
+                "pretrain_test_macro_f1": float(pretrain_summary.get("test_macro_f1", 0.0)),
+                "pretrain_test_accuracy": float(pretrain_summary.get("test_accuracy", 0.0)),
                 "encoder_checkpoint_path": encoder_ckpt,
                 "pretrain_summary_path": str(run_root / pretrain_run_id / "offline_summary.json"),
-                "fewshot_report_path": str(run_root / fewshot_run_id / "downstream_fewshot_report.json"),
+                "fewshot_status": fewshot_status if not run_fewshot else "enabled",
+                "fewshot_skip_reason": fewshot_skip_reason if not run_fewshot else "",
+                "recommended_budget": None,
+                "recommended_macro_f1_mean": None,
+                "recommended_acc_mean": None,
+                "recommended_macro_f1_std": None,
+                "best_budget": None,
+                "plateau_streak": int(plateau_streak),
+                "fewshot_report_path": "",
             }
-            rows.append(row)
-            prev_budget = int(recommended_budget)
 
-            if plateau_streak >= int(args.plateau_patience):
+            if run_fewshot:
+                last_stage = f"round_{idx}_fewshot"
+                fewshot_run_id = f"{args.run_prefix}_r{idx}_fewshot"
+                fewshot_cmd = [
+                    sys.executable,
+                    "scripts/evaluate_event_fewshot_curve.py",
+                    "--config",
+                    str(args.fewshot_config),
+                    "--data_dir",
+                    str(args.wearer_data_dir),
+                    "--run_root",
+                    str(args.run_root),
+                    "--run_id",
+                    fewshot_run_id,
+                    "--device_target",
+                    str(args.device_target),
+                    "--device_id",
+                    str(int(args.device_id)),
+                    "--pretrained_emg_checkpoint",
+                    encoder_ckpt,
+                    "--target_db5_keys",
+                    str(args.target_db5_keys),
+                    "--budgets",
+                    str(args.budgets),
+                    "--seeds",
+                    str(args.seeds),
+                    "--recordings_manifest",
+                    str(args.recordings_manifest).strip(),
+                ]
+                last_cmd = _run_checked(last_stage, fewshot_cmd)
+                commands.append({"stage": last_stage, "command": last_cmd})
+                fewshot_report = _load_json(run_root / fewshot_run_id / "downstream_fewshot_report.json")
+                curve_rows = list(fewshot_report.get("curve_summary") or [])
+                recommended_budget, recommended_row = _compute_recommended_budget(
+                    curve_rows,
+                    tolerance=float(args.budget_tolerance),
+                )
+                plateau_streak = _update_plateau_streak(
+                    previous_budget=prev_budget,
+                    current_budget=int(recommended_budget),
+                    current_streak=plateau_streak,
+                )
+                row.update(
+                    {
+                        "fewshot_run_id": fewshot_run_id,
+                        "fewshot_status": "enabled",
+                        "recommended_budget": int(recommended_budget),
+                        "recommended_macro_f1_mean": float(recommended_row.get("macro_f1_mean", 0.0)),
+                        "recommended_acc_mean": float(recommended_row.get("acc_mean", 0.0)),
+                        "recommended_macro_f1_std": float(recommended_row.get("macro_f1_std", 0.0)),
+                        "best_budget": int(fewshot_report.get("best_budget", recommended_budget)),
+                        "best_budget_row": dict(fewshot_report.get("best_budget_row") or {}),
+                        "recommended_budget_row": recommended_row,
+                        "plateau_streak": int(plateau_streak),
+                        "fewshot_report_path": str(run_root / fewshot_run_id / "downstream_fewshot_report.json"),
+                    }
+                )
+                prev_budget = int(recommended_budget)
+
+            rows.append(row)
+            if run_fewshot and plateau_streak >= int(args.plateau_patience):
                 stopped_early = True
                 stop_reason = (
                     f"recommended budget did not improve for {int(args.plateau_patience)} consecutive rounds"
@@ -310,7 +387,7 @@ def main() -> None:
                 "status": "failed",
                 "stage": str(last_stage),
                 "root_cause": str(exc),
-                "next_command": str(last_cmd or "python scripts/pretrain_db5_repr_method_matrix.py <args>"),
+                "next_command": str(last_cmd or default_public_command),
                 "generated_at_unix": int(time.time()),
             },
         )
@@ -318,22 +395,43 @@ def main() -> None:
 
     if not rows:
         raise RuntimeError("no successful method-matrix rounds.")
-    ranked = sorted(rows, key=_rank_key)
-    best = ranked[0]
+    best_pretrain = sorted(rows, key=_pretrain_rank_key)[0]
+    fewshot_rows = [row for row in rows if row.get("recommended_budget") is not None]
+    best_fewshot = sorted(fewshot_rows, key=_rank_key)[0] if fewshot_rows else None
     elapsed_minutes = float((time.time() - start_ts) / 60.0)
+
+    public_cmd_template = (
+        "python scripts/pretrain_db5_repr_method_matrix.py "
+        "--fewshot_mode off --db5_data_dir ../data_ninaproDB5 --run_prefix <run_id>"
+    )
+    internal_cmd_template = (
+        "python scripts/pretrain_db5_repr_method_matrix.py "
+        "--fewshot_mode on --recordings_manifest <path/to/recordings_manifest.csv> "
+        "--db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data --run_prefix <run_id>"
+    )
 
     matrix_payload = {
         "run_prefix": str(args.run_prefix),
-        "rank_rule": "recommended_budget asc, macro_f1_mean desc, acc_mean desc, macro_f1_std asc",
+        "fewshot_mode": fewshot_mode,
+        "fewshot_status": "enabled" if run_fewshot else fewshot_status,
+        "fewshot_skip_reason": "" if run_fewshot else fewshot_skip_reason,
+        "recordings_manifest": str(args.recordings_manifest or ""),
+        "public_rank_rule": PUBLIC_RANK_RULE,
+        "fewshot_rank_rule": FEWSHOT_RANK_RULE,
         "budget_tolerance": float(args.budget_tolerance),
         "plateau_patience": int(args.plateau_patience),
         "max_rounds": int(args.max_rounds),
         "stopped_early": bool(stopped_early),
         "stop_reason": str(stop_reason),
-        "best_round": int(best["round"]),
-        "best_name": str(best["name"]),
-        "recommended_budget": int(best["recommended_budget"]),
-        "best_row": best,
+        "best_pretrain_run": best_pretrain,
+        "best_pretrain_round": int(best_pretrain["round"]),
+        "best_fewshot_run": best_fewshot,
+        "best_fewshot_round": int(best_fewshot["round"]) if best_fewshot else None,
+        "recommended_budget": int(best_fewshot["recommended_budget"]) if best_fewshot else None,
+        "command_templates": {
+            "public_pretrain_only": public_cmd_template,
+            "internal_with_fewshot": internal_cmd_template,
+        },
         "rows": rows,
         "commands": commands,
         "elapsed_minutes": elapsed_minutes,
@@ -350,7 +448,16 @@ def main() -> None:
             "augmentation_profile",
             "learning_rate",
             "weight_decay",
+            "pretrain_best_val_macro_f1",
+            "pretrain_best_val_acc",
+            "pretrain_test_macro_f1",
+            "pretrain_test_accuracy",
+            "fewshot_status",
+            "fewshot_skip_reason",
             "recommended_budget",
+            "recommended_macro_f1_mean",
+            "recommended_acc_mean",
+            "recommended_macro_f1_std",
             "best_budget",
             "plateau_streak",
             "pretrain_run_id",
@@ -366,20 +473,30 @@ def main() -> None:
             "# DB5 Repr Method Matrix Repro Card",
             "",
             "## Goal",
-            "- improve pretraining method and reduce downstream clips/action budget",
+            "- public reproducibility: foundation pretraining with DB5 only",
+            "- few-shot is optional transfer evaluation (internal extension)",
             "- no personal calibration data required",
             "",
-            "## Best Round",
-            f"- round: `{best['round']}` ({best['name']})",
-            f"- repr_objective: `{best['repr_objective']}`",
-            f"- sampler_mode: `{best['sampler_mode']}`",
-            f"- augmentation_profile: `{best['augmentation_profile']}`",
-            f"- recommended_budget(clips/action): `{best['recommended_budget']}`",
-            f"- recommended_macro_f1_mean: `{float(best['recommended_budget_row'].get('macro_f1_mean', 0.0)):.4f}`",
-            f"- recommended_acc_mean: `{float(best['recommended_budget_row'].get('acc_mean', 0.0)):.4f}`",
-            f"- encoder_checkpoint: `{best['encoder_checkpoint_path']}`",
+            "## Public Track (Default)",
+            f"- fewshot_mode: `{fewshot_mode}`",
+            f"- best_pretrain_round: `{best_pretrain['round']}` ({best_pretrain['name']})",
+            f"- best_val_macro_f1: `{float(best_pretrain.get('pretrain_best_val_macro_f1', 0.0)):.4f}`",
+            f"- best_val_acc: `{float(best_pretrain.get('pretrain_best_val_acc', 0.0)):.4f}`",
+            f"- test_macro_f1: `{float(best_pretrain.get('pretrain_test_macro_f1', 0.0)):.4f}`",
+            f"- encoder_checkpoint: `{best_pretrain['encoder_checkpoint_path']}`",
+            f"- public_rank_rule: `{PUBLIC_RANK_RULE}`",
             "",
-            "## Matrix",
+            "## Internal Few-shot Track",
+            f"- fewshot_status: `{'enabled' if run_fewshot else fewshot_status}`",
+            f"- fewshot_skip_reason: `{'' if run_fewshot else fewshot_skip_reason}`",
+            f"- recommended_budget: `{int(best_fewshot['recommended_budget']) if best_fewshot else ''}`",
+            f"- fewshot_rank_rule: `{FEWSHOT_RANK_RULE}`",
+            "",
+            "## Commands",
+            f"- public_pretrain_only: `{public_cmd_template}`",
+            f"- internal_with_fewshot: `{internal_cmd_template}`",
+            "",
+            "## Artifacts",
             f"- stopped_early: `{stopped_early}`",
             f"- stop_reason: `{stop_reason}`",
             f"- summary_json: `{run_dir / 'db5_repr_method_matrix_summary.json'}`",
