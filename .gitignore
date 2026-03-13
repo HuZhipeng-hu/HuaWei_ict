@@ -7,8 +7,13 @@
 
 # Local caches and test temp artifacts
 **/__pycache__/
+*.pyc
+*.pyo
+*.pyd
 **/.pytest_cache/
+.tmp_pytest_runcheck*/
 code/.tmp_pytest*/
+code/.tmp_pytest_runcheck*/
 code/.codex_tmp/
 code/pytest-cache-files-*/
 code/pytest-of-ASUS/
