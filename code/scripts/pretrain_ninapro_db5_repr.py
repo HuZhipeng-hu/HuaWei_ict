@@ -53,12 +53,42 @@ SUMMARY_FIELDS = [
     "temperature",
     "projection_dim",
     "knn_k",
+    "sampler_mode",
+    "augmentation_profile",
+    "augment_scale_min",
+    "augment_scale_max",
+    "augment_noise_std",
+    "augment_channel_drop_ratio",
+    "augment_time_mask_ratio",
+    "augment_freq_mask_ratio",
+    "ce_weight",
+    "label_smoothing",
     "learning_rate",
     "weight_decay",
     "manifest_use_source_metadata",
     "split_seed",
     "run_mode",
 ]
+
+
+_AUGMENT_PROFILES: dict[str, dict[str, float]] = {
+    "mild": {
+        "scale_min": 0.92,
+        "scale_max": 1.08,
+        "noise_std": 0.01,
+        "channel_drop_ratio": 0.08,
+        "time_mask_ratio": 0.00,
+        "freq_mask_ratio": 0.00,
+    },
+    "strong": {
+        "scale_min": 0.88,
+        "scale_max": 1.12,
+        "noise_std": 0.015,
+        "channel_drop_ratio": 0.10,
+        "time_mask_ratio": 0.10,
+        "freq_mask_ratio": 0.08,
+    },
+}
 
 
 def _parse_bool_arg(raw: str | None) -> bool | None:
@@ -70,6 +100,79 @@ def _parse_bool_arg(raw: str | None) -> bool | None:
     if lowered in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"Invalid boolean value: {raw!r}")
+
+
+def _resolve_repr_objective(raw: str) -> str:
+    token = str(raw).strip().lower().replace("+", "_")
+    token = token.replace("-", "_")
+    aliases = {
+        "supcon": "supcon",
+        "supcon_ce": "supcon_ce",
+        "supconce": "supcon_ce",
+        "supcon_ce_loss": "supcon_ce",
+    }
+    resolved = aliases.get(token)
+    if resolved is None:
+        raise ValueError(f"Unsupported repr objective: {raw!r}")
+    return resolved
+
+
+def _resolve_sampler_mode(raw: str) -> str:
+    token = str(raw).strip().lower().replace("-", "_")
+    aliases = {
+        "balanced": "class_balanced",
+        "class_balanced": "class_balanced",
+        "class_source_balanced": "class_source_balanced",
+        "source_balanced": "class_source_balanced",
+    }
+    resolved = aliases.get(token)
+    if resolved is None:
+        raise ValueError(f"Unsupported sampler_mode: {raw!r}")
+    return resolved
+
+
+def _validate_ratio(name: str, value: float) -> float:
+    val = float(value)
+    if val < 0.0 or val > 1.0:
+        raise ValueError(f"{name} must be in [0, 1], got {value}")
+    return val
+
+
+def _resolve_augmentation_params(
+    *,
+    profile: str,
+    scale_min: float | None = None,
+    scale_max: float | None = None,
+    noise_std: float | None = None,
+    channel_drop_ratio: float | None = None,
+    time_mask_ratio: float | None = None,
+    freq_mask_ratio: float | None = None,
+) -> dict[str, float | str]:
+    key = str(profile).strip().lower()
+    if key not in _AUGMENT_PROFILES:
+        raise ValueError(f"Unsupported augmentation profile: {profile!r}")
+    base = dict(_AUGMENT_PROFILES[key])
+    if scale_min is not None:
+        base["scale_min"] = float(scale_min)
+    if scale_max is not None:
+        base["scale_max"] = float(scale_max)
+    if base["scale_min"] <= 0.0 or base["scale_max"] <= 0.0 or base["scale_min"] > base["scale_max"]:
+        raise ValueError("Invalid scale range for augmentation.")
+    if noise_std is not None:
+        base["noise_std"] = float(noise_std)
+    if base["noise_std"] < 0.0:
+        raise ValueError("noise_std must be >= 0.")
+    if channel_drop_ratio is not None:
+        base["channel_drop_ratio"] = float(channel_drop_ratio)
+    if time_mask_ratio is not None:
+        base["time_mask_ratio"] = float(time_mask_ratio)
+    if freq_mask_ratio is not None:
+        base["freq_mask_ratio"] = float(freq_mask_ratio)
+    base["channel_drop_ratio"] = _validate_ratio("channel_drop_ratio", base["channel_drop_ratio"])
+    base["time_mask_ratio"] = _validate_ratio("time_mask_ratio", base["time_mask_ratio"])
+    base["freq_mask_ratio"] = _validate_ratio("freq_mask_ratio", base["freq_mask_ratio"])
+    base["profile"] = key
+    return base
 
 
 def _build_split_diagnostics(manifest, class_names: list[str]) -> dict:
@@ -116,10 +219,11 @@ if nn is not None and ops is not None and Tensor is not None and ms is not None:
 
 
     class RepresentationNet(nn.Cell):
-        def __init__(self, encoder, projection_dim: int, embedding_dim: int):
+        def __init__(self, encoder, *, projection_dim: int, embedding_dim: int, num_classes: int):
             super().__init__()
             self.encoder = encoder
             self.projector = ProjectionHead(int(embedding_dim), int(projection_dim))
+            self.classifier = nn.Dense(int(embedding_dim), int(num_classes))
             self.l2 = ops.L2Normalize(axis=1) if hasattr(ops, "L2Normalize") else None
 
         def _normalize(self, x):
@@ -132,7 +236,27 @@ if nn is not None and ops is not None and Tensor is not None and ms is not None:
         def construct(self, x):
             feat = self.encoder(x)
             proj = self.projector(feat)
-            return feat, self._normalize(proj)
+            logits = self.classifier(feat)
+            return feat, self._normalize(proj), logits
+
+
+    class LabelSmoothedCrossEntropy(nn.Cell):
+        def __init__(self, num_classes: int, smoothing: float):
+            super().__init__()
+            self.num_classes = int(num_classes)
+            self.smoothing = float(max(0.0, min(0.2, smoothing)))
+            self.log_softmax = nn.LogSoftmax(axis=1)
+            self.reduce_sum = ops.ReduceSum(keep_dims=False)
+            self.reduce_mean = ops.ReduceMean(keep_dims=False)
+            self.on_value = Tensor(1.0 - self.smoothing, ms.float32)
+            off = 0.0 if self.num_classes <= 1 else self.smoothing / float(max(1, self.num_classes - 1))
+            self.off_value = Tensor(off, ms.float32)
+
+        def construct(self, logits, labels):
+            one_hot = ops.one_hot(labels, self.num_classes, self.on_value, self.off_value)
+            log_probs = self.log_softmax(logits)
+            loss = -self.reduce_sum(one_hot * log_probs, 1)
+            return self.reduce_mean(loss)
 
 
     class SupervisedContrastiveLoss(nn.Cell):
@@ -171,29 +295,157 @@ if nn is not None and ops is not None and Tensor is not None and ms is not None:
 
 
     class ReprTrainCell(nn.Cell):
-        def __init__(self, model, loss_fn):
+        def __init__(self, model, supcon_loss_fn, *, use_ce: bool, ce_loss_fn=None, ce_weight: float = 0.0):
             super().__init__(auto_prefix=False)
             self.model = model
-            self.loss_fn = loss_fn
+            self.supcon_loss_fn = supcon_loss_fn
+            self.use_ce = bool(use_ce)
+            self.ce_loss_fn = ce_loss_fn
+            self.ce_weight = Tensor(float(max(0.0, ce_weight)), ms.float32)
+            self.mul = ops.Mul()
+            self.add = ops.Add()
             self.concat = ops.Concat(axis=0)
+            self.cast = ops.Cast()
 
         def construct(self, x1, x2, labels):
-            _feat1, z1 = self.model(x1)
-            _feat2, z2 = self.model(x2)
+            _feat1, z1, logits1 = self.model(x1)
+            _feat2, z2, logits2 = self.model(x2)
             all_z = self.concat((z1, z2))
             all_labels = self.concat((labels, labels))
-            return self.loss_fn(all_z, all_labels)
+            supcon_loss = self.supcon_loss_fn(all_z, all_labels)
+            if not self.use_ce or self.ce_loss_fn is None:
+                return supcon_loss
+            ce_1 = self.ce_loss_fn(logits1, self.cast(labels, ms.int32))
+            ce_2 = self.ce_loss_fn(logits2, self.cast(labels, ms.int32))
+            ce = (ce_1 + ce_2) * Tensor(0.5, ms.float32)
+            return self.add(supcon_loss, self.mul(self.ce_weight, ce))
 
 
-def _augment_batch(batch_x: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+def _apply_random_block_mask(
+    batch: np.ndarray,
+    *,
+    rng: np.random.Generator,
+    axis: int,
+    ratio: float,
+) -> None:
+    if ratio <= 0.0:
+        return
+    length = int(batch.shape[axis])
+    if length <= 1:
+        return
+    mask_len = max(1, int(round(length * float(ratio))))
+    mask_len = min(mask_len, length)
+    max_start = max(1, length - mask_len + 1)
+    for sample_idx in range(int(batch.shape[0])):
+        start = int(rng.integers(0, max_start))
+        slices = [slice(None)] * batch.ndim
+        slices[0] = sample_idx
+        slices[axis] = slice(start, start + mask_len)
+        batch[tuple(slices)] = 0.0
+
+
+def _augment_batch(batch_x: np.ndarray, rng: np.random.Generator, *, params: dict[str, float | str]) -> np.ndarray:
     x = batch_x.astype(np.float32, copy=True)
-    scales = rng.uniform(0.92, 1.08, size=(x.shape[0], 1, 1, 1)).astype(np.float32)
+    scales = rng.uniform(
+        float(params["scale_min"]),
+        float(params["scale_max"]),
+        size=(x.shape[0], 1, 1, 1),
+    ).astype(np.float32)
     x *= scales
-    noise = rng.normal(loc=0.0, scale=0.01, size=x.shape).astype(np.float32)
-    x += noise
-    drop_mask = rng.random((x.shape[0], x.shape[1], 1, 1), dtype=np.float32) < 0.08
+    noise_std = float(params["noise_std"])
+    if noise_std > 0.0:
+        noise = rng.normal(loc=0.0, scale=noise_std, size=x.shape).astype(np.float32)
+        x += noise
+    drop_mask = rng.random((x.shape[0], x.shape[1], 1, 1), dtype=np.float32) < float(params["channel_drop_ratio"])
     x = np.where(drop_mask, 0.0, x)
+    _apply_random_block_mask(x, rng=rng, axis=3, ratio=float(params["time_mask_ratio"]))
+    _apply_random_block_mask(x, rng=rng, axis=2, ratio=float(params["freq_mask_ratio"]))
     return x.astype(np.float32)
+
+
+def _build_class_source_balanced_indices(
+    *,
+    labels: np.ndarray,
+    source_ids: np.ndarray,
+    batch_size: int,
+    steps: int,
+    seed: int,
+) -> np.ndarray:
+    if int(batch_size) <= 0 or int(steps) <= 0:
+        return np.asarray([], dtype=np.int32)
+    labels_i32 = labels.astype(np.int32)
+    if labels_i32.size == 0:
+        return np.asarray([], dtype=np.int32)
+    sources = np.asarray(source_ids)
+    if sources.shape[0] != labels_i32.shape[0]:
+        raise ValueError("source_ids length mismatch for class-source balanced sampler.")
+
+    class_ids = np.unique(labels_i32)
+    if class_ids.size == 0:
+        return np.asarray([], dtype=np.int32)
+    class_to_source_pools: dict[int, dict[str, np.ndarray]] = {}
+    for cls in class_ids.tolist():
+        class_mask = labels_i32 == int(cls)
+        class_sources = np.unique(sources[class_mask])
+        pools: dict[str, np.ndarray] = {}
+        for src in class_sources.tolist():
+            idx = np.where(class_mask & (sources == src))[0].astype(np.int32)
+            if idx.size > 0:
+                pools[str(src)] = idx
+        if pools:
+            class_to_source_pools[int(cls)] = pools
+
+    if not class_to_source_pools:
+        raise RuntimeError("No valid class/source pools for class_source_balanced sampler.")
+
+    rng = np.random.default_rng(int(seed))
+    all_indices: list[int] = []
+    for _step in range(int(steps)):
+        if int(class_ids.size) >= int(batch_size):
+            chosen_classes = rng.choice(class_ids, size=int(batch_size), replace=False)
+        else:
+            chosen_classes = np.resize(class_ids, int(batch_size))
+            rng.shuffle(chosen_classes)
+        batch: list[int] = []
+        for cls in chosen_classes.tolist():
+            pools = class_to_source_pools[int(cls)]
+            source_keys = np.asarray(sorted(pools.keys()), dtype=object)
+            src_choice = str(rng.choice(source_keys))
+            pool = pools[src_choice]
+            batch.append(int(rng.choice(pool)))
+        rng.shuffle(batch)
+        all_indices.extend(batch[: int(batch_size)])
+    return np.asarray(all_indices, dtype=np.int32)
+
+
+def _build_training_indices(
+    *,
+    labels: np.ndarray,
+    source_ids: np.ndarray,
+    batch_size: int,
+    steps_per_epoch: int,
+    seed: int,
+    sampler_mode: str,
+    sampler_cfg,
+    class_names: list[str],
+) -> np.ndarray:
+    mode = _resolve_sampler_mode(sampler_mode)
+    if mode == "class_source_balanced":
+        return _build_class_source_balanced_indices(
+            labels=labels,
+            source_ids=source_ids,
+            batch_size=int(batch_size),
+            steps=int(steps_per_epoch),
+            seed=int(seed),
+        )
+    return build_balanced_sample_indices(
+        labels.astype(np.int32),
+        int(batch_size),
+        sampler_cfg,
+        steps=int(steps_per_epoch),
+        seed=int(seed),
+        class_names=class_names,
+    )
 
 
 def _build_lr_schedule(total_steps: int, warmup_steps: int, base_lr: float) -> list[float]:
@@ -409,13 +661,52 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
     train_x, train_y = samples[train_idx], labels[train_idx]
     val_x, val_y = samples[val_idx], labels[val_idx]
     test_x, test_y = samples[test_idx], labels[test_idx]
+    train_source_ids = np.asarray(source_ids)[train_idx]
     logger.info("Split sizes => train=%d val=%d test=%d", len(train_y), len(val_y), len(test_y))
+
+    repr_objective = _resolve_repr_objective(args.repr_objective)
+    sampler_mode = _resolve_sampler_mode(args.sampler_mode)
+    label_smoothing = float(
+        args.label_smoothing if args.label_smoothing is not None else float(config.training.label_smoothing)
+    )
+    ce_weight = float(args.ce_weight)
+    aug_params = _resolve_augmentation_params(
+        profile=str(args.augmentation_profile),
+        scale_min=args.augment_scale_min,
+        scale_max=args.augment_scale_max,
+        noise_std=args.augment_noise_std,
+        channel_drop_ratio=args.augment_channel_drop_ratio,
+        time_mask_ratio=args.augment_time_mask_ratio,
+        freq_mask_ratio=args.augment_freq_mask_ratio,
+    )
+    logger.info(
+        "repr setup: objective=%s sampler_mode=%s aug_profile=%s ce_weight=%.3f label_smoothing=%.3f",
+        repr_objective,
+        sampler_mode,
+        aug_params.get("profile", ""),
+        ce_weight,
+        label_smoothing,
+    )
 
     encoder = build_db5_encoder_model(config)
     embedding_dim = int(config.base_channels * 6)
-    repr_model = RepresentationNet(encoder, projection_dim=int(args.projection_dim), embedding_dim=embedding_dim)
-    loss_fn = SupervisedContrastiveLoss(float(args.temperature))
-    train_cell = ReprTrainCell(repr_model, loss_fn)
+    repr_model = RepresentationNet(
+        encoder,
+        projection_dim=int(args.projection_dim),
+        embedding_dim=embedding_dim,
+        num_classes=int(len(class_names)),
+    )
+    supcon_loss_fn = SupervisedContrastiveLoss(float(args.temperature))
+    ce_loss_fn = None
+    if repr_objective == "supcon_ce":
+        ce_loss_fn = LabelSmoothedCrossEntropy(int(len(class_names)), smoothing=label_smoothing)
+    train_cell = ReprTrainCell(
+        repr_model,
+        supcon_loss_fn,
+        use_ce=(repr_objective == "supcon_ce"),
+        ce_loss_fn=ce_loss_fn,
+        ce_weight=ce_weight,
+    )
 
     steps_per_epoch = int(np.ceil(max(1, len(train_y)) / max(1, int(config.training.batch_size))))
     total_steps = int(steps_per_epoch * int(config.training.epochs))
@@ -453,16 +744,18 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
 
     for epoch in range(1, int(config.training.epochs) + 1):
         epoch_losses: list[float] = []
-        batch_indices = build_balanced_sample_indices(
-            train_y.astype(np.int32),
-            int(config.training.batch_size),
-            config.training.sampler,
-            steps=steps_per_epoch,
+        batch_indices = _build_training_indices(
+            labels=train_y.astype(np.int32),
+            source_ids=train_source_ids,
+            batch_size=int(config.training.batch_size),
+            steps_per_epoch=steps_per_epoch,
             seed=int(config.training.split_seed) + epoch,
+            sampler_mode=sampler_mode,
+            sampler_cfg=config.training.sampler,
             class_names=class_names,
         )
         if batch_indices.size == 0:
-            raise RuntimeError("Balanced sampler returned no indices for representation training.")
+            raise RuntimeError("Sampler returned no indices for representation training.")
 
         for step in range(steps_per_epoch):
             start = step * int(config.training.batch_size)
@@ -472,8 +765,8 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
                 continue
             batch_x = train_x[idx]
             batch_y = train_y[idx].astype(np.int32)
-            view1 = _augment_batch(batch_x, rng)
-            view2 = _augment_batch(batch_x, rng)
+            view1 = _augment_batch(batch_x, rng, params=aug_params)
+            view2 = _augment_batch(batch_x, rng, params=aug_params)
             loss = train_step(
                 Tensor(view1, ms.float32),
                 Tensor(view2, ms.float32),
@@ -589,6 +882,8 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         repr_eval_dir / "repr_eval_summary.json",
         {
             "knn_k": int(args.knn_k),
+            "repr_objective": repr_objective,
+            "sampler_mode": sampler_mode,
             "best_val_epoch": int(best_epoch),
             "val_macro_f1": float(val_report["macro_f1"]),
             "val_acc": float(val_report["accuracy"]),
@@ -603,7 +898,7 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         "run_id": run_id,
         "checkpoint_path": str(encoder_ckpt_path),
         "foundation_version": str(args.foundation_version or "db5_full53_repr_v1"),
-        "repr_objective": "supcon",
+        "repr_objective": repr_objective,
         "num_classes": int(len(class_names)),
         "best_val_epoch": int(best_epoch),
         "best_val_macro_f1": float(best_val_f1),
@@ -613,6 +908,16 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         "temperature": float(args.temperature),
         "projection_dim": int(args.projection_dim),
         "knn_k": int(args.knn_k),
+        "sampler_mode": sampler_mode,
+        "augmentation_profile": str(aug_params["profile"]),
+        "augment_scale_min": float(aug_params["scale_min"]),
+        "augment_scale_max": float(aug_params["scale_max"]),
+        "augment_noise_std": float(aug_params["noise_std"]),
+        "augment_channel_drop_ratio": float(aug_params["channel_drop_ratio"]),
+        "augment_time_mask_ratio": float(aug_params["time_mask_ratio"]),
+        "augment_freq_mask_ratio": float(aug_params["freq_mask_ratio"]),
+        "ce_weight": float(ce_weight if repr_objective == "supcon_ce" else 0.0),
+        "label_smoothing": float(label_smoothing if repr_objective == "supcon_ce" else 0.0),
         "learning_rate": float(config.training.learning_rate),
         "weight_decay": float(config.training.weight_decay),
         "manifest_use_source_metadata": bool(config.manifest_use_source_metadata),
@@ -648,6 +953,8 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
             "run_dir": str(run_dir),
             "data_dir": data_dir,
             "mode": str(ms_mode),
+            "repr_objective": repr_objective,
+            "sampler_mode": sampler_mode,
             "encoder_checkpoint_path": str(encoder_ckpt_path),
             "model_checkpoint_path": str(model_ckpt_path),
             "repr_eval_dir": str(repr_eval_dir),
@@ -678,6 +985,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--projection_dim", type=int, default=128)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--knn_k", type=int, default=5)
+    parser.add_argument("--repr_objective", default="supcon_ce", choices=["supcon", "supcon_ce"])
+    parser.add_argument("--ce_weight", type=float, default=0.35)
+    parser.add_argument("--label_smoothing", type=float, default=None)
+    parser.add_argument(
+        "--sampler_mode",
+        default="class_source_balanced",
+        choices=["class_balanced", "class_source_balanced", "balanced", "source_balanced"],
+    )
+    parser.add_argument("--augmentation_profile", default="strong", choices=["mild", "strong"])
+    parser.add_argument("--augment_scale_min", type=float, default=None)
+    parser.add_argument("--augment_scale_max", type=float, default=None)
+    parser.add_argument("--augment_noise_std", type=float, default=None)
+    parser.add_argument("--augment_channel_drop_ratio", type=float, default=None)
+    parser.add_argument("--augment_time_mask_ratio", type=float, default=None)
+    parser.add_argument("--augment_freq_mask_ratio", type=float, default=None)
     parser.add_argument("--run_downstream_fewshot", choices=["true", "false"], default="false")
     parser.add_argument("--fewshot_script", default="scripts/evaluate_event_fewshot_curve.py")
     parser.add_argument("--fewshot_config", default="configs/training_event_onset.yaml")
