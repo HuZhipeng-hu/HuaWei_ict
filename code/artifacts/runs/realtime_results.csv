@@ -1,2 +1,0 @@
-run_id,checkpoint_path,manifest_path,model_type,base_channels,use_se,threshold,hysteresis_count,infer_rate_hz,decision_count,hit_rate,false_trigger_rate,latency_p50_ms,latency_p95_ms,test_macro_f1,test_macro_recall,top_confusion_pair
-local_benchmark_smoke,checkpoints/neurogrip_best.ckpt,artifacts/splits/default_split_manifest.json,standard,16,True,0.8,3,20.0,21,0.0,0.0,5.669600009918213,8.484000205993652,0.0641025641025641,0.16666666666666666,RELAX<->FIST:11

@@ -10,6 +10,7 @@
 *.pyc
 *.pyo
 *.pyd
+**/.ipynb_checkpoints/
 **/.pytest_cache/
 .tmp_pytest_runcheck*/
 code/.tmp_pytest*/
@@ -19,3 +20,9 @@ code/pytest-cache-files-*/
 code/pytest-of-ASUS/
 code/tmpr*/
 code/artifacts/pytest_tmp/
+
+# Keep repository clean from generated benchmark/training outputs
+code/artifacts/runs/**
+!code/artifacts/runs/.gitkeep
+code/artifacts/splits/*.json
+!code/artifacts/splits/.gitkeep
