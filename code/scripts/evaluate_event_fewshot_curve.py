@@ -57,6 +57,13 @@ def _format_cmd(cmd: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
 
 
+def _append_recordings_manifest_arg(cmd: list[str], recordings_manifest: str | None) -> list[str]:
+    raw = str(recordings_manifest or "").strip()
+    if not raw:
+        return cmd
+    return [*cmd, "--recordings_manifest", raw]
+
+
 def _load_json(path: Path) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Missing JSON artifact: {path}")
@@ -252,6 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run_id", default=None)
     parser.add_argument("--device_target", default="Ascend", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)
+    parser.add_argument("--recordings_manifest", default=None)
     parser.add_argument("--pretrained_emg_checkpoint", default=None)
     parser.add_argument("--target_db5_keys", default="E1_G01,E1_G02,E1_G03,E1_G04")
     parser.add_argument("--budgets", default="10,20,35,60")
@@ -317,6 +325,7 @@ def main() -> None:
                     cmd.extend(["--split_manifest_in", str(shared_manifest)])
                 else:
                     cmd.extend(["--split_manifest_out", str(shared_manifest)])
+                cmd = _append_recordings_manifest_arg(cmd, args.recordings_manifest)
 
                 result = _run_finetune_and_collect(cmd, run_root=run_root, run_id=matrix_run_id)
                 matrix_commands.append(str(result["command"]))
@@ -427,6 +436,7 @@ def main() -> None:
                 ]
                 if str(args.pretrained_emg_checkpoint or "").strip():
                     base_cmd.extend(["--pretrained_emg_checkpoint", str(args.pretrained_emg_checkpoint)])
+                base_cmd = _append_recordings_manifest_arg(base_cmd, args.recordings_manifest)
                 base_ret = _run_finetune_and_collect(base_cmd, run_root=run_root, run_id=base_run_id)
                 base_summary = dict(base_ret["summary"])
                 base_rows.append(
@@ -475,6 +485,7 @@ def main() -> None:
                 ]
                 if str(args.pretrained_emg_checkpoint or "").strip():
                     expanded_cmd.extend(["--pretrained_emg_checkpoint", str(args.pretrained_emg_checkpoint)])
+                expanded_cmd = _append_recordings_manifest_arg(expanded_cmd, args.recordings_manifest)
                 expanded_ret = _run_finetune_and_collect(expanded_cmd, run_root=run_root, run_id=expanded_run_id)
                 expanded_summary = dict(expanded_ret["summary"])
                 expanded_rows.append(
@@ -549,6 +560,7 @@ def main() -> None:
 
     report_payload = {
         "run_id": run_id,
+        "recordings_manifest": str(args.recordings_manifest or ""),
         "target_db5_keys": target_keys,
         "budgets": budgets,
         "seeds": seeds,

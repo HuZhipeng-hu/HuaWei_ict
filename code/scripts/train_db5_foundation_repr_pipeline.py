@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device_id", type=int, default=0)
     parser.add_argument("--db5_data_dir", default="../data_ninaproDB5")
     parser.add_argument("--wearer_data_dir", default="../data")
+    parser.add_argument("--recordings_manifest", default=None)
     parser.add_argument("--pretrain_config", default="configs/pretrain_ninapro_db5.yaml")
     parser.add_argument("--fewshot_config", default="configs/training_event_onset.yaml")
     parser.add_argument("--foundation_dir", default="artifacts/foundation/db5_full53")
@@ -125,6 +126,8 @@ def main() -> None:
         "--seeds",
         str(args.seeds),
     ]
+    if str(args.recordings_manifest or "").strip():
+        fewshot_cmd.extend(["--recordings_manifest", str(args.recordings_manifest).strip()])
     fewshot_cmd_str = _run_checked("fewshot_eval", fewshot_cmd)
     fewshot_report = _load_json(Path(args.run_root) / fewshot_run_id / "downstream_fewshot_report.json")
 

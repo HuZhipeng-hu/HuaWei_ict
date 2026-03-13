@@ -146,6 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fewshot_config", default="configs/training_event_onset.yaml")
     parser.add_argument("--db5_data_dir", default="../data_ninaproDB5")
     parser.add_argument("--wearer_data_dir", default="../data")
+    parser.add_argument("--recordings_manifest", default=None)
     parser.add_argument("--foundation_dir", default="artifacts/foundation/db5_full53")
     parser.add_argument("--target_db5_keys", default="E1_G01,E1_G02,E1_G03,E1_G04")
     parser.add_argument("--budgets", default="10,20,35,60")
@@ -256,6 +257,8 @@ def main() -> None:
                 "--seeds",
                 str(args.seeds),
             ]
+            if str(args.recordings_manifest or "").strip():
+                fewshot_cmd.extend(["--recordings_manifest", str(args.recordings_manifest).strip()])
             last_cmd = _run_checked(last_stage, fewshot_cmd)
             commands.append({"stage": last_stage, "command": last_cmd})
             fewshot_report = _load_json(run_root / fewshot_run_id / "downstream_fewshot_report.json")
@@ -390,4 +393,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

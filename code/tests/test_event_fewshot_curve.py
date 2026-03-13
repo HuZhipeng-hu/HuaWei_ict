@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from scripts.evaluate_event_fewshot_curve import (
     FewshotRunResult,
+    _append_recordings_manifest_arg,
     _aggregate_budget_rows,
     _choose_best_budget,
     _choose_elbow_budget,
@@ -28,3 +29,12 @@ def test_choose_elbow_budget_returns_smallest_budget_within_tolerance() -> None:
         {"budget": 60, "macro_f1_mean": 0.38, "acc_mean": 0.47, "macro_f1_std": 0.03},
     ]
     assert _choose_elbow_budget(agg, tolerance=0.02) == 35
+
+
+def test_append_recordings_manifest_arg_only_when_path_provided() -> None:
+    base = ["python", "scripts/finetune_event_onset.py", "--data_dir", "../data"]
+    cmd_with = _append_recordings_manifest_arg(base, "../data/recordings_manifest.csv")
+    assert cmd_with[-2:] == ["--recordings_manifest", "../data/recordings_manifest.csv"]
+
+    cmd_without = _append_recordings_manifest_arg(base, None)
+    assert cmd_without == base
