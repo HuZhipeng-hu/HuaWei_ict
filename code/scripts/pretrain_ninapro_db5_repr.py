@@ -23,10 +23,19 @@ from ninapro_db5.config import load_db5_pretrain_config
 from ninapro_db5.dataset import DB5PretrainDatasetLoader
 from ninapro_db5.evaluate import _set_device
 from ninapro_db5.model import build_db5_encoder_model
+from ninapro_db5.repr_pretrain_utils import (
+    augment_batch as _augment_batch,
+    build_class_source_balanced_indices as _build_class_source_balanced_indices,
+    build_training_indices as _build_training_indices,
+    parse_bool_arg as _parse_bool_arg,
+    resolve_augmentation_params as _resolve_augmentation_params,
+    resolve_repr_objective as _resolve_repr_objective,
+    resolve_sampler_mode as _resolve_sampler_mode,
+)
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, dump_yaml, ensure_run_dir
 from training.data.split_strategy import build_manifest
 from training.reporting import compute_classification_report, save_classification_report
-from training.trainer import ModelEMA, build_balanced_sample_indices
+from training.trainer import ModelEMA
 
 try:
     import mindspore as ms
@@ -69,110 +78,6 @@ SUMMARY_FIELDS = [
     "split_seed",
     "run_mode",
 ]
-
-
-_AUGMENT_PROFILES: dict[str, dict[str, float]] = {
-    "mild": {
-        "scale_min": 0.92,
-        "scale_max": 1.08,
-        "noise_std": 0.01,
-        "channel_drop_ratio": 0.08,
-        "time_mask_ratio": 0.00,
-        "freq_mask_ratio": 0.00,
-    },
-    "strong": {
-        "scale_min": 0.88,
-        "scale_max": 1.12,
-        "noise_std": 0.015,
-        "channel_drop_ratio": 0.10,
-        "time_mask_ratio": 0.10,
-        "freq_mask_ratio": 0.08,
-    },
-}
-
-
-def _parse_bool_arg(raw: str | None) -> bool | None:
-    if raw is None:
-        return None
-    lowered = str(raw).strip().lower()
-    if lowered in {"1", "true", "yes", "on"}:
-        return True
-    if lowered in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"Invalid boolean value: {raw!r}")
-
-
-def _resolve_repr_objective(raw: str) -> str:
-    token = str(raw).strip().lower().replace("+", "_")
-    token = token.replace("-", "_")
-    aliases = {
-        "supcon": "supcon",
-        "supcon_ce": "supcon_ce",
-        "supconce": "supcon_ce",
-        "supcon_ce_loss": "supcon_ce",
-    }
-    resolved = aliases.get(token)
-    if resolved is None:
-        raise ValueError(f"Unsupported repr objective: {raw!r}")
-    return resolved
-
-
-def _resolve_sampler_mode(raw: str) -> str:
-    token = str(raw).strip().lower().replace("-", "_")
-    aliases = {
-        "balanced": "class_balanced",
-        "class_balanced": "class_balanced",
-        "class_source_balanced": "class_source_balanced",
-        "source_balanced": "class_source_balanced",
-    }
-    resolved = aliases.get(token)
-    if resolved is None:
-        raise ValueError(f"Unsupported sampler_mode: {raw!r}")
-    return resolved
-
-
-def _validate_ratio(name: str, value: float) -> float:
-    val = float(value)
-    if val < 0.0 or val > 1.0:
-        raise ValueError(f"{name} must be in [0, 1], got {value}")
-    return val
-
-
-def _resolve_augmentation_params(
-    *,
-    profile: str,
-    scale_min: float | None = None,
-    scale_max: float | None = None,
-    noise_std: float | None = None,
-    channel_drop_ratio: float | None = None,
-    time_mask_ratio: float | None = None,
-    freq_mask_ratio: float | None = None,
-) -> dict[str, float | str]:
-    key = str(profile).strip().lower()
-    if key not in _AUGMENT_PROFILES:
-        raise ValueError(f"Unsupported augmentation profile: {profile!r}")
-    base = dict(_AUGMENT_PROFILES[key])
-    if scale_min is not None:
-        base["scale_min"] = float(scale_min)
-    if scale_max is not None:
-        base["scale_max"] = float(scale_max)
-    if base["scale_min"] <= 0.0 or base["scale_max"] <= 0.0 or base["scale_min"] > base["scale_max"]:
-        raise ValueError("Invalid scale range for augmentation.")
-    if noise_std is not None:
-        base["noise_std"] = float(noise_std)
-    if base["noise_std"] < 0.0:
-        raise ValueError("noise_std must be >= 0.")
-    if channel_drop_ratio is not None:
-        base["channel_drop_ratio"] = float(channel_drop_ratio)
-    if time_mask_ratio is not None:
-        base["time_mask_ratio"] = float(time_mask_ratio)
-    if freq_mask_ratio is not None:
-        base["freq_mask_ratio"] = float(freq_mask_ratio)
-    base["channel_drop_ratio"] = _validate_ratio("channel_drop_ratio", base["channel_drop_ratio"])
-    base["time_mask_ratio"] = _validate_ratio("time_mask_ratio", base["time_mask_ratio"])
-    base["freq_mask_ratio"] = _validate_ratio("freq_mask_ratio", base["freq_mask_ratio"])
-    base["profile"] = key
-    return base
 
 
 def _build_split_diagnostics(manifest, class_names: list[str]) -> dict:
@@ -319,133 +224,6 @@ if nn is not None and ops is not None and Tensor is not None and ms is not None:
             ce_2 = self.ce_loss_fn(logits2, self.cast(labels, ms.int32))
             ce = (ce_1 + ce_2) * Tensor(0.5, ms.float32)
             return self.add(supcon_loss, self.mul(self.ce_weight, ce))
-
-
-def _apply_random_block_mask(
-    batch: np.ndarray,
-    *,
-    rng: np.random.Generator,
-    axis: int,
-    ratio: float,
-) -> None:
-    if ratio <= 0.0:
-        return
-    length = int(batch.shape[axis])
-    if length <= 1:
-        return
-    mask_len = max(1, int(round(length * float(ratio))))
-    mask_len = min(mask_len, length)
-    max_start = max(1, length - mask_len + 1)
-    for sample_idx in range(int(batch.shape[0])):
-        start = int(rng.integers(0, max_start))
-        slices = [slice(None)] * batch.ndim
-        slices[0] = sample_idx
-        slices[axis] = slice(start, start + mask_len)
-        batch[tuple(slices)] = 0.0
-
-
-def _augment_batch(batch_x: np.ndarray, rng: np.random.Generator, *, params: dict[str, float | str]) -> np.ndarray:
-    x = batch_x.astype(np.float32, copy=True)
-    scales = rng.uniform(
-        float(params["scale_min"]),
-        float(params["scale_max"]),
-        size=(x.shape[0], 1, 1, 1),
-    ).astype(np.float32)
-    x *= scales
-    noise_std = float(params["noise_std"])
-    if noise_std > 0.0:
-        noise = rng.normal(loc=0.0, scale=noise_std, size=x.shape).astype(np.float32)
-        x += noise
-    drop_mask = rng.random((x.shape[0], x.shape[1], 1, 1), dtype=np.float32) < float(params["channel_drop_ratio"])
-    x = np.where(drop_mask, 0.0, x)
-    _apply_random_block_mask(x, rng=rng, axis=3, ratio=float(params["time_mask_ratio"]))
-    _apply_random_block_mask(x, rng=rng, axis=2, ratio=float(params["freq_mask_ratio"]))
-    return x.astype(np.float32)
-
-
-def _build_class_source_balanced_indices(
-    *,
-    labels: np.ndarray,
-    source_ids: np.ndarray,
-    batch_size: int,
-    steps: int,
-    seed: int,
-) -> np.ndarray:
-    if int(batch_size) <= 0 or int(steps) <= 0:
-        return np.asarray([], dtype=np.int32)
-    labels_i32 = labels.astype(np.int32)
-    if labels_i32.size == 0:
-        return np.asarray([], dtype=np.int32)
-    sources = np.asarray(source_ids)
-    if sources.shape[0] != labels_i32.shape[0]:
-        raise ValueError("source_ids length mismatch for class-source balanced sampler.")
-
-    class_ids = np.unique(labels_i32)
-    if class_ids.size == 0:
-        return np.asarray([], dtype=np.int32)
-    class_to_source_pools: dict[int, dict[str, np.ndarray]] = {}
-    for cls in class_ids.tolist():
-        class_mask = labels_i32 == int(cls)
-        class_sources = np.unique(sources[class_mask])
-        pools: dict[str, np.ndarray] = {}
-        for src in class_sources.tolist():
-            idx = np.where(class_mask & (sources == src))[0].astype(np.int32)
-            if idx.size > 0:
-                pools[str(src)] = idx
-        if pools:
-            class_to_source_pools[int(cls)] = pools
-
-    if not class_to_source_pools:
-        raise RuntimeError("No valid class/source pools for class_source_balanced sampler.")
-
-    rng = np.random.default_rng(int(seed))
-    all_indices: list[int] = []
-    for _step in range(int(steps)):
-        if int(class_ids.size) >= int(batch_size):
-            chosen_classes = rng.choice(class_ids, size=int(batch_size), replace=False)
-        else:
-            chosen_classes = np.resize(class_ids, int(batch_size))
-            rng.shuffle(chosen_classes)
-        batch: list[int] = []
-        for cls in chosen_classes.tolist():
-            pools = class_to_source_pools[int(cls)]
-            source_keys = np.asarray(sorted(pools.keys()), dtype=object)
-            src_choice = str(rng.choice(source_keys))
-            pool = pools[src_choice]
-            batch.append(int(rng.choice(pool)))
-        rng.shuffle(batch)
-        all_indices.extend(batch[: int(batch_size)])
-    return np.asarray(all_indices, dtype=np.int32)
-
-
-def _build_training_indices(
-    *,
-    labels: np.ndarray,
-    source_ids: np.ndarray,
-    batch_size: int,
-    steps_per_epoch: int,
-    seed: int,
-    sampler_mode: str,
-    sampler_cfg,
-    class_names: list[str],
-) -> np.ndarray:
-    mode = _resolve_sampler_mode(sampler_mode)
-    if mode == "class_source_balanced":
-        return _build_class_source_balanced_indices(
-            labels=labels,
-            source_ids=source_ids,
-            batch_size=int(batch_size),
-            steps=int(steps_per_epoch),
-            seed=int(seed),
-        )
-    return build_balanced_sample_indices(
-        labels.astype(np.int32),
-        int(batch_size),
-        sampler_cfg,
-        steps=int(steps_per_epoch),
-        seed=int(seed),
-        class_names=class_names,
-    )
 
 
 def _build_lr_schedule(total_steps: int, warmup_steps: int, base_lr: float) -> list[float]:

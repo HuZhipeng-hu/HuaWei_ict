@@ -1,101 +1,81 @@
-# NeuroGrip Event-Onset v1 (DB5 Full53 Foundation)
+# NeuroGrip DB5 Foundation (Public Repro First)
 
-主线已经固定为：
+本仓库当前默认复现口径是：
 
-`DB5 全量53类固定底座 -> 选择 DB5 原始键微调 -> N类 event-onset 运行 -> MindIR 部署`
+- 公共轨（评委开箱）：只依赖 NinaPro DB5，完成 foundation 表征预训练。
+- 内部轨（可选附加）：在有 `recordings_manifest.csv` 的前提下运行 few-shot 迁移评估。
 
-旧 `aligned3/legacy53` 流程已移除。
+few-shot 是小样本微调评估，不是预训练本体的必需步骤。
 
-## 1) 一键主流程（推荐）
+## 1) 公共轨：一条命令开箱复现（推荐）
 
 ```bash
-python scripts/train_event_pipeline.py \
+python scripts/pretrain_db5_repr_method_matrix.py \
+  --pretrain_config configs/pretrain_ninapro_db5.yaml \
   --db5_data_dir ../data_ninaproDB5 \
-  --wearer_data_dir ../data_event_onset \
-  --target_db5_keys E1_G01,E1_G02,E2_G05 \
-  --budget_per_class 60 \
+  --run_root artifacts/runs \
+  --run_prefix db5_public_repro_v1 \
   --device_target Ascend \
   --device_id 0 \
-  --run_id event_pipeline_v1
+  --foundation_dir artifacts/foundation/db5_full53 \
+  --fewshot_mode off
 ```
 
 说明：
 
-- 首次运行若固定底座缺失，会自动构建并缓存到 `artifacts/foundation/db5_full53/`。
-- 后续运行默认直接复用该底座，不再重复预训练。
-- `target_db5_keys` 决定当前微调与运行类别集合，`RELAX` 自动包含。
+- `fewshot_mode=off` 为默认值，缺少 `recordings_manifest.csv` 也不会失败。
+- 矩阵会按公共排序规则自动选出最佳预训练轮次：
+  - `best_val_macro_f1` 优先
+  - 平手看 `best_val_acc`
+  - 再看 `test_macro_f1`
+- 关键产物：
+  - `artifacts/runs/<run_prefix>_summary/db5_repr_method_matrix_summary.json`
+  - `artifacts/runs/<run_prefix>_summary/db5_repr_method_matrix_summary.csv`
+  - `artifacts/runs/<run_prefix>_summary/referee_repro_card.md`
 
-主产物：
+## 2) 内部轨：few-shot 迁移评估（可选）
 
-- `artifacts/runs/<run_id>/final_selection.json`
-- `artifacts/runs/<run_id>/final_artifacts.json`
-- `artifacts/runs/<run_id>/models/event_onset_selected.mindir`
-- `artifacts/runs/<run_id>/models/event_onset_selected.model_metadata.json`
-
-## 2) 运行前预检
-
-```bash
-python scripts/preflight.py --mode local
-python scripts/preflight.py --mode ascend
-```
-
-预检会检查：
-
-- DB5 zip 覆盖与 full53 key 覆盖
-- 动态类别与 `model.num_classes` 一致性
-- 执行映射文件存在且键集合匹配
-- MindIR metadata 输入形状与 `class_names` 一致性
-
-## 3) 执行映射（运行必填）
-
-运行侧必须提供完整映射：`DB5键 -> 执行动作`，否则拒绝启动。
-
-示例：`configs/event_actuation_mapping.yaml`
-
-```yaml
-actuation_map:
-  RELAX: RELAX
-  E1_G01: FIST
-  E1_G02: PINCH
-  E2_G05: OK
-```
-
-可用执行动作：`RELAX/FIST/PINCH/OK/YE/SIDEGRIP`
-
-## 4) 运行（MindIR 默认）
+仅当你有事件数据与 `recordings_manifest.csv` 时启用：
 
 ```bash
-python scripts/run_event_runtime.py \
-  --config configs/runtime_event_onset.yaml \
-  --backend lite
+python scripts/pretrain_db5_repr_method_matrix.py \
+  --pretrain_config configs/pretrain_ninapro_db5.yaml \
+  --fewshot_config configs/training_event_onset.yaml \
+  --db5_data_dir ../data_ninaproDB5 \
+  --wearer_data_dir ../data \
+  --recordings_manifest /path/to/recordings_manifest.csv \
+  --run_root artifacts/runs \
+  --run_prefix db5_internal_repro_v1 \
+  --device_target Ascend \
+  --device_id 0 \
+  --foundation_dir artifacts/foundation/db5_full53 \
+  --fewshot_mode on \
+  --target_db5_keys E1_G01,E1_G02,E1_G03,E1_G04 \
+  --budgets 10,20,35,60 \
+  --seeds 11,22,33
 ```
 
-调试可用 CKPT：
+说明：
+
+- `fewshot_mode=on` 会强制检查 `--recordings_manifest`。
+- 如果要“有则跑、无则跳过”，可用 `--fewshot_mode auto`。
+
+## 3) 运行前预检
 
 ```bash
-python scripts/run_event_runtime.py \
-  --config configs/runtime_event_onset.yaml \
-  --backend ckpt
+python scripts/preflight.py --mode local --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
+python scripts/preflight.py --mode ascend --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
 ```
 
-## 5) 硬件联调（不走模型）
+## 4) 常用脚本
 
-```bash
-python scripts/test_actuator_gesture.py \
-  --config configs/runtime_event_onset.yaml
-```
+- `scripts/pretrain_ninapro_db5_repr.py`：单轮 DB5 表征预训练
+- `scripts/pretrain_db5_repr_method_matrix.py`：方法矩阵（公共轨/内部轨）
+- `scripts/evaluate_event_fewshot_curve.py`：单独 few-shot 预算曲线评估
+- `scripts/preflight.py`：环境与数据前置检查
 
-键位：
+## 5) 仓库卫生约定
 
-- `r/f/p/o/y/s`：执行对应动作
-- `i`：执行器信息
-- `h`：帮助
-- `q`：退出（自动 `RELAX`）
-
-## 6) 分步入口（高级调试）
-
-- `scripts/pretrain_ninapro_db5.py`（固定 full53 底座构建）
-- `scripts/finetune_event_onset.py`（支持动态 `--target_db5_keys`）
-- `scripts/convert_event_onset.py`
-- `scripts/benchmark_event_runtime_ckpt.py`
-- `scripts/evaluate_ckpt.py`
+- `code/artifacts/runs/` 与 `code/artifacts/splits/*.json` 为运行产物，不入库。
+- `.ipynb_checkpoints/` 与 `__pycache__/` 不入库。
+- 若需保留结果用于汇报，请导出到仓库外部或发布工件系统。
