@@ -148,8 +148,24 @@ def _safe_float_token(value: float) -> str:
     return token.replace("-", "m").replace(".", "p")
 
 
+def _with_pretrain_aliases(row: dict) -> dict:
+    """Attach backward-compatible aliases for downstream readers.
+
+    Historical consumers may read fields using one of two schemas:
+    - new: phase/candidate/run_id/checkpoint_path
+    - old: round/name/pretrain_run_id/encoder_checkpoint_path
+    """
+    payload = dict(row)
+    payload["round"] = payload.get("round") or payload.get("phase")
+    payload["name"] = payload.get("name") or payload.get("candidate")
+    payload["pretrain_run_id"] = payload.get("pretrain_run_id") or payload.get("run_id")
+    payload["encoder_checkpoint_path"] = payload.get("encoder_checkpoint_path") or payload.get("checkpoint_path")
+    return payload
+
+
 def _as_pretrain_row(*, phase: str, candidate: str, run_id: str, summary: dict, temperature: float, projection_dim: int, knn_k: int) -> dict:
-    return {
+    return _with_pretrain_aliases(
+        {
         "phase": phase,
         "candidate": candidate,
         "run_id": str(run_id),
@@ -168,7 +184,8 @@ def _as_pretrain_row(*, phase: str, candidate: str, run_id: str, summary: dict, 
         "checkpoint_path": str(summary.get("checkpoint_path", "")),
         "pretrain_summary_path": str(summary.get("offline_summary_path", "")),
         "selected": False,
-    }
+        }
+    )
 
 
 def _build_pretrain_cmd(
@@ -590,6 +607,9 @@ def main() -> None:
         "run_4_knn_robustness": run4_payload,
         "best_pretrain_run": best_pretrain,
         "best_pretrain_run_id": str(best_pretrain.get("run_id", "")),
+        "best_pretrain_round": str(best_pretrain.get("phase", "")),
+        "best_pretrain_name": str(best_pretrain.get("candidate", "")),
+        "best_pretrain_checkpoint_path": str(best_pretrain.get("checkpoint_path", "")),
         "rows": rows,
         "commands": commands,
         "elapsed_minutes": elapsed_minutes,

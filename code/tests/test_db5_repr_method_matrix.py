@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from scripts.pretrain_db5_repr_method_matrix import (
+    _as_pretrain_row,
     _compute_recommended_budget,
     _parse_float_grid,
     _parse_int_grid,
@@ -109,3 +110,29 @@ def test_parse_float_grid_rejects_empty() -> None:
 def test_parse_int_grid_rejects_empty() -> None:
     with pytest.raises(ValueError, match="knn_k_grid must contain at least one integer value"):
         _parse_int_grid(" , ", name="knn_k_grid")
+
+
+def test_as_pretrain_row_exports_backward_compatible_aliases() -> None:
+    row = _as_pretrain_row(
+        phase="run_2",
+        candidate="temp_0p1",
+        run_id="db5_r2_t_0p1",
+        summary={
+            "best_val_macro_f1": 0.12,
+            "best_val_acc": 0.20,
+            "test_macro_f1": 0.11,
+            "checkpoint_path": "artifacts/runs/x/checkpoints/best.ckpt",
+            "offline_summary_path": "artifacts/runs/x/offline_summary.json",
+        },
+        temperature=0.1,
+        projection_dim=128,
+        knn_k=5,
+    )
+    assert row["phase"] == "run_2"
+    assert row["round"] == "run_2"
+    assert row["candidate"] == "temp_0p1"
+    assert row["name"] == "temp_0p1"
+    assert row["run_id"] == "db5_r2_t_0p1"
+    assert row["pretrain_run_id"] == "db5_r2_t_0p1"
+    assert row["checkpoint_path"] == "artifacts/runs/x/checkpoints/best.ckpt"
+    assert row["encoder_checkpoint_path"] == "artifacts/runs/x/checkpoints/best.ckpt"
