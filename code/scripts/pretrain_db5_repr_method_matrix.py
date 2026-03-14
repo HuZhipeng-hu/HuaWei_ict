@@ -195,6 +195,16 @@ def _build_pretrain_cmd(
     temperature: float,
     projection_dim: int,
     knn_k: int,
+    repr_objective: str,
+    augmentation_profile: str,
+    pairing_mode: str,
+    quality_sampling_mode: str,
+    ce_weight: float,
+    contrastive_weight: float,
+    temporal_weight: float,
+    recon_weight: float,
+    learning_rate: float,
+    weight_decay: float,
 ) -> list[str]:
     cmd = [
         sys.executable,
@@ -216,19 +226,29 @@ def _build_pretrain_cmd(
         "--ms_mode",
         str(args.ms_mode),
         "--repr_objective",
-        "supcon",
+        str(repr_objective),
         "--sampler_mode",
         "class_source_balanced",
         "--augmentation_profile",
-        "strong",
+        str(augmentation_profile),
+        "--pairing_mode",
+        str(pairing_mode),
+        "--quality_sampling_mode",
+        str(quality_sampling_mode),
         "--ce_weight",
-        "0.0",
+        str(float(ce_weight)),
+        "--contrastive_weight",
+        str(float(contrastive_weight)),
+        "--temporal_weight",
+        str(float(temporal_weight)),
+        "--recon_weight",
+        str(float(recon_weight)),
         "--label_smoothing",
         str(float(args.label_smoothing)),
         "--learning_rate",
-        str(float(args.learning_rate)),
+        str(float(learning_rate)),
         "--weight_decay",
-        str(float(args.weight_decay)),
+        str(float(weight_decay)),
         "--epochs",
         str(int(args.epochs)),
         "--early_stopping_patience",
@@ -258,6 +278,16 @@ def _run_pretrain_candidate(
     temperature: float,
     projection_dim: int,
     knn_k: int,
+    repr_objective: str,
+    augmentation_profile: str,
+    pairing_mode: str,
+    quality_sampling_mode: str,
+    ce_weight: float,
+    contrastive_weight: float,
+    temporal_weight: float,
+    recon_weight: float,
+    learning_rate: float,
+    weight_decay: float,
 ) -> tuple[dict, str]:
     stage = f"{phase}_{candidate}"
     cmd = _build_pretrain_cmd(
@@ -266,6 +296,16 @@ def _run_pretrain_candidate(
         temperature=temperature,
         projection_dim=projection_dim,
         knn_k=knn_k,
+        repr_objective=repr_objective,
+        augmentation_profile=augmentation_profile,
+        pairing_mode=pairing_mode,
+        quality_sampling_mode=quality_sampling_mode,
+        ce_weight=ce_weight,
+        contrastive_weight=contrastive_weight,
+        temporal_weight=temporal_weight,
+        recon_weight=recon_weight,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
     )
     cmd_str = _run_checked(stage, cmd)
     summary_path = Path(args.run_root) / run_id / "offline_summary.json"
@@ -289,6 +329,31 @@ def _pick_best_pretrain(rows: list[dict]) -> dict:
     if not rows:
         raise RuntimeError("no pretrain rows available for ranking")
     return sorted(rows, key=_pretrain_rank_key)[0]
+
+
+def _build_bottleneck_profile(*, run_root: Path, run_id: str, epochs: int) -> dict:
+    run_dir = Path(run_root) / str(run_id)
+    offline = _load_json(run_dir / "offline_summary.json")
+    window_diag = _load_json(run_dir / "db5_window_diagnostics.json")
+    totals = dict(window_diag.get("totals", {}) or {})
+    raw = float(totals.get("raw_candidates", 0) or 0)
+    selected = float(totals.get("selected", 0) or 0)
+    window_util = float(selected / raw) if raw > 0 else 0.0
+    best_epoch = int(offline.get("best_val_epoch", -1) or -1)
+    best_val_f1 = float(offline.get("best_val_macro_f1", 0.0) or 0.0)
+    early_peak = bool(best_epoch > 0 and best_epoch <= max(8, int(epochs * 0.12)))
+    weak_signal = bool(best_val_f1 < 0.05)
+    low_window_util = bool(window_util < 0.35)
+    signature = f"early_peak={int(early_peak)}|weak_signal={int(weak_signal)}|low_util={int(low_window_util)}"
+    return {
+        "best_epoch": best_epoch,
+        "best_val_f1": best_val_f1,
+        "window_utilization": window_util,
+        "early_peak": early_peak,
+        "weak_signal": weak_signal,
+        "low_window_util": low_window_util,
+        "signature": signature,
+    }
 
 
 def _run4_knn_robustness(
@@ -407,8 +472,8 @@ def _run4_knn_robustness(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "DB5 representation pretraining stage-2 matrix: "
-            "Run1 baseline -> Run2 temperature search -> Run3 projection search -> Run4 kNN robustness."
+            "DB5 representation method-driven matrix: "
+            "Stage-A method blocks (A1-A6) then Stage-B focused parameter polish (B1-B4)."
         )
     )
     parser.add_argument("--run_root", default="artifacts/runs")
@@ -428,10 +493,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline_temperature", type=float, default=0.07)
     parser.add_argument("--baseline_projection_dim", type=int, default=128)
     parser.add_argument("--baseline_knn_k", type=int, default=5)
+    parser.add_argument("--baseline_repr_objective", default="supcon")
     parser.add_argument("--temperature_grid", default="0.05,0.07,0.10")
     parser.add_argument("--projection_dim_grid", default="128,192,256")
     parser.add_argument("--knn_k_grid", default="3,5,11")
-    parser.add_argument("--min_val_f1_gain", type=float, default=0.01)
+    parser.add_argument("--b1_learning_rate", type=float, default=3e-4)
+    parser.add_argument("--b2_temperature", type=float, default=0.05)
+    parser.add_argument("--b3_projection_dim", type=int, default=192)
+    parser.add_argument("--b4_ce_weight", type=float, default=0.10)
+    parser.add_argument("--method_gain_eps", type=float, default=0.002)
+    parser.add_argument("--method_plateau_rounds", type=int, default=2)
     parser.add_argument("--fewshot_mode", default="off", choices=["off", "auto", "on"])
     parser.add_argument("--recordings_manifest", default=None)
     parser.add_argument("--manifest_use_source_metadata", choices=["true", "false"], default=None)
@@ -445,114 +516,253 @@ def main() -> None:
     run_dir = run_root / f"{args.run_prefix}_summary"
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    temperature_grid = _parse_float_grid(args.temperature_grid, name="temperature_grid")
-    projection_grid = _parse_int_grid(args.projection_dim_grid, name="projection_dim_grid")
     knn_grid = _parse_int_grid(args.knn_k_grid, name="knn_k_grid")
 
     rows: list[dict] = []
     commands: list[dict] = []
     last_stage = "setup"
     last_cmd = ""
-    low_return_zone = False
     stop_reason = ""
+    method_plateau_detected = False
+    method_plateau_streak = 0
     run4_payload: dict | None = None
+    stage_a_rows: list[dict] = []
+    stage_b_rows: list[dict] = []
+    profile_history: list[dict] = []
 
     fewshot_mode = str(args.fewshot_mode).strip().lower()
-    if fewshot_mode != "off":
-        fewshot_status = "skipped"
-        fewshot_skip_reason = "stage2 matrix is pretrain-only; few-shot is intentionally disabled"
-    else:
-        fewshot_status = "skipped"
-        fewshot_skip_reason = "fewshot_mode=off"
+    fewshot_status = "skipped"
+    fewshot_skip_reason = "fewshot_mode=off" if fewshot_mode == "off" else "method matrix is pretrain-only"
+
+    stage_a_specs = [
+        {
+            "phase": "A1",
+            "candidate": "baseline_supcon",
+            "temperature": float(args.baseline_temperature),
+            "projection_dim": int(args.baseline_projection_dim),
+            "knn_k": int(args.baseline_knn_k),
+            "repr_objective": "supcon",
+            "augmentation_profile": "strong",
+            "pairing_mode": "same_window_aug",
+            "quality_sampling_mode": "uniform",
+            "ce_weight": 0.0,
+            "contrastive_weight": 1.0,
+            "temporal_weight": 0.0,
+            "recon_weight": 0.0,
+            "learning_rate": float(args.learning_rate),
+            "weight_decay": float(args.weight_decay),
+        },
+        {
+            "phase": "A2",
+            "candidate": "quality_aware_pairing",
+            "temperature": float(args.baseline_temperature),
+            "projection_dim": int(args.baseline_projection_dim),
+            "knn_k": int(args.baseline_knn_k),
+            "repr_objective": "supcon",
+            "augmentation_profile": "strong",
+            "pairing_mode": "quality_mixed",
+            "quality_sampling_mode": "quality",
+            "ce_weight": 0.0,
+            "contrastive_weight": 1.0,
+            "temporal_weight": 0.0,
+            "recon_weight": 0.0,
+            "learning_rate": float(args.learning_rate),
+            "weight_decay": float(args.weight_decay),
+        },
+        {
+            "phase": "A3",
+            "candidate": "curriculum_augmentation",
+            "temperature": float(args.baseline_temperature),
+            "projection_dim": int(args.baseline_projection_dim),
+            "knn_k": int(args.baseline_knn_k),
+            "repr_objective": "supcon",
+            "augmentation_profile": "curriculum",
+            "pairing_mode": "quality_mixed",
+            "quality_sampling_mode": "quality",
+            "ce_weight": 0.0,
+            "contrastive_weight": 1.0,
+            "temporal_weight": 0.0,
+            "recon_weight": 0.0,
+            "learning_rate": float(args.learning_rate),
+            "weight_decay": float(args.weight_decay),
+        },
+        {
+            "phase": "A4",
+            "candidate": "multitask_repr_only",
+            "temperature": float(args.baseline_temperature),
+            "projection_dim": int(args.baseline_projection_dim),
+            "knn_k": int(args.baseline_knn_k),
+            "repr_objective": "multitask_repr",
+            "augmentation_profile": "strong",
+            "pairing_mode": "same_window_aug",
+            "quality_sampling_mode": "uniform",
+            "ce_weight": 0.0,
+            "contrastive_weight": 1.0,
+            "temporal_weight": 0.3,
+            "recon_weight": 0.2,
+            "learning_rate": float(args.learning_rate),
+            "weight_decay": float(args.weight_decay),
+        },
+        {
+            "phase": "A5",
+            "candidate": "multitask_plus_quality",
+            "temperature": float(args.baseline_temperature),
+            "projection_dim": int(args.baseline_projection_dim),
+            "knn_k": int(args.baseline_knn_k),
+            "repr_objective": "multitask_repr",
+            "augmentation_profile": "strong",
+            "pairing_mode": "quality_mixed",
+            "quality_sampling_mode": "quality",
+            "ce_weight": 0.0,
+            "contrastive_weight": 1.0,
+            "temporal_weight": 0.3,
+            "recon_weight": 0.2,
+            "learning_rate": float(args.learning_rate),
+            "weight_decay": float(args.weight_decay),
+        },
+        {
+            "phase": "A6",
+            "candidate": "multitask_quality_curriculum",
+            "temperature": float(args.baseline_temperature),
+            "projection_dim": int(args.baseline_projection_dim),
+            "knn_k": int(args.baseline_knn_k),
+            "repr_objective": "multitask_repr",
+            "augmentation_profile": "curriculum",
+            "pairing_mode": "quality_mixed",
+            "quality_sampling_mode": "quality",
+            "ce_weight": 0.0,
+            "contrastive_weight": 1.0,
+            "temporal_weight": 0.3,
+            "recon_weight": 0.2,
+            "learning_rate": float(args.learning_rate),
+            "weight_decay": float(args.weight_decay),
+        },
+    ]
 
     try:
-        # Run-1: baseline reproducibility rerun (fixed backbone + baseline hyperparams).
-        last_stage = "run_1_baseline"
-        run1_id = f"{args.run_prefix}_r1_base"
-        row1, cmd_str = _run_pretrain_candidate(
-            args=args,
-            phase="run_1",
-            candidate="baseline",
-            run_id=run1_id,
-            temperature=float(args.baseline_temperature),
-            projection_dim=int(args.baseline_projection_dim),
-            knn_k=int(args.baseline_knn_k),
-        )
-        row1["selected"] = True
-        last_cmd = cmd_str
-        rows.append(row1)
-        commands.append({"stage": last_stage, "command": cmd_str})
+        previous_row: dict | None = None
+        previous_profile: dict | None = None
 
-        # Run-2: temperature search (3 points)
-        run2_rows: list[dict] = []
-        for temp in temperature_grid:
-            token = _safe_float_token(temp)
-            run_id = f"{args.run_prefix}_r2_t_{token}"
-            last_stage = f"run_2_temperature_{token}"
+        for spec in stage_a_specs:
+            run_id = f"{args.run_prefix}_{spec['phase'].lower()}"
+            last_stage = f"{spec['phase']}_{spec['candidate']}"
             row, cmd_str = _run_pretrain_candidate(
                 args=args,
-                phase="run_2",
-                candidate=f"temp_{token}",
+                phase=str(spec["phase"]),
+                candidate=str(spec["candidate"]),
                 run_id=run_id,
-                temperature=float(temp),
-                projection_dim=int(args.baseline_projection_dim),
-                knn_k=int(args.baseline_knn_k),
+                temperature=float(spec["temperature"]),
+                projection_dim=int(spec["projection_dim"]),
+                knn_k=int(spec["knn_k"]),
+                repr_objective=str(spec["repr_objective"]),
+                augmentation_profile=str(spec["augmentation_profile"]),
+                pairing_mode=str(spec["pairing_mode"]),
+                quality_sampling_mode=str(spec["quality_sampling_mode"]),
+                ce_weight=float(spec["ce_weight"]),
+                contrastive_weight=float(spec["contrastive_weight"]),
+                temporal_weight=float(spec["temporal_weight"]),
+                recon_weight=float(spec["recon_weight"]),
+                learning_rate=float(spec["learning_rate"]),
+                weight_decay=float(spec["weight_decay"]),
             )
-            run2_rows.append(row)
+            profile = _build_bottleneck_profile(run_root=run_root, run_id=run_id, epochs=int(args.epochs))
+            row["method_settings"] = dict(spec)
+            row["bottleneck_profile"] = dict(profile)
+            row["selected"] = True if spec["phase"] == "A1" else False
+            if previous_row is not None and previous_profile is not None:
+                val_gain = float(row["pretrain_best_val_macro_f1"]) - float(previous_row["pretrain_best_val_macro_f1"])
+                same_signature = str(profile.get("signature", "")) == str(previous_profile.get("signature", ""))
+                if same_signature and val_gain < float(args.method_gain_eps):
+                    method_plateau_streak += 1
+                else:
+                    method_plateau_streak = 0
+                row["method_gain_vs_prev"] = float(val_gain)
+                row["profile_changed_vs_prev"] = bool(not same_signature)
+            else:
+                row["method_gain_vs_prev"] = None
+                row["profile_changed_vs_prev"] = None
+
             last_cmd = cmd_str
             rows.append(row)
+            stage_a_rows.append(row)
+            profile_history.append(profile)
             commands.append({"stage": last_stage, "command": cmd_str})
-        best_run2 = _pick_best_pretrain(run2_rows)
-        best_run2["selected"] = True
+            previous_row = row
+            previous_profile = profile
 
-        # Run-3: projection search (3 points) conditioned on best temperature.
-        run3_rows: list[dict] = []
-        best_temp = float(best_run2["temperature"])
-        for proj in projection_grid:
-            run_id = f"{args.run_prefix}_r3_p_{int(proj)}"
-            last_stage = f"run_3_projection_{int(proj)}"
-            row, cmd_str = _run_pretrain_candidate(
-                args=args,
-                phase="run_3",
-                candidate=f"proj_{int(proj)}",
-                run_id=run_id,
-                temperature=best_temp,
-                projection_dim=int(proj),
-                knn_k=int(args.baseline_knn_k),
-            )
-            run3_rows.append(row)
-            last_cmd = cmd_str
-            rows.append(row)
-            commands.append({"stage": last_stage, "command": cmd_str})
-        best_run3 = _pick_best_pretrain(run3_rows)
-        best_run3["selected"] = True
+            if int(method_plateau_streak) >= int(args.method_plateau_rounds):
+                method_plateau_detected = True
+                stop_reason = (
+                    f"Stage-A method yield plateaued: streak={method_plateau_streak}, "
+                    f"eps={float(args.method_gain_eps):.4f}"
+                )
+                break
 
-        run3_gain = float(best_run3["pretrain_best_val_macro_f1"]) - float(row1["pretrain_best_val_macro_f1"])
-        if run3_gain < float(args.min_val_f1_gain):
-            low_return_zone = True
-            stop_reason = (
-                f"run3 gain below threshold: gain={run3_gain:.4f} < min_val_f1_gain={float(args.min_val_f1_gain):.4f}"
-            )
-        else:
-            # Run-4: kNN robustness grid on Run-3 best checkpoint (evaluation-only, no retraining).
-            last_stage = "run_4_knn_robustness"
-            checkpoint_path = str(best_run3.get("checkpoint_path", "")).strip()
-            if not checkpoint_path:
-                raise RuntimeError("run_4_knn_robustness requires non-empty checkpoint_path from run_3 best")
-            run4_payload = _run4_knn_robustness(
-                args=args,
-                checkpoint_path=checkpoint_path,
-                knn_grid=knn_grid,
-                run_dir=run_dir,
-            )
-            commands.append(
+        if stage_a_rows:
+            stage_a_rows[0]["selected"] = True
+            for row in stage_a_rows[1:]:
+                row["selected"] = False
+
+        if stage_a_rows and not method_plateau_detected:
+            base = dict(stage_a_rows[-1].get("method_settings", {}))
+            base_phase = "B"
+            stage_b_specs = [
                 {
-                    "stage": last_stage,
-                    "command": "internal_eval:run_4_knn_robustness",
-                    "checkpoint_path": checkpoint_path,
-                    "knn_grid": knn_grid,
-                }
-            )
+                    **base,
+                    "phase": "B1",
+                    "candidate": "lr_polish",
+                    "learning_rate": float(args.b1_learning_rate),
+                },
+                {
+                    **base,
+                    "phase": "B2",
+                    "candidate": "temperature_polish",
+                    "temperature": float(args.b2_temperature),
+                },
+                {
+                    **base,
+                    "phase": "B3",
+                    "candidate": "projection_polish",
+                    "projection_dim": int(args.b3_projection_dim),
+                },
+                {
+                    **base,
+                    "phase": "B4",
+                    "candidate": "ce_weight_probe",
+                    "ce_weight": float(args.b4_ce_weight),
+                },
+            ]
+            for spec in stage_b_specs:
+                run_id = f"{args.run_prefix}_{spec['phase'].lower()}"
+                last_stage = f"{spec['phase']}_{spec['candidate']}"
+                row, cmd_str = _run_pretrain_candidate(
+                    args=args,
+                    phase=str(spec["phase"]),
+                    candidate=str(spec["candidate"]),
+                    run_id=run_id,
+                    temperature=float(spec["temperature"]),
+                    projection_dim=int(spec["projection_dim"]),
+                    knn_k=int(spec["knn_k"]),
+                    repr_objective=str(spec["repr_objective"]),
+                    augmentation_profile=str(spec["augmentation_profile"]),
+                    pairing_mode=str(spec["pairing_mode"]),
+                    quality_sampling_mode=str(spec["quality_sampling_mode"]),
+                    ce_weight=float(spec["ce_weight"]),
+                    contrastive_weight=float(spec["contrastive_weight"]),
+                    temporal_weight=float(spec["temporal_weight"]),
+                    recon_weight=float(spec["recon_weight"]),
+                    learning_rate=float(spec["learning_rate"]),
+                    weight_decay=float(spec["weight_decay"]),
+                )
+                profile = _build_bottleneck_profile(run_root=run_root, run_id=run_id, epochs=int(args.epochs))
+                row["method_settings"] = dict(spec)
+                row["bottleneck_profile"] = dict(profile)
+                row["selected"] = False
+                last_cmd = cmd_str
+                rows.append(row)
+                stage_b_rows.append(row)
+                profile_history.append(profile)
+                commands.append({"stage": last_stage, "command": cmd_str, "stage_group": base_phase})
 
     except Exception as exc:
         default_cmd = (
@@ -572,9 +782,31 @@ def main() -> None:
         raise
 
     if not rows:
-        raise RuntimeError("no successful stage2 pretrain rows")
+        raise RuntimeError("no successful method-matrix pretrain rows")
 
     best_pretrain = _pick_best_pretrain(rows)
+    for row in rows:
+        row["selected"] = bool(str(row.get("run_id", "")) == str(best_pretrain.get("run_id", "")))
+
+    # kNN robustness on best pretrain checkpoint.
+    checkpoint_path = str(best_pretrain.get("checkpoint_path", "")).strip()
+    if checkpoint_path:
+        last_stage = "run_robust_knn_eval"
+        run4_payload = _run4_knn_robustness(
+            args=args,
+            checkpoint_path=checkpoint_path,
+            knn_grid=knn_grid,
+            run_dir=run_dir,
+        )
+        commands.append(
+            {
+                "stage": last_stage,
+                "command": "internal_eval:run_robust_knn_eval",
+                "checkpoint_path": checkpoint_path,
+                "knn_grid": knn_grid,
+            }
+        )
+
     elapsed_minutes = float((time.time() - start_ts) / 60.0)
 
     matrix_payload = {
@@ -584,27 +816,16 @@ def main() -> None:
         "fewshot_skip_reason": fewshot_skip_reason,
         "public_rank_rule": PUBLIC_RANK_RULE,
         "fewshot_rank_rule": FEWSHOT_RANK_RULE,
-        "fixed_backbone": {
-            "repr_objective": "supcon",
-            "sampler_mode": "class_source_balanced",
-            "augmentation_profile": "strong",
-            "ce_weight": 0.0,
-        },
-        "search_space": {
-            "temperature_grid": temperature_grid,
-            "projection_dim_grid": projection_grid,
-            "knn_k_grid": knn_grid,
-        },
-        "run_1_baseline": row1,
-        "run_2_best": best_run2,
-        "run_3_best": best_run3,
-        "run3_minus_run1_val_f1_gain": float(
-            float(best_run3["pretrain_best_val_macro_f1"]) - float(row1["pretrain_best_val_macro_f1"])
-        ),
-        "min_val_f1_gain_threshold": float(args.min_val_f1_gain),
-        "entered_low_return_zone": bool(low_return_zone),
+        "matrix_strategy": "method_first_then_parameter_polish",
+        "stage_a_rows": stage_a_rows,
+        "stage_b_rows": stage_b_rows,
+        "method_gain_eps": float(args.method_gain_eps),
+        "method_plateau_rounds": int(args.method_plateau_rounds),
+        "method_plateau_detected": bool(method_plateau_detected),
+        "method_plateau_streak": int(method_plateau_streak),
+        "profile_history": profile_history,
         "stop_reason": str(stop_reason),
-        "run_4_knn_robustness": run4_payload,
+        "run_robust_knn_eval": run4_payload,
         "best_pretrain_run": best_pretrain,
         "best_pretrain_run_id": str(best_pretrain.get("run_id", "")),
         "best_pretrain_round": str(best_pretrain.get("phase", "")),
@@ -627,6 +848,8 @@ def main() -> None:
             "projection_dim",
             "knn_k",
             "repr_objective",
+            "method_gain_vs_prev",
+            "profile_changed_vs_prev",
             "sampler_mode",
             "augmentation_profile",
             "learning_rate",
@@ -642,26 +865,29 @@ def main() -> None:
 
     card = "\n".join(
         [
-            "# DB5 Repr Stage-2 Matrix Repro Card",
+            "# DB5 Repr Method Matrix Repro Card",
             "",
             "## Goal",
             "- strengthen DB5 foundation representation pretraining",
+            "- method-first optimization for migration-ready representations",
             "- keep public reproducibility track pretrain-only",
             "",
-            "## Fixed Backbone",
-            "- repr_objective: `supcon`",
-            "- sampler_mode: `class_source_balanced`",
-            "- augmentation_profile: `strong`",
+            "## Stage-A Method Blocks",
+            "- A1 baseline_supcon",
+            "- A2 quality_aware_pairing",
+            "- A3 curriculum_augmentation",
+            "- A4 multitask_repr_only",
+            "- A5 multitask_plus_quality",
+            "- A6 multitask_quality_curriculum",
             "",
             "## Stage Results",
-            f"- run_1_baseline: `{row1['run_id']}` val_f1={float(row1['pretrain_best_val_macro_f1']):.4f}",
-            f"- run_2_best: `{best_run2['run_id']}` temp={float(best_run2['temperature']):.4f} val_f1={float(best_run2['pretrain_best_val_macro_f1']):.4f}",
-            f"- run_3_best: `{best_run3['run_id']}` proj={int(best_run3['projection_dim'])} val_f1={float(best_run3['pretrain_best_val_macro_f1']):.4f}",
-            f"- run3_gain_vs_run1: `{float(best_run3['pretrain_best_val_macro_f1']) - float(row1['pretrain_best_val_macro_f1']):.4f}`",
-            f"- low_return_zone: `{bool(low_return_zone)}`",
+            f"- total_runs: `{len(rows)}`",
+            f"- stage_a_runs: `{len(stage_a_rows)}`",
+            f"- stage_b_runs: `{len(stage_b_rows)}`",
+            f"- method_plateau_detected: `{bool(method_plateau_detected)}`",
             f"- stop_reason: `{stop_reason}`",
-            f"- run_4_status: `{'completed' if run4_payload else 'skipped'}`",
-            f"- run_4_best_knn_k: `{int(run4_payload['best']['knn_k']) if run4_payload else ''}`",
+            f"- robust_knn_eval: `{'completed' if run4_payload else 'skipped'}`",
+            f"- robust_knn_best_k: `{int(run4_payload['best']['knn_k']) if run4_payload else ''}`",
             "",
             "## Best Pretrain",
             f"- run_id: `{best_pretrain['run_id']}`",
@@ -677,8 +903,8 @@ def main() -> None:
             "## Artifacts",
             f"- summary_json: `{run_dir / 'db5_repr_method_matrix_summary.json'}`",
             f"- summary_csv: `{run_dir / 'db5_repr_method_matrix_summary.csv'}`",
-            f"- run4_knn_json: `{run_dir / 'run4_knn_robustness.json'}`",
-            f"- run4_knn_csv: `{run_dir / 'run4_knn_robustness.csv'}`",
+            f"- robust_knn_json: `{run_dir / 'run4_knn_robustness.json'}`",
+            f"- robust_knn_csv: `{run_dir / 'run4_knn_robustness.csv'}`",
         ]
     )
     (run_dir / "referee_repro_card.md").write_text(card, encoding="utf-8")

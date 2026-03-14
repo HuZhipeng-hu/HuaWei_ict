@@ -26,9 +26,11 @@ from ninapro_db5.model import build_db5_encoder_model
 from ninapro_db5.repr_pretrain_utils import (
     augment_batch as _augment_batch,
     build_class_source_balanced_indices as _build_class_source_balanced_indices,
+    build_quality_aware_positive_pairs as _build_quality_aware_positive_pairs,
     build_training_indices as _build_training_indices,
     parse_bool_arg as _parse_bool_arg,
     resolve_augmentation_params as _resolve_augmentation_params,
+    resolve_epoch_augmentation_params as _resolve_epoch_augmentation_params,
     resolve_repr_objective as _resolve_repr_objective,
     resolve_sampler_mode as _resolve_sampler_mode,
 )
@@ -73,6 +75,14 @@ SUMMARY_FIELDS = [
     "augment_freq_mask_ratio",
     "ce_weight",
     "label_smoothing",
+    "contrastive_weight",
+    "temporal_weight",
+    "recon_weight",
+    "pairing_mode",
+    "pair_cross_source_ratio",
+    "pair_top_quality_ratio",
+    "quality_sampling_mode",
+    "final_curriculum_alpha",
     "learning_rate",
     "weight_decay",
     "manifest_use_source_metadata",
@@ -125,25 +135,39 @@ if nn is not None and ops is not None and Tensor is not None and ms is not None:
 
 
     class RepresentationNet(nn.Cell):
-        def __init__(self, encoder, *, projection_dim: int, embedding_dim: int, num_classes: int):
+        def __init__(
+            self,
+            encoder,
+            *,
+            projection_dim: int,
+            embedding_dim: int,
+            num_classes: int,
+            temporal_dim: int,
+        ):
             super().__init__()
             self.encoder = encoder
             self.projector = ProjectionHead(int(embedding_dim), int(projection_dim))
             self.classifier = nn.Dense(int(embedding_dim), int(num_classes))
+            self.temporal_head = nn.Dense(int(embedding_dim), int(max(4, temporal_dim)))
+            self.recon_head = nn.Dense(int(embedding_dim), 3)
             self.l2 = ops.L2Normalize(axis=1) if hasattr(ops, "L2Normalize") else None
+            self.reduce_sum = ops.ReduceSum(keep_dims=True)
+            self.sqrt = ops.Sqrt()
 
         def _normalize(self, x):
             if self.l2 is not None:
                 return self.l2(x)
-            sq = ops.ReduceSum(keep_dims=True)(x * x, 1)
+            sq = self.reduce_sum(x * x, 1)
             sq = ops.clip_by_value(sq, Tensor(1e-12, ms.float32), Tensor(1e12, ms.float32))
-            return x / ops.Sqrt()(sq)
+            return x / self.sqrt(sq)
 
         def construct(self, x):
             feat = self.encoder(x)
             proj = self.projector(feat)
             logits = self.classifier(feat)
-            return feat, self._normalize(proj), logits
+            temporal_repr = self.temporal_head(feat)
+            recon_stats = self.recon_head(feat)
+            return feat, self._normalize(proj), logits, temporal_repr, recon_stats
 
 
     class LabelSmoothedCrossEntropy(nn.Cell):
@@ -201,30 +225,99 @@ if nn is not None and ops is not None and Tensor is not None and ms is not None:
 
 
     class ReprTrainCell(nn.Cell):
-        def __init__(self, model, supcon_loss_fn, *, use_ce: bool, ce_loss_fn=None, ce_weight: float = 0.0):
+        def __init__(
+            self,
+            model,
+            supcon_loss_fn,
+            *,
+            objective: str,
+            use_ce: bool,
+            ce_loss_fn=None,
+            ce_weight: float = 0.0,
+            contrastive_weight: float = 1.0,
+            temporal_weight: float = 0.3,
+            recon_weight: float = 0.2,
+        ):
             super().__init__(auto_prefix=False)
             self.model = model
             self.supcon_loss_fn = supcon_loss_fn
+            self.objective = str(objective)
             self.use_ce = bool(use_ce)
             self.ce_loss_fn = ce_loss_fn
             self.ce_weight = Tensor(float(max(0.0, ce_weight)), ms.float32)
+            self.contrastive_weight = Tensor(float(max(0.0, contrastive_weight)), ms.float32)
+            self.temporal_weight = Tensor(float(max(0.0, temporal_weight)), ms.float32)
+            self.recon_weight = Tensor(float(max(0.0, recon_weight)), ms.float32)
             self.mul = ops.Mul()
             self.add = ops.Add()
             self.concat = ops.Concat(axis=0)
             self.cast = ops.Cast()
+            self.abs = ops.Abs()
+            self.square = ops.Square()
+            self.sqrt = ops.Sqrt()
+            self.reduce_mean = ops.ReduceMean(keep_dims=False)
+            self.reduce_sum_keep = ops.ReduceSum(keep_dims=True)
+            self.stack = ops.Stack(axis=1)
+            self.l2 = ops.L2Normalize(axis=1) if hasattr(ops, "L2Normalize") else None
+
+        def _mse(self, left, right):
+            return self.reduce_mean(self.square(left - right))
+
+        def _normalize(self, x):
+            if self.l2 is not None:
+                return self.l2(x)
+            sq = self.reduce_sum_keep(x * x, 1)
+            sq = ops.clip_by_value(sq, Tensor(1e-12, ms.float32), Tensor(1e12, ms.float32))
+            return x / self.sqrt(sq)
+
+        def _window_stats_target(self, x):
+            # x: [B, C, F, T], build lightweight reconstruction target [B, 3]
+            abs_mean = self.reduce_mean(self.abs(x), (1, 2, 3))
+            raw_mean = self.reduce_mean(x, (1, 2, 3))
+            centered = x - ops.reshape(raw_mean, (-1, 1, 1, 1))
+            variance = self.reduce_mean(self.square(centered), (1, 2, 3))
+            std = self.sqrt(variance + Tensor(1e-12, ms.float32))
+            t_len = int(x.shape[3])
+            if t_len > 1:
+                temporal_diff = x[:, :, :, 1:] - x[:, :, :, :-1]
+                temporal_energy = self.reduce_mean(self.abs(temporal_diff), (1, 2, 3))
+            else:
+                temporal_energy = abs_mean * Tensor(0.0, ms.float32)
+            return self.stack((abs_mean, std, temporal_energy))
 
         def construct(self, x1, x2, labels):
-            _feat1, z1, logits1 = self.model(x1)
-            _feat2, z2, logits2 = self.model(x2)
+            _feat1, z1, logits1, temporal_1, recon_1 = self.model(x1)
+            _feat2, z2, logits2, temporal_2, recon_2 = self.model(x2)
             all_z = self.concat((z1, z2))
             all_labels = self.concat((labels, labels))
-            supcon_loss = self.supcon_loss_fn(all_z, all_labels)
-            if not self.use_ce or self.ce_loss_fn is None:
-                return supcon_loss
-            ce_1 = self.ce_loss_fn(logits1, self.cast(labels, ms.int32))
-            ce_2 = self.ce_loss_fn(logits2, self.cast(labels, ms.int32))
-            ce = (ce_1 + ce_2) * Tensor(0.5, ms.float32)
-            return self.add(supcon_loss, self.mul(self.ce_weight, ce))
+            contrastive_loss = self.supcon_loss_fn(all_z, all_labels)
+
+            if self.objective == "supcon":
+                return contrastive_loss
+
+            if self.objective == "supcon_ce":
+                if not self.use_ce or self.ce_loss_fn is None:
+                    return contrastive_loss
+                ce_1 = self.ce_loss_fn(logits1, self.cast(labels, ms.int32))
+                ce_2 = self.ce_loss_fn(logits2, self.cast(labels, ms.int32))
+                ce = (ce_1 + ce_2) * Tensor(0.5, ms.float32)
+                return self.add(contrastive_loss, self.mul(self.ce_weight, ce))
+
+            temporal_loss = self._mse(self._normalize(temporal_1), self._normalize(temporal_2))
+            recon_target_1 = self._window_stats_target(x1)
+            recon_target_2 = self._window_stats_target(x2)
+            recon_loss = (self._mse(recon_1, recon_target_1) + self._mse(recon_2, recon_target_2)) * Tensor(
+                0.5, ms.float32
+            )
+            combined = self.mul(self.contrastive_weight, contrastive_loss)
+            combined = self.add(combined, self.mul(self.temporal_weight, temporal_loss))
+            combined = self.add(combined, self.mul(self.recon_weight, recon_loss))
+            if self.use_ce and self.ce_loss_fn is not None:
+                ce_1 = self.ce_loss_fn(logits1, self.cast(labels, ms.int32))
+                ce_2 = self.ce_loss_fn(logits2, self.cast(labels, ms.int32))
+                ce = (ce_1 + ce_2) * Tensor(0.5, ms.float32)
+                combined = self.add(combined, self.mul(self.ce_weight, ce))
+            return combined
 
 
 def _build_lr_schedule(total_steps: int, warmup_steps: int, base_lr: float) -> list[float]:
@@ -396,6 +489,8 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         config.training.epochs = int(args.epochs)
     if args.early_stopping_patience is not None:
         config.training.early_stopping_patience = int(args.early_stopping_patience)
+    if str(args.quality_sampling_mode or "").strip():
+        config.feature.quality_sampling_mode = str(args.quality_sampling_mode).strip().lower()
     manifest_use_source_metadata_override = _parse_bool_arg(args.manifest_use_source_metadata)
     if manifest_use_source_metadata_override is not None:
         config.manifest_use_source_metadata = bool(manifest_use_source_metadata_override)
@@ -441,6 +536,7 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
     val_x, val_y = samples[val_idx], labels[val_idx]
     test_x, test_y = samples[test_idx], labels[test_idx]
     train_source_ids = np.asarray(source_ids)[train_idx]
+    train_metadata = [dict(source_metadata[int(idx)]) for idx in train_idx.tolist()]
     logger.info("Split sizes => train=%d val=%d test=%d", len(train_y), len(val_y), len(test_y))
 
     repr_objective = _resolve_repr_objective(args.repr_objective)
@@ -449,7 +545,15 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         args.label_smoothing if args.label_smoothing is not None else float(config.training.label_smoothing)
     )
     ce_weight = float(args.ce_weight)
-    aug_params = _resolve_augmentation_params(
+    contrastive_weight = float(args.contrastive_weight)
+    temporal_weight = float(args.temporal_weight)
+    recon_weight = float(args.recon_weight)
+    pairing_mode = str(args.pairing_mode).strip().lower()
+    if float(args.pair_cross_source_ratio) < 0.0 or float(args.pair_cross_source_ratio) > 1.0:
+        raise ValueError("pair_cross_source_ratio must be in [0, 1].")
+    if float(args.pair_top_quality_ratio) <= 0.0 or float(args.pair_top_quality_ratio) > 1.0:
+        raise ValueError("pair_top_quality_ratio must be in (0, 1].")
+    base_aug_params = _resolve_augmentation_params(
         profile=str(args.augmentation_profile),
         scale_min=args.augment_scale_min,
         scale_max=args.augment_scale_max,
@@ -459,12 +563,21 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         freq_mask_ratio=args.augment_freq_mask_ratio,
     )
     logger.info(
-        "repr setup: objective=%s sampler_mode=%s aug_profile=%s ce_weight=%.3f label_smoothing=%.3f",
+        (
+            "repr setup: objective=%s sampler_mode=%s aug_profile=%s pairing_mode=%s "
+            "ce_weight=%.3f label_smoothing=%.3f loss_w={contrastive=%.2f temporal=%.2f recon=%.2f} "
+            "quality_sampling_mode=%s"
+        ),
         repr_objective,
         sampler_mode,
-        aug_params.get("profile", ""),
+        base_aug_params.get("profile", ""),
+        pairing_mode,
         ce_weight,
         label_smoothing,
+        contrastive_weight,
+        temporal_weight,
+        recon_weight,
+        str(config.feature.quality_sampling_mode),
     )
 
     encoder = build_db5_encoder_model(config)
@@ -474,17 +587,22 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         projection_dim=int(args.projection_dim),
         embedding_dim=embedding_dim,
         num_classes=int(len(class_names)),
+        temporal_dim=int(args.temporal_dim),
     )
     supcon_loss_fn = SupervisedContrastiveLoss(float(args.temperature))
     ce_loss_fn = None
-    if repr_objective == "supcon_ce":
+    if repr_objective == "supcon_ce" or (repr_objective == "multitask_repr" and ce_weight > 0.0):
         ce_loss_fn = LabelSmoothedCrossEntropy(int(len(class_names)), smoothing=label_smoothing)
     train_cell = ReprTrainCell(
         repr_model,
         supcon_loss_fn,
-        use_ce=(repr_objective == "supcon_ce"),
+        objective=repr_objective,
+        use_ce=(repr_objective == "supcon_ce" or (repr_objective == "multitask_repr" and ce_weight > 0.0)),
         ce_loss_fn=ce_loss_fn,
         ce_weight=ce_weight,
+        contrastive_weight=contrastive_weight,
+        temporal_weight=temporal_weight,
+        recon_weight=recon_weight,
     )
 
     steps_per_epoch = int(np.ceil(max(1, len(train_y)) / max(1, int(config.training.batch_size))))
@@ -523,6 +641,11 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
 
     for epoch in range(1, int(config.training.epochs) + 1):
         epoch_losses: list[float] = []
+        epoch_aug_params = _resolve_epoch_augmentation_params(
+            params=base_aug_params,
+            epoch=epoch,
+            total_epochs=int(config.training.epochs),
+        )
         batch_indices = _build_training_indices(
             labels=train_y.astype(np.int32),
             source_ids=train_source_ids,
@@ -543,9 +666,20 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
             if idx.size == 0:
                 continue
             batch_x = train_x[idx]
+            pair_idx = idx
+            if pairing_mode == "quality_mixed":
+                pair_idx = _build_quality_aware_positive_pairs(
+                    anchor_indices=idx,
+                    labels=train_y.astype(np.int32),
+                    metadata_rows=train_metadata,
+                    seed=int(config.training.split_seed) + epoch * 997 + step,
+                    cross_source_ratio=float(args.pair_cross_source_ratio),
+                    top_quality_ratio=float(args.pair_top_quality_ratio),
+                )
+            batch_x_pair = train_x[pair_idx]
             batch_y = train_y[idx].astype(np.int32)
-            view1 = _augment_batch(batch_x, rng, params=aug_params)
-            view2 = _augment_batch(batch_x, rng, params=aug_params)
+            view1 = _augment_batch(batch_x, rng, params=epoch_aug_params)
+            view2 = _augment_batch(batch_x_pair, rng, params=epoch_aug_params)
             loss = train_step(
                 Tensor(view1, ms.float32),
                 Tensor(view2, ms.float32),
@@ -583,13 +717,14 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         history["lr"].append(current_lr)
 
         logger.info(
-            "Epoch %d/%d | ReprLoss %.4f | Val Acc %.4f F1 %.4f | LR %.6f",
+            "Epoch %d/%d | ReprLoss %.4f | Val Acc %.4f F1 %.4f | LR %.6f | AugAlpha %.2f",
             epoch,
             int(config.training.epochs),
             history["train_loss"][-1],
             val_acc,
             val_f1,
             current_lr,
+            float(epoch_aug_params.get("curriculum_alpha", 1.0)),
         )
 
         improved = (val_f1 > best_val_f1 + 1e-6) or (
@@ -696,15 +831,29 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
         "knn_k": int(args.knn_k),
         "sampler_mode": sampler_mode,
         "sampler_snapshot": sampler_snapshot,
-        "augmentation_profile": str(aug_params["profile"]),
-        "augment_scale_min": float(aug_params["scale_min"]),
-        "augment_scale_max": float(aug_params["scale_max"]),
-        "augment_noise_std": float(aug_params["noise_std"]),
-        "augment_channel_drop_ratio": float(aug_params["channel_drop_ratio"]),
-        "augment_time_mask_ratio": float(aug_params["time_mask_ratio"]),
-        "augment_freq_mask_ratio": float(aug_params["freq_mask_ratio"]),
-        "ce_weight": float(ce_weight if repr_objective == "supcon_ce" else 0.0),
-        "label_smoothing": float(label_smoothing if repr_objective == "supcon_ce" else 0.0),
+        "augmentation_profile": str(base_aug_params["profile"]),
+        "augment_scale_min": float(base_aug_params["scale_min"]),
+        "augment_scale_max": float(base_aug_params["scale_max"]),
+        "augment_noise_std": float(base_aug_params["noise_std"]),
+        "augment_channel_drop_ratio": float(base_aug_params["channel_drop_ratio"]),
+        "augment_time_mask_ratio": float(base_aug_params["time_mask_ratio"]),
+        "augment_freq_mask_ratio": float(base_aug_params["freq_mask_ratio"]),
+        "ce_weight": float(ce_weight if (repr_objective == "supcon_ce" or ce_weight > 0.0) else 0.0),
+        "label_smoothing": float(label_smoothing if (repr_objective == "supcon_ce" or ce_weight > 0.0) else 0.0),
+        "contrastive_weight": float(contrastive_weight if repr_objective == "multitask_repr" else 1.0),
+        "temporal_weight": float(temporal_weight if repr_objective == "multitask_repr" else 0.0),
+        "recon_weight": float(recon_weight if repr_objective == "multitask_repr" else 0.0),
+        "pairing_mode": pairing_mode,
+        "pair_cross_source_ratio": float(args.pair_cross_source_ratio),
+        "pair_top_quality_ratio": float(args.pair_top_quality_ratio),
+        "quality_sampling_mode": str(config.feature.quality_sampling_mode),
+        "final_curriculum_alpha": float(
+            _resolve_epoch_augmentation_params(
+                params=base_aug_params,
+                epoch=int(config.training.epochs),
+                total_epochs=int(config.training.epochs),
+            ).get("curriculum_alpha", 1.0)
+        ),
         "learning_rate": float(config.training.learning_rate),
         "weight_decay": float(config.training.weight_decay),
         "manifest_use_source_metadata": bool(config.manifest_use_source_metadata),
@@ -742,6 +891,8 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
             "mode": str(ms_mode),
             "repr_objective": repr_objective,
             "sampler_mode": sampler_mode,
+            "pairing_mode": pairing_mode,
+            "quality_sampling_mode": str(config.feature.quality_sampling_mode),
             "encoder_checkpoint_path": str(encoder_ckpt_path),
             "model_checkpoint_path": str(model_ckpt_path),
             "repr_eval_dir": str(repr_eval_dir),
@@ -770,17 +921,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--early_stopping_patience", type=int, default=None)
     parser.add_argument("--manifest_use_source_metadata", choices=["true", "false"], default=None)
     parser.add_argument("--projection_dim", type=int, default=128)
+    parser.add_argument("--temporal_dim", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument("--knn_k", type=int, default=5)
-    parser.add_argument("--repr_objective", default="supcon_ce", choices=["supcon", "supcon_ce"])
+    parser.add_argument("--repr_objective", default="supcon_ce", choices=["supcon", "supcon_ce", "multitask_repr"])
     parser.add_argument("--ce_weight", type=float, default=0.35)
+    parser.add_argument("--contrastive_weight", type=float, default=1.0)
+    parser.add_argument("--temporal_weight", type=float, default=0.3)
+    parser.add_argument("--recon_weight", type=float, default=0.2)
     parser.add_argument("--label_smoothing", type=float, default=None)
     parser.add_argument(
         "--sampler_mode",
         default="class_source_balanced",
         choices=["class_balanced", "class_source_balanced", "balanced", "source_balanced"],
     )
-    parser.add_argument("--augmentation_profile", default="strong", choices=["mild", "strong"])
+    parser.add_argument("--augmentation_profile", default="strong", choices=["mild", "strong", "curriculum"])
+    parser.add_argument("--pairing_mode", default="same_window_aug", choices=["same_window_aug", "quality_mixed"])
+    parser.add_argument("--pair_cross_source_ratio", type=float, default=0.6)
+    parser.add_argument("--pair_top_quality_ratio", type=float, default=0.4)
+    parser.add_argument("--quality_sampling_mode", default=None, choices=["quality", "uniform"])
     parser.add_argument("--augment_scale_min", type=float, default=None)
     parser.add_argument("--augment_scale_max", type=float, default=None)
     parser.add_argument("--augment_noise_std", type=float, default=None)

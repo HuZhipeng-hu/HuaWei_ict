@@ -63,6 +63,8 @@ class DB5PretrainDatasetLoader:
                 "passed_quality": 0,
                 "selected": 0,
                 "filtered_by_quality": 0,
+                "quality_score_sum": 0.0,
+                "quality_score_count": 0,
             },
             "per_class": {},
         }
@@ -173,6 +175,8 @@ class DB5PretrainDatasetLoader:
                 "energy_threshold": float(self.config.feature.energy_min),
                 "std_threshold": float(self.config.feature.static_std_min),
                 "adaptive_action_threshold": False,
+                "quality_sampling_mode": str(self.config.feature.quality_sampling_mode).strip().lower(),
+                "selected_quality_mean": 0.0,
             }
         starts = list(range(0, segment_signal.shape[0] - window + 1, step))
         if not starts:
@@ -196,9 +200,9 @@ class DB5PretrainDatasetLoader:
             stds = [item[3] for item in quality_rows]
             energy_threshold, std_threshold = self._adaptive_action_thresholds(class_name, energies, stds)
 
-        candidates: list[tuple[np.ndarray, dict[str, float], float]] = []
-        fallback_candidates: list[tuple[np.ndarray, dict[str, float], float]] = []
-        for _start, raw_window, energy, mean_std, clip_ratio in quality_rows:
+        candidates: list[tuple[int, np.ndarray, dict[str, float], float]] = []
+        fallback_candidates: list[tuple[int, np.ndarray, dict[str, float], float]] = []
+        for start_idx, raw_window, energy, mean_std, clip_ratio in quality_rows:
             if is_rest:
                 if energy > float(self.config.feature.energy_min):
                     continue
@@ -207,11 +211,14 @@ class DB5PretrainDatasetLoader:
                 score = -(energy + mean_std + clip_ratio * 10.0)
                 candidates.append(
                     (
+                        int(start_idx),
                         self._resample_window(raw_window),
                         {
                             "energy": float(energy),
                             "mean_std": float(mean_std),
                             "clip_ratio": float(clip_ratio),
+                            "quality_score": float(score),
+                            "window_start": float(start_idx),
                         },
                         float(score),
                     )
@@ -220,11 +227,14 @@ class DB5PretrainDatasetLoader:
 
             score = energy + mean_std - clip_ratio * 10.0
             entry = (
+                int(start_idx),
                 self._resample_window(raw_window),
                 {
                     "energy": float(energy),
                     "mean_std": float(mean_std),
                     "clip_ratio": float(clip_ratio),
+                    "quality_score": float(score),
+                    "window_start": float(start_idx),
                 },
                 float(score),
             )
@@ -236,12 +246,34 @@ class DB5PretrainDatasetLoader:
         if (not is_rest) and (not candidates) and fallback_candidates:
             candidates = list(fallback_candidates)
 
-        candidates.sort(key=lambda item: item[2], reverse=True)
+        mode = str(getattr(self.config.feature, "quality_sampling_mode", "quality")).strip().lower()
+        quality_exp = float(max(1e-6, getattr(self.config.feature, "quality_priority_exponent", 1.0)))
+        if mode == "uniform":
+            candidates.sort(key=lambda item: item[0])
+        else:
+            candidates.sort(key=lambda item: float(np.sign(item[3]) * (abs(item[3]) ** quality_exp)), reverse=True)
+
         target_count = int(max(0, allow_many))
         if (not is_rest) and candidates:
-            target_count = max(target_count, min(3, len(candidates)))
-        selected = candidates[: min(len(candidates), target_count)]
-        output = [(window_item, metrics) for window_item, metrics, _score in selected]
+            min_keep = int(max(1, getattr(self.config.feature, "min_action_windows_per_segment", 3)))
+            target_count = max(target_count, min(min_keep, len(candidates)))
+
+        selected: list[tuple[int, np.ndarray, dict[str, float], float]]
+        if mode == "uniform" and target_count > 0 and len(candidates) > target_count:
+            selected = []
+            positions = np.linspace(0, len(candidates) - 1, num=target_count, dtype=np.int32)
+            used: set[int] = set()
+            for pos in positions.tolist():
+                pos_i = int(pos)
+                if pos_i in used:
+                    continue
+                used.add(pos_i)
+                selected.append(candidates[pos_i])
+        else:
+            selected = candidates[: min(len(candidates), target_count)]
+
+        output = [(window_item, metrics) for _start, window_item, metrics, _score in selected]
+        selected_scores = [float(item[3]) for item in selected]
         diag = {
             "raw_candidates": int(len(starts)),
             "passed_quality": int(len(candidates)),
@@ -250,6 +282,8 @@ class DB5PretrainDatasetLoader:
             "energy_threshold": float(energy_threshold),
             "std_threshold": float(std_threshold),
             "adaptive_action_threshold": bool(adaptive_action),
+            "quality_sampling_mode": mode,
+            "selected_quality_mean": float(np.mean(selected_scores)) if selected_scores else 0.0,
         }
         return output, diag
 
@@ -331,6 +365,10 @@ class DB5PretrainDatasetLoader:
                     totals["passed_quality"] += int(selection_diag["passed_quality"])
                     totals["selected"] += int(selection_diag["selected"])
                     totals["filtered_by_quality"] += int(selection_diag["filtered_by_quality"])
+                    totals["quality_score_sum"] += float(
+                        selection_diag.get("selected_quality_mean", 0.0) * int(selection_diag["selected"])
+                    )
+                    totals["quality_score_count"] += int(selection_diag["selected"])
                     per_class = self._window_diagnostics["per_class"].setdefault(
                         class_name,
                         {
@@ -339,6 +377,9 @@ class DB5PretrainDatasetLoader:
                             "passed_quality": 0,
                             "selected": 0,
                             "filtered_by_quality": 0,
+                            "quality_score_sum": 0.0,
+                            "quality_score_count": 0,
+                            "quality_sampling_mode": str(selection_diag.get("quality_sampling_mode", "quality")),
                         },
                     )
                     per_class["segments"] += 1
@@ -346,6 +387,10 @@ class DB5PretrainDatasetLoader:
                     per_class["passed_quality"] += int(selection_diag["passed_quality"])
                     per_class["selected"] += int(selection_diag["selected"])
                     per_class["filtered_by_quality"] += int(selection_diag["filtered_by_quality"])
+                    per_class["quality_score_sum"] += float(
+                        selection_diag.get("selected_quality_mean", 0.0) * int(selection_diag["selected"])
+                    )
+                    per_class["quality_score_count"] += int(selection_diag["selected"])
                     if not windows:
                         segment_index += 1
                         continue
@@ -368,9 +413,13 @@ class DB5PretrainDatasetLoader:
                             "class_name": class_name,
                             "global_label": int(global_label),
                             "repetition": repetition,
+                            "segment_index": int(segment_index),
+                            "window_index": int(win_idx),
                             "window_energy": float(quality_metrics["energy"]),
                             "window_std": float(quality_metrics["mean_std"]),
                             "window_clip_ratio": float(quality_metrics["clip_ratio"]),
+                            "window_quality_score": float(quality_metrics.get("quality_score", 0.0)),
+                            "window_start": int(quality_metrics.get("window_start", 0.0)),
                         }
                         required_identity = ("user_id", "session_id", "recording_id")
                         if any(not str(metadata.get(key, "")).strip() for key in required_identity):
@@ -400,6 +449,8 @@ class DB5PretrainDatasetLoader:
                 "passed_quality": 0,
                 "selected": 0,
                 "filtered_by_quality": 0,
+                "quality_score_sum": 0.0,
+                "quality_score_count": 0,
             },
             "per_class": {},
         }
@@ -433,8 +484,15 @@ class DB5PretrainDatasetLoader:
 
     def get_window_diagnostics(self) -> dict[str, Any]:
         totals = dict(self._window_diagnostics.get("totals", {}))
-        per_class = {
-            str(name): dict(values)
-            for name, values in (self._window_diagnostics.get("per_class", {}) or {}).items()
-        }
+        quality_count = int(totals.get("quality_score_count", 0) or 0)
+        quality_sum = float(totals.get("quality_score_sum", 0.0) or 0.0)
+        totals["selected_quality_mean"] = float(quality_sum / quality_count) if quality_count > 0 else 0.0
+
+        per_class: dict[str, dict[str, Any]] = {}
+        for name, values in (self._window_diagnostics.get("per_class", {}) or {}).items():
+            item = dict(values)
+            q_count = int(item.get("quality_score_count", 0) or 0)
+            q_sum = float(item.get("quality_score_sum", 0.0) or 0.0)
+            item["selected_quality_mean"] = float(q_sum / q_count) if q_count > 0 else 0.0
+            per_class[str(name)] = item
         return {"totals": totals, "per_class": per_class}

@@ -26,6 +26,15 @@ AUGMENT_PROFILES: dict[str, dict[str, float]] = {
         "time_mask_ratio": 0.10,
         "freq_mask_ratio": 0.08,
     },
+    # Curriculum target profile (starts from mild and anneals toward this target).
+    "curriculum": {
+        "scale_min": 0.88,
+        "scale_max": 1.12,
+        "noise_std": 0.015,
+        "channel_drop_ratio": 0.10,
+        "time_mask_ratio": 0.10,
+        "freq_mask_ratio": 0.08,
+    },
 }
 
 
@@ -48,6 +57,9 @@ def resolve_repr_objective(raw: str) -> str:
         "supcon_ce": "supcon_ce",
         "supconce": "supcon_ce",
         "supcon_ce_loss": "supcon_ce",
+        "multitask_repr": "multitask_repr",
+        "multitask": "multitask_repr",
+        "multi_task_repr": "multitask_repr",
     }
     resolved = aliases.get(token)
     if resolved is None:
@@ -111,6 +123,42 @@ def resolve_augmentation_params(
     base["freq_mask_ratio"] = _validate_ratio("freq_mask_ratio", base["freq_mask_ratio"])
     base["profile"] = key
     return base
+
+
+def resolve_epoch_augmentation_params(
+    *,
+    params: dict[str, float | str],
+    epoch: int,
+    total_epochs: int,
+) -> dict[str, float | str]:
+    """Resolve per-epoch augmentation parameters with optional curriculum schedule."""
+
+    profile = str(params.get("profile", "mild")).strip().lower()
+    if profile != "curriculum":
+        return dict(params)
+
+    total = max(1, int(total_epochs))
+    progress = float(max(0, int(epoch) - 1)) / float(max(1, total - 1))
+    # Keep early phase stable, then linearly ramp perturbation strength.
+    alpha = 0.0 if progress <= 0.30 else float(min(1.0, (progress - 0.30) / 0.70))
+    mild = AUGMENT_PROFILES["mild"]
+    target = AUGMENT_PROFILES["strong"]
+    out: dict[str, float | str] = dict(params)
+    for key in (
+        "scale_min",
+        "scale_max",
+        "noise_std",
+        "channel_drop_ratio",
+        "time_mask_ratio",
+        "freq_mask_ratio",
+    ):
+        base_val = float(mild[key])
+        target_val = float(params.get(key, target[key]))
+        out[key] = float(base_val + (target_val - base_val) * alpha)
+    out["profile"] = "curriculum"
+    out["curriculum_alpha"] = float(alpha)
+    out["curriculum_progress"] = float(progress)
+    return out
 
 
 def apply_random_block_mask(
@@ -239,3 +287,95 @@ def build_training_indices(
         class_names=list(class_names),
     )
 
+
+def build_quality_aware_positive_pairs(
+    *,
+    anchor_indices: np.ndarray,
+    labels: np.ndarray,
+    metadata_rows: Sequence[dict[str, Any]],
+    seed: int,
+    cross_source_ratio: float = 0.6,
+    top_quality_ratio: float = 0.4,
+) -> np.ndarray:
+    """Build positive pair indices for contrastive training.
+
+    Priority:
+    1) same action, different recording/source
+    2) same action, same recording, neighboring windows
+    3) fallback: any same-action sample
+    """
+
+    anchors = np.asarray(anchor_indices, dtype=np.int32)
+    if anchors.size == 0:
+        return anchors.copy()
+    labels_i32 = np.asarray(labels, dtype=np.int32)
+    if labels_i32.shape[0] != len(metadata_rows):
+        raise ValueError("metadata length mismatch in quality-aware positive pair builder")
+
+    rng = np.random.default_rng(int(seed))
+    by_class: dict[int, np.ndarray] = {}
+    for cls in np.unique(labels_i32).tolist():
+        by_class[int(cls)] = np.where(labels_i32 == int(cls))[0].astype(np.int32)
+
+    def _recording_id(meta: dict[str, Any]) -> str:
+        return str(meta.get("recording_id", "")).strip()
+
+    def _segment(meta: dict[str, Any]) -> int:
+        try:
+            return int(meta.get("segment_index", -1))
+        except Exception:
+            return -1
+
+    def _win(meta: dict[str, Any]) -> int:
+        try:
+            return int(meta.get("window_index", -1))
+        except Exception:
+            return -1
+
+    def _quality(meta: dict[str, Any]) -> float:
+        try:
+            return float(meta.get("window_quality_score", 0.0))
+        except Exception:
+            return 0.0
+
+    def _pick_from(candidates: list[int]) -> int:
+        if not candidates:
+            return -1
+        uniq = np.asarray(sorted(set(int(i) for i in candidates)), dtype=np.int32)
+        if uniq.size == 0:
+            return -1
+        ranked = sorted(uniq.tolist(), key=lambda idx: _quality(metadata_rows[int(idx)]), reverse=True)
+        keep = max(1, int(round(len(ranked) * float(np.clip(top_quality_ratio, 0.1, 1.0)))))
+        pool = ranked[:keep]
+        return int(rng.choice(np.asarray(pool, dtype=np.int32)))
+
+    positives: list[int] = []
+    for anchor in anchors.tolist():
+        anchor = int(anchor)
+        cls = int(labels_i32[anchor])
+        class_pool = by_class.get(cls, np.asarray([], dtype=np.int32))
+        if class_pool.size <= 1:
+            positives.append(anchor)
+            continue
+        meta = metadata_rows[anchor]
+        rec = _recording_id(meta)
+        seg = _segment(meta)
+        win = _win(meta)
+
+        same_class = [int(i) for i in class_pool.tolist() if int(i) != anchor]
+        diff_source = [i for i in same_class if _recording_id(metadata_rows[i]) and _recording_id(metadata_rows[i]) != rec]
+        near_same_source = [
+            i
+            for i in same_class
+            if _recording_id(metadata_rows[i]) == rec
+            and _segment(metadata_rows[i]) == seg
+            and abs(_win(metadata_rows[i]) - win) <= 2
+        ]
+
+        use_diff = bool(diff_source) and (not near_same_source or float(rng.random()) < float(cross_source_ratio))
+        chosen = _pick_from(diff_source if use_diff else near_same_source)
+        if chosen < 0:
+            chosen = _pick_from(same_class)
+        positives.append(int(chosen if chosen >= 0 else anchor))
+
+    return np.asarray(positives, dtype=np.int32)

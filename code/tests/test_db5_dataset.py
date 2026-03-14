@@ -230,6 +230,8 @@ def test_db5_loader_quality_first_window_selection_and_diagnostics(tmp_path: Pat
     assert set(np.unique(labels).tolist()) == {0}
     assert diagnostics["totals"]["raw_candidates"] >= diagnostics["totals"]["selected"]
     assert diagnostics["totals"]["filtered_by_quality"] > 0
+    assert "selected_quality_mean" in diagnostics["totals"]
+    assert diagnostics["totals"]["quality_score_count"] >= diagnostics["totals"]["selected"]
     assert diagnostics["per_class"]["E1_G01"]["selected"] == 1
 
 

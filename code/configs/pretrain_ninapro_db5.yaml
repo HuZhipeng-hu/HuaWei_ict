@@ -22,6 +22,9 @@ feature:
   window_step_ms: 80
   max_windows_per_segment: 10
   max_rest_windows_per_segment: 2
+  min_action_windows_per_segment: 3
+  quality_sampling_mode: quality
+  quality_priority_exponent: 1.0
   emg_stft_window: 64
   emg_stft_hop: 24
   emg_n_fft: 96

@@ -29,6 +29,9 @@ class DB5FeatureConfig:
     window_step_ms: int = 80
     max_windows_per_segment: int = 10
     max_rest_windows_per_segment: int = 2
+    min_action_windows_per_segment: int = 3
+    quality_sampling_mode: str = "quality"
+    quality_priority_exponent: float = 1.0
     emg_stft_window: int = 64
     emg_stft_hop: int = 24
     emg_n_fft: int = 96

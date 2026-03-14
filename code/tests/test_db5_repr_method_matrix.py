@@ -6,6 +6,7 @@ import pytest
 
 from scripts.pretrain_db5_repr_method_matrix import (
     _as_pretrain_row,
+    _build_bottleneck_profile,
     _compute_recommended_budget,
     _parse_float_grid,
     _parse_int_grid,
@@ -136,3 +137,23 @@ def test_as_pretrain_row_exports_backward_compatible_aliases() -> None:
     assert row["pretrain_run_id"] == "db5_r2_t_0p1"
     assert row["checkpoint_path"] == "artifacts/runs/x/checkpoints/best.ckpt"
     assert row["encoder_checkpoint_path"] == "artifacts/runs/x/checkpoints/best.ckpt"
+
+
+def test_build_bottleneck_profile_reads_offline_and_window_diagnostics(tmp_path: Path) -> None:
+    run_root = tmp_path / "runs"
+    run_id = "exp_a1"
+    run_dir = run_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "offline_summary.json").write_text(
+        '{"best_val_epoch": 4, "best_val_macro_f1": 0.031}',
+        encoding="utf-8",
+    )
+    (run_dir / "db5_window_diagnostics.json").write_text(
+        '{"totals": {"raw_candidates": 100, "selected": 40}}',
+        encoding="utf-8",
+    )
+    profile = _build_bottleneck_profile(run_root=run_root, run_id=run_id, epochs=100)
+    assert profile["best_epoch"] == 4
+    assert profile["best_val_f1"] == pytest.approx(0.031)
+    assert profile["window_utilization"] == pytest.approx(0.4)
+    assert isinstance(profile["signature"], str) and profile["signature"]
