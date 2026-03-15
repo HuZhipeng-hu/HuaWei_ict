@@ -42,7 +42,7 @@ def get_label_mode_spec(label_mode: str | None, action_keys: Sequence[str] | Non
     if normalized == EVENT_ONSET_LABEL_MODE:
         actions = _normalize_action_keys(action_keys)
         if not actions:
-            actions = ["E1_G01", "E1_G02"]
+            actions = ["TENSE_OPEN", "V_SIGN", "OK_SIGN", "THUMB_UP", "WRIST_CW", "WRIST_CCW"]
         class_names = ["RELAX", *actions]
         gesture_to_idx = {name: idx for idx, name in enumerate(class_names)}
         return LabelModeSpec(

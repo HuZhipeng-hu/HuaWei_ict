@@ -35,7 +35,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target_db5_keys",
         default=None,
-        help="Comma-separated DB5 action keys to override runtime config, e.g. E1_G01,E1_G02.",
+        help=(
+            "Comma-separated action keys to override runtime config, "
+            "e.g. TENSE_OPEN,V_SIGN,OK_SIGN,THUMB_UP,WRIST_CW,WRIST_CCW."
+        ),
     )
     parser.add_argument("--port", default=None)
     parser.add_argument("--device", default=None, choices=["CPU", "GPU", "Ascend"])

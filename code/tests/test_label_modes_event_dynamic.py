@@ -10,4 +10,4 @@ def test_event_label_mode_builds_dynamic_class_names():
 
 def test_event_label_mode_uses_default_actions_when_none_provided():
     spec = get_label_mode_spec("event_onset", [])
-    assert spec.class_names == ["RELAX", "E1_G01", "E1_G02"]
+    assert spec.class_names == ["RELAX", "TENSE_OPEN", "V_SIGN", "OK_SIGN", "THUMB_UP", "WRIST_CW", "WRIST_CCW"]

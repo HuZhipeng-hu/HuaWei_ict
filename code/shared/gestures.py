@@ -19,6 +19,12 @@ class GestureType(IntEnum):
     OK = 3
     YE = 4
     SIDEGRIP = 5
+    TENSE_OPEN = 6
+    V_SIGN = 7
+    OK_SIGN = 8
+    THUMB_UP = 9
+    WRIST_CW = 10
+    WRIST_CCW = 11
 
 
 NUM_CLASSES = len(GestureType)
@@ -40,6 +46,17 @@ FOLDER_TO_GESTURE: Dict[str, GestureType] = {
     "ok": GestureType.OK,
     "ye": GestureType.YE,
     "sidegrip": GestureType.SIDEGRIP,
+    "tense_open": GestureType.TENSE_OPEN,
+    "v_sign": GestureType.V_SIGN,
+    "vsign": GestureType.V_SIGN,
+    "ok_sign": GestureType.OK_SIGN,
+    "oksign": GestureType.OK_SIGN,
+    "thumb_up": GestureType.THUMB_UP,
+    "thumbup": GestureType.THUMB_UP,
+    "wrist_cw": GestureType.WRIST_CW,
+    "wristcw": GestureType.WRIST_CW,
+    "wrist_ccw": GestureType.WRIST_CCW,
+    "wristccw": GestureType.WRIST_CCW,
 }
 
 FINGER_THUMB = 0
@@ -90,6 +107,48 @@ GESTURE_FINGER_MAP: Dict[GestureType, List[FingerState]] = {
     GestureType.SIDEGRIP: [
         FingerState.HALF,
         FingerState.CLOSED,
+        FingerState.CLOSED,
+        FingerState.CLOSED,
+        FingerState.CLOSED,
+    ],
+    GestureType.TENSE_OPEN: [
+        FingerState.HALF,
+        FingerState.HALF,
+        FingerState.HALF,
+        FingerState.HALF,
+        FingerState.HALF,
+    ],
+    GestureType.V_SIGN: [
+        FingerState.CLOSED,
+        FingerState.OPEN,
+        FingerState.OPEN,
+        FingerState.CLOSED,
+        FingerState.CLOSED,
+    ],
+    GestureType.OK_SIGN: [
+        FingerState.HALF,
+        FingerState.HALF,
+        FingerState.OPEN,
+        FingerState.OPEN,
+        FingerState.OPEN,
+    ],
+    GestureType.THUMB_UP: [
+        FingerState.OPEN,
+        FingerState.CLOSED,
+        FingerState.CLOSED,
+        FingerState.CLOSED,
+        FingerState.CLOSED,
+    ],
+    GestureType.WRIST_CW: [
+        FingerState.HALF,
+        FingerState.CLOSED,
+        FingerState.CLOSED,
+        FingerState.CLOSED,
+        FingerState.HALF,
+    ],
+    GestureType.WRIST_CCW: [
+        FingerState.HALF,
+        FingerState.HALF,
         FingerState.CLOSED,
         FingerState.CLOSED,
         FingerState.CLOSED,

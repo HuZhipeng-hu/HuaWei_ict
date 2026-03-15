@@ -36,7 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--target_db5_keys",
         default=None,
-        help="Comma-separated DB5 action keys, e.g. E1_G01,E1_G02. RELAX is implicit.",
+        help=(
+            "Comma-separated action keys, "
+            "e.g. TENSE_OPEN,V_SIGN,OK_SIGN,THUMB_UP,WRIST_CW,WRIST_CCW. RELAX is implicit."
+        ),
     )
 
     parser.add_argument("--base_channels", type=int, default=None)

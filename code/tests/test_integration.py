@@ -12,7 +12,7 @@ def test_event_training_config_expected_defaults():
     model_cfg, data_cfg, train_cfg, _ = load_event_training_config(cfg_path)
 
     assert model_cfg.model_type == "event_onset"
-    assert model_cfg.num_classes == 3
+    assert model_cfg.num_classes == 7
     assert model_cfg.emg_in_channels == 8
     assert model_cfg.imu_input_dim == 6
     assert data_cfg.label_mode == "event_onset"

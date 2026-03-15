@@ -92,3 +92,38 @@ def test_event_runtime_rejects_weak_cross_class_switch_signal():
     weak_switch = machine.update(2, 0.84, 8.0, 300.0, current_state_confidence=0.76, top2_confidence=0.76)
     assert weak_switch.changed is False
     assert machine.current_state == GestureType.FIST
+
+
+def test_event_runtime_supports_wrist_direction_actions():
+    machine = EventRuntimeStateMachine(
+        inference_config=EventInferenceConfig(
+            confidence_threshold=0.75,
+            per_class_confidence_thresholds={"WRIST_CW": 0.8, "WRIST_CCW": 0.8},
+            vote_window=2,
+            vote_min_count=2,
+            activation_margin_threshold=0.08,
+            switch_confidence_boost=0.06,
+            switch_margin_threshold=0.12,
+        ),
+        runtime_config=EventRuntimeBehaviorConfig(
+            idle_release_hold_ms=700,
+            min_transition_gap_ms=120,
+            post_transition_lock_ms=220,
+            low_energy_release_threshold=2.5,
+        ),
+        low_energy_threshold=2.5,
+        class_names=["RELAX", "WRIST_CW", "WRIST_CCW"],
+        label_to_state={0: GestureType.RELAX, 1: GestureType.WRIST_CW, 2: GestureType.WRIST_CCW},
+    )
+
+    machine.update(1, 0.91, 8.0, 0.0, current_state_confidence=0.1, top2_confidence=0.1)
+    cw = machine.update(1, 0.92, 8.0, 40.0, current_state_confidence=0.1, top2_confidence=0.1)
+    assert cw.changed is True
+    assert cw.state == GestureType.WRIST_CW
+    assert cw.emitted_class_name == "WRIST_CW"
+
+    machine.update(2, 0.95, 8.0, 300.0, current_state_confidence=0.7, top2_confidence=0.7)
+    ccw = machine.update(2, 0.96, 8.0, 340.0, current_state_confidence=0.7, top2_confidence=0.7)
+    assert ccw.changed is True
+    assert ccw.state == GestureType.WRIST_CCW
+    assert ccw.emitted_class_name == "WRIST_CCW"

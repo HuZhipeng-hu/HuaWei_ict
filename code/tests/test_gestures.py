@@ -22,8 +22,8 @@ from shared.gestures import (
 
 
 def test_gesture_count():
-    assert NUM_CLASSES == 6, f"expected 6 gesture classes, got {NUM_CLASSES}"
-    assert len(GestureType) == 6
+    assert NUM_CLASSES == 12, f"expected 12 gesture classes, got {NUM_CLASSES}"
+    assert len(GestureType) == 12
 
 
 def test_gesture_values():
@@ -65,6 +65,10 @@ def test_get_finger_angles():
     fist = get_finger_angles(GestureType.FIST)
     assert all(a == 180.0 for a in fist), f"FIST expected all closed, got {fist}"
 
+    thumb_up = get_finger_angles(GestureType.THUMB_UP)
+    assert thumb_up[0] == 0.0
+    assert all(a == 180.0 for a in thumb_up[1:])
+
 
 def test_finger_angles_custom():
     angles = get_finger_angles(
@@ -81,6 +85,12 @@ def test_finger_angles_custom():
     assert angles[4] == 160.0
 
 
+def test_wrist_gestures_have_distinct_pose():
+    cw = get_finger_angles(GestureType.WRIST_CW)
+    ccw = get_finger_angles(GestureType.WRIST_CCW)
+    assert cw != ccw
+
+
 if __name__ == "__main__":
     tests = [
         test_gesture_count,
@@ -92,6 +102,7 @@ if __name__ == "__main__":
         test_validate_definitions,
         test_get_finger_angles,
         test_finger_angles_custom,
+        test_wrist_gestures_have_distinct_pose,
     ]
 
     passed = 0

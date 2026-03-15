@@ -70,3 +70,31 @@ def test_actuation_mapping_requires_relax_to_relax(tmp_path: Path):
         ),
     )
     _assert_raises_value_error(load_and_validate_actuation_map, mapping, class_names=["RELAX", "E1_G01", "E1_G02"])
+
+
+def test_actuation_mapping_loads_demo_six_action_mapping(tmp_path: Path):
+    mapping = tmp_path / "map.yaml"
+    _write_yaml(
+        mapping,
+        "\n".join(
+            [
+                "actuation_map:",
+                "  RELAX: RELAX",
+                "  TENSE_OPEN: TENSE_OPEN",
+                "  V_SIGN: V_SIGN",
+                "  OK_SIGN: OK_SIGN",
+                "  THUMB_UP: THUMB_UP",
+                "  WRIST_CW: WRIST_CW",
+                "  WRIST_CCW: WRIST_CCW",
+            ]
+        ),
+    )
+    class_names = ["RELAX", "TENSE_OPEN", "V_SIGN", "OK_SIGN", "THUMB_UP", "WRIST_CW", "WRIST_CCW"]
+    label_to_state, by_name = load_and_validate_actuation_map(mapping, class_names=class_names)
+
+    assert by_name["RELAX"] == "RELAX"
+    assert by_name["WRIST_CW"] == "WRIST_CW"
+    assert by_name["WRIST_CCW"] == "WRIST_CCW"
+    assert label_to_state[0] == GestureType.RELAX
+    assert label_to_state[5] == GestureType.WRIST_CW
+    assert label_to_state[6] == GestureType.WRIST_CCW

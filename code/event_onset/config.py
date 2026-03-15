@@ -38,7 +38,16 @@ class EventDataConfig:
     split_mode: str = "grouped_file"
     split_manifest_path: str = "artifacts/splits/event_onset_split_manifest.json"
     recordings_manifest_path: str = "recordings_manifest.csv"
-    target_db5_keys: list[str] = field(default_factory=lambda: ["E1_G01", "E1_G02"])
+    target_db5_keys: list[str] = field(
+        default_factory=lambda: [
+            "TENSE_OPEN",
+            "V_SIGN",
+            "OK_SIGN",
+            "THUMB_UP",
+            "WRIST_CW",
+            "WRIST_CCW",
+        ]
+    )
     device_sampling_rate_hz: int = 500
     imu_sampling_rate_hz: int = 50
     clip_duration_ms: int = 1200
@@ -61,7 +70,7 @@ class EventDataConfig:
 @dataclass
 class EventModelConfig:
     model_type: str = "event_onset"
-    num_classes: int = 3
+    num_classes: int = 7
     emg_in_channels: int = 8
     emg_freq_bins: int = 24
     emg_time_frames: int = 5

@@ -66,6 +66,48 @@ python scripts/convert_event_onset.py \
   --run_id event_convert_v1
 ```
 
+## Wearer Data Collection (Live Armband)
+
+Use this to collect one event clip directly from the armband and append `recordings_manifest.csv`:
+
+```bash
+python scripts/collect_event_data.py \
+  --data_dir ../data \
+  --recordings_manifest recordings_manifest.csv \
+  --target_state V_SIGN \
+  --start_state RELAX \
+  --user_id demo_user \
+  --session_id s1 \
+  --device_id armband01 \
+  --wearing_state normal \
+  --duration_sec 3 \
+  --port COM4 \
+  --baudrate 115200
+```
+
+Collector cue logic for action labels: keep `RELAX` for ~0.4s, then perform target action quickly and hold ~1.2s, then relax until clip end.
+
+Continuous capture + auto-slice (higher throughput, recommended for manual collection):
+
+```bash
+python scripts/collect_event_data_continuous.py \
+  --config configs/training_event_onset.yaml \
+  --data_dir ../data \
+  --recordings_manifest recordings_manifest.csv \
+  --target_state V_SIGN \
+  --start_state RELAX \
+  --user_id demo_user \
+  --session_id s1 \
+  --device_id armband01 \
+  --wearing_state normal \
+  --duration_sec 45 \
+  --clip_duration_sec 3 \
+  --pre_roll_ms 500 \
+  --port COM5 \
+  --baudrate 115200 \
+  --save_stream_csv
+```
+
 ## PI Runtime Command
 
 ```bash

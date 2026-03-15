@@ -10,7 +10,7 @@ data:
   split_mode: grouped_file
   split_manifest_path: artifacts/splits/event_onset_split_manifest.json
   recordings_manifest_path: recordings_manifest.csv
-  target_db5_keys: [E1_G01, E1_G02]
+  target_db5_keys: [TENSE_OPEN, V_SIGN, OK_SIGN, THUMB_UP, WRIST_CW, WRIST_CCW]
   device_sampling_rate_hz: 500
   imu_sampling_rate_hz: 50
   clip_duration_ms: 1200
@@ -38,8 +38,12 @@ data:
 inference:
   confidence_threshold: 0.75
   per_class_confidence_thresholds:
-    E1_G01: 0.75
-    E1_G02: 0.82
+    TENSE_OPEN: 0.72
+    V_SIGN: 0.78
+    OK_SIGN: 0.80
+    THUMB_UP: 0.80
+    WRIST_CW: 0.82
+    WRIST_CCW: 0.82
   vote_window: 3
   vote_min_count: 2
   activation_margin_threshold: 0.08
