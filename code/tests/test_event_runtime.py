@@ -127,3 +127,41 @@ def test_event_runtime_supports_wrist_direction_actions():
     assert ccw.changed is True
     assert ccw.state == GestureType.WRIST_CCW
     assert ccw.emitted_class_name == "WRIST_CCW"
+
+
+def test_event_runtime_latch_and_tense_open_release_without_idle_auto_fallback():
+    machine = EventRuntimeStateMachine(
+        inference_config=EventInferenceConfig(
+            confidence_threshold=0.75,
+            per_class_confidence_thresholds={"TENSE_OPEN": 0.80, "THUMB_UP": 0.82},
+            vote_window=2,
+            vote_min_count=2,
+            activation_margin_threshold=0.08,
+            switch_confidence_boost=0.06,
+            switch_margin_threshold=0.12,
+        ),
+        runtime_config=EventRuntimeBehaviorConfig(
+            idle_release_hold_ms=10_000_000,
+            min_transition_gap_ms=120,
+            post_transition_lock_ms=220,
+            low_energy_release_threshold=2.5,
+        ),
+        low_energy_threshold=2.5,
+        class_names=["RELAX", "TENSE_OPEN", "THUMB_UP"],
+        label_to_state={0: GestureType.RELAX, 1: GestureType.RELAX, 2: GestureType.THUMB_UP},
+    )
+
+    machine.update(2, 0.95, 8.0, 0.0, current_state_confidence=0.10, top2_confidence=0.10)
+    thumb = machine.update(2, 0.96, 8.1, 40.0, current_state_confidence=0.10, top2_confidence=0.10)
+    assert thumb.changed is True
+    assert thumb.state == GestureType.THUMB_UP
+
+    idle = machine.update(0, 0.20, 0.2, 2_000.0)
+    assert idle.changed is False
+    assert machine.current_state == GestureType.THUMB_UP
+
+    machine.update(1, 0.92, 8.2, 2_400.0, current_state_confidence=0.60, top2_confidence=0.60)
+    released = machine.update(1, 0.93, 8.2, 2_450.0, current_state_confidence=0.60, top2_confidence=0.60)
+    assert released.changed is True
+    assert released.state == GestureType.RELAX
+    assert released.emitted_class_name == "TENSE_OPEN"

@@ -60,6 +60,7 @@ def _classify_row(
     *,
     require_capture_mode: str | None,
     min_selected_windows: int,
+    allow_retake_quality: bool = False,
 ) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     if require_capture_mode and str(row.get("capture_mode", "")).strip() != str(require_capture_mode).strip():
@@ -73,15 +74,21 @@ def _classify_row(
     selected_windows = int(detail.get("selected_windows", 0) or 0)
     dead_channels = list(detail.get("dead_channels", []) or [])
 
-    if category == "retake":
+    retake_relaxed = allow_retake_quality and quality_status == "retake_recommended" and not dead_channels
+
+    if category == "retake" and not retake_relaxed:
         reasons.append("retake_category")
-    if quality_status == "retake_recommended":
+    if quality_status == "retake_recommended" and not allow_retake_quality:
         reasons.append("retake_quality_status")
     if selected_windows < int(min_selected_windows):
         reasons.append(f"selected_windows<{int(min_selected_windows)}")
     if dead_channels:
         reasons.append("dead_channels")
-    if quality_status not in {"pass", "warn"}:
+
+    allowed_quality_status = {"pass", "warn"}
+    if allow_retake_quality:
+        allowed_quality_status.add("retake_recommended")
+    if quality_status not in allowed_quality_status:
         reasons.append(f"unsupported_quality_status={quality_status or 'empty'}")
 
     return (len(reasons) == 0), reasons
@@ -103,11 +110,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session_id", default="s2")
     parser.add_argument("--target_states", default=",".join(DEFAULT_TARGET_STATES))
     parser.add_argument("--target_per_class", type=int, default=12)
+    parser.add_argument("--relax_target_count", type=int, default=24)
     parser.add_argument("--require_capture_mode", default="event_onset")
+    parser.add_argument("--action_min_selected_windows", type=int, default=None)
+    parser.add_argument("--relax_min_selected_windows", type=int, default=1)
+    parser.add_argument("--relax_allow_retake_quality", default="true")
+    parser.add_argument("--max_per_class", type=int, default=0)
     parser.add_argument("--min_selected_windows", type=int, default=2)
     parser.add_argument("--output_manifest", default="../data/s2_train_manifest.csv")
     parser.add_argument("--output_drop_report", default="artifacts/runs/s2_train_manifest_dropped_report.json")
     return parser
+
+
+def _parse_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
 
 
 def main() -> None:
@@ -124,6 +149,16 @@ def main() -> None:
 
     target_states = _parse_target_states(args.target_states)
     target_set = set(target_states)
+
+    action_min_selected_windows = (
+        int(args.action_min_selected_windows)
+        if args.action_min_selected_windows is not None
+        else int(args.min_selected_windows)
+    )
+    relax_min_selected_windows = int(args.relax_min_selected_windows)
+    relax_allow_retake_quality = _parse_bool(args.relax_allow_retake_quality, default=True)
+    max_per_class = int(args.max_per_class)
+
     rows, fieldnames = _load_manifest(recordings_manifest)
     detail_by_rel = _load_audit_index(audit_details)
 
@@ -142,6 +177,8 @@ def main() -> None:
     by_target_total = Counter()
     by_target_kept = Counter()
     by_target_dropped = Counter()
+    relax_kept_by_rule = Counter()
+    relax_dropped_by_rule = Counter()
 
     for row in considered:
         rel = _normalize_rel(row.get("relative_path", ""))
@@ -149,17 +186,28 @@ def main() -> None:
         target_state = str(row.get("target_state", "")).strip().upper()
         by_target_total[target_state] += 1
         detail = detail_by_rel.get(rel)
+        is_relax = target_state == "RELAX"
+
         keep, reasons = _classify_row(
             row,
             detail,
             require_capture_mode=str(args.require_capture_mode or "").strip() or None,
-            min_selected_windows=int(args.min_selected_windows),
+            min_selected_windows=(relax_min_selected_windows if is_relax else action_min_selected_windows),
+            allow_retake_quality=(relax_allow_retake_quality if is_relax else False),
         )
         if keep:
             kept_rows.append(row)
             by_target_kept[target_state] += 1
+            if is_relax:
+                quality_status = str((detail or {}).get("quality_status", "")).strip().lower() or "empty"
+                category = str((detail or {}).get("category", "")).strip().lower() or "empty"
+                relax_kept_by_rule[f"quality_status={quality_status}"] += 1
+                relax_kept_by_rule[f"category={category}"] += 1
         else:
             by_target_dropped[target_state] += 1
+            if is_relax:
+                for reason in reasons:
+                    relax_dropped_by_rule[str(reason)] += 1
             dropped_rows.append(
                 {
                     "relative_path": rel,
@@ -173,19 +221,33 @@ def main() -> None:
                 }
             )
 
-    kept_rows.sort(
+    kept_rows_sorted = sorted(
+        kept_rows,
         key=lambda item: (
             str(item.get("target_state", "")),
             str(item.get("timestamp", "")),
             str(item.get("relative_path", "")),
-        )
+        ),
     )
-    _write_manifest(output_manifest, rows=kept_rows, fieldnames=fieldnames)
+
+    if max_per_class > 0:
+        by_class_cap_counter: Counter[str] = Counter()
+        capped_rows: list[dict[str, str]] = []
+        for row in kept_rows_sorted:
+            target_state = str(row.get("target_state", "")).strip().upper()
+            if by_class_cap_counter[target_state] >= max_per_class:
+                continue
+            capped_rows.append(row)
+            by_class_cap_counter[target_state] += 1
+        kept_rows_sorted = capped_rows
+
+    kept_by_class_after_cap = Counter(str(row.get("target_state", "")).strip().upper() for row in kept_rows_sorted)
+    _write_manifest(output_manifest, rows=kept_rows_sorted, fieldnames=fieldnames)
 
     coverage = {}
     for state in target_states:
-        current = int(by_target_kept.get(state, 0))
-        target = int(args.target_per_class)
+        current = int(kept_by_class_after_cap.get(state, 0))
+        target = int(args.relax_target_count) if state == "RELAX" else int(args.target_per_class)
         coverage[state] = {
             "target": target,
             "current": current,
@@ -200,8 +262,16 @@ def main() -> None:
         "output_manifest": str(output_manifest),
         "rules": {
             "require_capture_mode": str(args.require_capture_mode),
-            "min_selected_windows": int(args.min_selected_windows),
-            "keep_quality_status": ["pass", "warn"],
+            "action_min_selected_windows": int(action_min_selected_windows),
+            "relax_min_selected_windows": int(relax_min_selected_windows),
+            "relax_allow_retake_quality": bool(relax_allow_retake_quality),
+            "relax_target_count": int(args.relax_target_count),
+            "max_per_class": int(max_per_class),
+            "keep_quality_status": (
+                ["pass", "warn", "retake_recommended"]
+                if relax_allow_retake_quality
+                else ["pass", "warn"]
+            ),
             "drop_categories": ["retake"],
             "drop_if_dead_channels": True,
         },
@@ -209,12 +279,15 @@ def main() -> None:
         "target_per_class": int(args.target_per_class),
         "counts": {
             "considered": int(len(considered)),
-            "kept": int(len(kept_rows)),
+            "kept": int(len(kept_rows_sorted)),
             "dropped": int(len(dropped_rows)),
         },
         "by_target_total": dict(by_target_total),
         "by_target_kept": dict(by_target_kept),
         "by_target_dropped": dict(by_target_dropped),
+        "kept_by_class_after_cap": dict(kept_by_class_after_cap),
+        "relax_kept_by_rule": dict(relax_kept_by_rule),
+        "relax_dropped_by_rule": dict(relax_dropped_by_rule),
         "coverage": coverage,
         "dropped_rows": dropped_rows,
     }
@@ -228,7 +301,7 @@ def main() -> None:
             {
                 "session_id": session_id,
                 "considered": len(considered),
-                "kept": len(kept_rows),
+                "kept": len(kept_rows_sorted),
                 "dropped": len(dropped_rows),
                 "coverage_gap": {k: v["gap"] for k, v in coverage.items()},
             },
@@ -240,4 +313,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

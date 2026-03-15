@@ -98,3 +98,27 @@ def test_actuation_mapping_loads_demo_six_action_mapping(tmp_path: Path):
     assert label_to_state[0] == GestureType.RELAX
     assert label_to_state[5] == GestureType.WRIST_CW
     assert label_to_state[6] == GestureType.WRIST_CCW
+
+
+def test_actuation_mapping_allows_tense_open_as_release_to_relax(tmp_path: Path):
+    mapping = tmp_path / "map.yaml"
+    _write_yaml(
+        mapping,
+        "\n".join(
+            [
+                "actuation_map:",
+                "  RELAX: RELAX",
+                "  TENSE_OPEN: RELAX",
+                "  THUMB_UP: THUMB_UP",
+                "  WRIST_CW: WRIST_CW",
+                "  WRIST_CCW: WRIST_CCW",
+            ]
+        ),
+    )
+    class_names = ["RELAX", "TENSE_OPEN", "THUMB_UP", "WRIST_CW", "WRIST_CCW"]
+    label_to_state, by_name = load_and_validate_actuation_map(mapping, class_names=class_names)
+
+    assert by_name["TENSE_OPEN"] == "RELAX"
+    assert label_to_state[0] == GestureType.RELAX
+    assert label_to_state[1] == GestureType.RELAX
+    assert label_to_state[2] == GestureType.THUMB_UP

@@ -1,0 +1,84 @@
+model:
+  model_type: event_onset
+  num_classes: 5
+  base_channels: 16
+  imu_base_channels: 16
+  fusion_hidden_dim: 64
+  dropout_rate: 0.3
+  use_se: true
+training:
+  epochs: 60
+  batch_size: 16
+  learning_rate: 0.0003
+  weight_decay: 0.0003
+  label_smoothing: 0.05
+  warmup_epochs: 3
+  early_stopping_patience: 15
+  split_seed: 42
+  val_ratio: 0.2
+  test_ratio: 0.2
+  kfold: null
+  num_workers: 0
+  freeze_emg_epochs: 5
+  unfreeze_last_blocks: true
+  encoder_lr_ratio: 0.3
+  head_lr_ratio: 1.0
+  loss:
+    type: cross_entropy
+    focal_gamma: 1.5
+    class_balance_beta: 0.999
+  sampler:
+    type: balanced
+    hard_mining_ratio: 0.1
+    confusion_pairs:
+      - [RELAX, TENSE_OPEN]
+      - [RELAX, WRIST_CW]
+      - [RELAX, WRIST_CCW]
+      - [WRIST_CW, WRIST_CCW]
+      - [TENSE_OPEN, THUMB_UP]
+  ema:
+    enabled: false
+    decay: 0.999
+data:
+  label_mode: event_onset
+  capture_mode_filter: event_onset
+  split_mode: grouped_file
+  split_manifest_path: artifacts/splits/event_onset_split_manifest.json
+  recordings_manifest_path: s2_train_manifest_relax12.csv
+  target_db5_keys:
+    - TENSE_OPEN
+    - THUMB_UP
+    - WRIST_CW
+    - WRIST_CCW
+  device_sampling_rate_hz: 500
+  imu_sampling_rate_hz: 50
+  clip_duration_ms: 1200
+  pre_roll_ms: 400
+  top_k_windows_per_clip: 2
+  idle_top_k_windows_per_clip: 4
+  use_imu: true
+  feature:
+    context_window_ms: 240
+    window_step_ms: 20
+    emg_stft_window: 64
+    emg_stft_hop: 24
+    emg_n_fft: 96
+    emg_freq_bins: 24
+    imu_resample_steps: 16
+    imu_input_dim: 6
+    imu_motion_std_max: 2.5
+  quality_filter:
+    enabled: true
+    energy_min: 2.5
+    clip_ratio_max: 0.08
+    saturation_abs: 126.0
+    static_std_max: 0.5
+augmentation:
+  enabled: false
+  augment_factor: 1
+  noise_std: 0.0
+  temporal_shift_max: 0
+  scale_min: 1.0
+  scale_max: 1.0
+  use_mixup: false
+  mixup_alpha: 0.2
