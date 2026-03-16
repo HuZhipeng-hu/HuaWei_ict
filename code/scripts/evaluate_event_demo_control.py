@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shlex
 import sys
 from pathlib import Path
 
@@ -132,6 +133,15 @@ def _load_window_metrics(run_dir: Path) -> dict[str, float]:
     }
 
 
+def _format_cmd(parts: list[str]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _compute_sanity_flags(*, command_success_rate: float, false_trigger_rate: float) -> dict[str, bool]:
+    metric_invariant_ok = not (float(false_trigger_rate) >= 0.95 and float(command_success_rate) > 0.05)
+    return {"metric_invariant_ok": bool(metric_invariant_ok)}
+
+
 def _evaluate_control_metrics(
     *,
     controller_factory,
@@ -217,7 +227,7 @@ def _evaluate_control_metrics(
     }
 
 
-def main() -> None:
+def _run(args: argparse.Namespace) -> Path:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -306,6 +316,10 @@ def main() -> None:
         class_names=list(label_spec.class_names),
         label_to_state=label_to_state,
     )
+    sanity_flags = _compute_sanity_flags(
+        command_success_rate=float(control["command_success_rate"]),
+        false_trigger_rate=float(control["false_trigger_rate"]),
+    )
 
     window_metrics = _load_window_metrics(run_dir)
 
@@ -325,6 +339,7 @@ def main() -> None:
         "command_success_rate": float(control["command_success_rate"]),
         "false_release_rate": float(control["false_release_rate"]),
         "false_trigger_rate": float(control["false_trigger_rate"]),
+        "sanity_flags": sanity_flags,
         "total_clip_count": int(control["total_clip_count"]),
         "action_clip_count": int(control["action_clip_count"]),
         "relax_clip_count": int(control["relax_clip_count"]),
@@ -340,6 +355,53 @@ def main() -> None:
 
     logger.info("control_eval_summary=%s", output_path)
     print(json.dumps(output, ensure_ascii=False, indent=2))
+    return output_path
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    try:
+        _run(args)
+    except Exception as exc:
+        run_root = Path(args.run_root)
+        run_dir = run_root / str(args.run_id)
+        eval_dir = run_dir / "evaluation"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        next_command = _format_cmd(
+            [
+                sys.executable,
+                "scripts/evaluate_event_demo_control.py",
+                "--run_root",
+                str(args.run_root),
+                "--run_id",
+                str(args.run_id),
+                "--training_config",
+                str(args.training_config),
+                "--runtime_config",
+                str(args.runtime_config),
+                "--data_dir",
+                str(args.data_dir),
+                "--recordings_manifest",
+                str(args.recordings_manifest or ""),
+                "--split_manifest",
+                str(args.split_manifest or ""),
+                "--target_db5_keys",
+                str(args.target_db5_keys),
+                "--backend",
+                str(args.backend),
+                "--device_target",
+                str(args.device_target),
+            ]
+        )
+        failure = {
+            "status": "failed",
+            "stage": "evaluate_event_demo_control",
+            "root_cause": str(exc),
+            "next_command": next_command,
+        }
+        failure_path = eval_dir / "control_eval_failure_report.json"
+        failure_path.write_text(json.dumps(failure, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise
 
 
 if __name__ == "__main__":

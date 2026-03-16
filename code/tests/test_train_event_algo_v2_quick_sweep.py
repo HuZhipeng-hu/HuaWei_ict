@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.train_event_algo_v2_quick_sweep import _pick_metric, _rank_key
+from scripts.train_event_algo_v2_quick_sweep import _build_presets, _pick_metric, _rank_key
 
 
 def test_pick_metric_handles_none_and_invalid() -> None:
@@ -26,3 +26,10 @@ def test_rank_key_uses_alias_fields() -> None:
     ranked = sorted([row_test_prefix, row_plain_prefix], key=_rank_key, reverse=True)
     assert ranked[0] is row_plain_prefix
 
+
+def test_presets_include_targeted_pairs() -> None:
+    presets = _build_presets()
+    names = {item["preset"] for item in presets}
+    assert "ccw_protect" in names
+    assert "release_guard" in names
+    assert len(presets) == 6

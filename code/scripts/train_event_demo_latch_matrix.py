@@ -85,6 +85,36 @@ def _rank_key(row: dict) -> tuple[int, float, float, float, float, float, float,
     )
 
 
+def _parse_warning_tokens(raw: str) -> list[str]:
+    tokens = [item.strip() for item in str(raw or "").split(";") if item.strip()]
+    return tokens
+
+
+def _compute_metric_invariant_ok(*, command_success_rate: float, false_trigger_rate: float) -> bool:
+    return not (float(false_trigger_rate) >= 0.95 and float(command_success_rate) > 0.05)
+
+
+def _build_invalid_reason_counts(rows: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if str(row.get("status", "")).strip().lower() != "invalid":
+            continue
+        for token in _parse_warning_tokens(row.get("warning_reasons", "")):
+            counts[token] = int(counts.get(token, 0) + 1)
+    return counts
+
+
+def _extract_control_metrics(payload: dict) -> dict[str, float]:
+    required = ["command_success_rate", "false_trigger_rate", "false_release_rate"]
+    parsed: dict[str, float] = {}
+    for key in required:
+        value = payload.get(key, None)
+        if value is None:
+            raise ValueError(f"missing control metric: {key}")
+        parsed[key] = float(value)
+    return parsed
+
+
 def _build_finetune_cmd(
     args: argparse.Namespace,
     *,
@@ -181,6 +211,7 @@ def _pick_metric(*values, default: float = 0.0) -> float:
 
 def _write_summary_csv(path: Path, rows: list[dict]) -> None:
     fields = [
+        "status",
         "run_id",
         "config_tag",
         "config_path",
@@ -196,6 +227,11 @@ def _write_summary_csv(path: Path, rows: list[dict]) -> None:
         "best_val_f1",
         "relax_action_confusion",
         "safety_ok",
+        "control_eval_present",
+        "control_eval_source",
+        "metric_invariant_ok",
+        "control_metric_drift",
+        "warning_reasons",
         "checkpoint_path",
         "summary_path",
         "metrics_path",
@@ -228,6 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--relax_action_confusion_limit", type=int, default=8)
     parser.add_argument("--max_false_trigger_rate", type=float, default=0.15)
     parser.add_argument("--max_false_release_rate", type=float, default=0.15)
+    parser.add_argument("--control_metric_drift_threshold", type=float, default=0.05)
     parser.add_argument("--skip_control_eval", action="store_true")
     parser.add_argument("--skip_threshold_tuning", action="store_true")
     return parser
@@ -261,7 +298,7 @@ def main() -> None:
                 _run_checked(stage, cmd)
 
                 offline, metrics = _load_run_metrics(run_root, run_id)
-                control = {
+                fallback_control = {
                     "command_success_rate": _pick_metric(
                         offline.get("test_command_success_rate"),
                         offline.get("command_success_rate"),
@@ -278,6 +315,12 @@ def main() -> None:
                         default=1.0,
                     ),
                 }
+                control = dict(fallback_control)
+                control_eval_present = bool(args.skip_control_eval)
+                control_eval_source = "offline_fallback"
+                status = "ok"
+                warning_reasons: list[str] = []
+                control_metric_drift = False
                 if not bool(args.skip_control_eval):
                     control_output = run_root / run_id / "evaluation" / "control_eval_summary.json"
                     control_cmd = _build_control_eval_cmd(
@@ -289,17 +332,44 @@ def main() -> None:
                     last_stage = f"{stage}_control_eval"
                     last_cmd = _format_cmd(control_cmd)
                     _run_checked(last_stage, control_cmd)
-                    control = _load_control_metrics(run_root, run_id)
+                    try:
+                        control_payload = _load_control_metrics(run_root, run_id)
+                        control = _extract_control_metrics(control_payload)
+                        control_eval_present = True
+                        control_eval_source = "control_eval_summary"
+                        drift_threshold = float(args.control_metric_drift_threshold)
+                        for metric_key in ["command_success_rate", "false_trigger_rate", "false_release_rate"]:
+                            drift = abs(float(control.get(metric_key, 0.0)) - float(fallback_control.get(metric_key, 0.0)))
+                            if drift > drift_threshold:
+                                control_metric_drift = True
+                        if control_metric_drift:
+                            warning_reasons.append("control_metric_drift")
+                    except Exception as exc:
+                        status = "invalid"
+                        control_eval_present = False
+                        control_eval_source = "missing"
+                        warning_reasons.append(f"control_eval_invalid:{type(exc).__name__}")
+
+                metric_invariant_ok = _compute_metric_invariant_ok(
+                    command_success_rate=float(control.get("command_success_rate", 0.0) or 0.0),
+                    false_trigger_rate=float(control.get("false_trigger_rate", 1.0) or 1.0),
+                )
+                if not metric_invariant_ok:
+                    warning_reasons.append("metric_invariant_failed")
 
                 top_pairs = list(metrics.get("top_confusion_pairs") or [])
                 relax_action_confusion = _compute_relax_action_confusion(top_pairs, action_keys=action_keys)
                 safety_ok = (
-                    relax_action_confusion <= int(args.relax_action_confusion_limit)
+                    str(status).lower() == "ok"
+                    and bool(control_eval_present)
+                    and bool(metric_invariant_ok)
+                    and relax_action_confusion <= int(args.relax_action_confusion_limit)
                     and float(control.get("false_trigger_rate", 1.0) or 1.0) <= float(args.max_false_trigger_rate)
                     and float(control.get("false_release_rate", 1.0) or 1.0) <= float(args.max_false_release_rate)
                 )
 
                 row = {
+                    "status": str(status),
                     "run_id": run_id,
                     "config_tag": config_tag,
                     "config_path": str(config_path),
@@ -327,6 +397,11 @@ def main() -> None:
                     "best_val_f1": float(offline.get("best_val_f1", offline.get("best_val_macro_f1", 0.0)) or 0.0),
                     "relax_action_confusion": int(relax_action_confusion),
                     "safety_ok": bool(safety_ok),
+                    "control_eval_present": bool(control_eval_present),
+                    "control_eval_source": str(control_eval_source),
+                    "metric_invariant_ok": bool(metric_invariant_ok),
+                    "control_metric_drift": bool(control_metric_drift),
+                    "warning_reasons": ";".join(warning_reasons),
                     "top_confusion_pairs": top_pairs[:10],
                     "checkpoint_path": str(offline.get("checkpoint_path", "")),
                     "summary_path": str((run_root / run_id / "offline_summary.json")),
@@ -352,15 +427,23 @@ def main() -> None:
         raise RuntimeError("No matrix rows generated")
 
     ranked = sorted(rows, key=_rank_key, reverse=True)
-    best = dict(ranked[0])
-    best["selected"] = True
+    valid_rows = [
+        row
+        for row in ranked
+        if str(row.get("status", "")).strip().lower() == "ok"
+        and bool(row.get("control_eval_present", False))
+        and bool(row.get("safety_ok", False))
+    ]
+    best = dict(valid_rows[0]) if valid_rows else {}
+    if best:
+        best["selected"] = True
     for row in rows:
-        row["selected"] = row["run_id"] == best["run_id"]
+        row["selected"] = bool(best) and row["run_id"] == best.get("run_id")
 
     threshold_tuning_summary_path = ""
     threshold_tuning_csv_path = ""
     threshold_tuning_runtime_config = ""
-    if not bool(args.skip_threshold_tuning):
+    if not bool(args.skip_threshold_tuning) and bool(best):
         tuning_json = run_root / f"{args.run_prefix}_summary" / "runtime_threshold_tuning_summary.json"
         tuning_csv = run_root / f"{args.run_prefix}_summary" / "runtime_threshold_tuning_summary.csv"
         tuning_runtime_cfg = run_root / f"{args.run_prefix}_summary" / "runtime_event_onset_demo_latch_tuned.yaml"
@@ -400,13 +483,22 @@ def main() -> None:
         threshold_tuning_runtime_config = str(tuning_runtime_cfg)
 
     summary = {
+        "status": "ok" if bool(best) else "failed",
         "run_prefix": str(args.run_prefix),
         "target_db5_keys": sorted(action_keys),
         "configs": [{"tag": tag, "path": path} for path, tag in zip(configs, tags)],
         "seeds": [int(seed) for seed in seeds],
         "rows": rows,
         "best_run": best,
-        "best_run_id": str(best.get("run_id", "")),
+        "best_run_id": str(best.get("run_id", "")) if bool(best) else "",
+        "valid_row_count": int(len(valid_rows)),
+        "invalid_row_count": int(sum(1 for row in rows if str(row.get("status", "")).strip().lower() == "invalid")),
+        "invalid_reasons_count": _build_invalid_reason_counts(rows),
+        "selection_guard": {
+            "requires_status_ok": True,
+            "requires_control_eval_present": True,
+            "requires_safety_ok": True,
+        },
         "rank_rule": (
             "safety_ok desc, event_action_accuracy desc, event_action_macro_f1 desc, "
             "command_success_rate desc, false_trigger_rate asc, false_release_rate asc, "
@@ -442,28 +534,42 @@ def main() -> None:
     lines = [
         "# Demo Latch Matrix Summary",
         "",
+        f"- status: `{summary['status']}`",
         f"- run_prefix: `{args.run_prefix}`",
         f"- target_db5_keys: `{','.join(sorted(action_keys))}`",
         f"- rank_rule: `{summary['rank_rule']}`",
+        f"- valid_row_count: `{summary['valid_row_count']}`",
+        f"- invalid_row_count: `{summary['invalid_row_count']}`",
         "",
         "## Best Run",
-        f"- run_id: `{best.get('run_id')}`",
-        f"- config_tag: `{best.get('config_tag')}`",
-        f"- split_seed: `{best.get('split_seed')}`",
-        f"- event_action_accuracy: `{float(best.get('event_action_accuracy', 0.0)):.6f}`",
-        f"- event_action_macro_f1: `{float(best.get('event_action_macro_f1', 0.0)):.6f}`",
-        f"- test_accuracy: `{float(best.get('test_accuracy', 0.0)):.6f}`",
-        f"- test_macro_f1: `{float(best.get('test_macro_f1', 0.0)):.6f}`",
-        f"- command_success_rate: `{float(best.get('command_success_rate', 0.0)):.6f}`",
-        f"- false_trigger_rate: `{float(best.get('false_trigger_rate', 1.0)):.6f}`",
-        f"- false_release_rate: `{float(best.get('false_release_rate', 1.0)):.6f}`",
-        f"- relax_action_confusion: `{int(best.get('relax_action_confusion', 0))}`",
-        f"- safety_ok: `{bool(best.get('safety_ok', False))}`",
+    ]
+    if best:
+        lines.extend(
+            [
+                f"- run_id: `{best.get('run_id')}`",
+                f"- config_tag: `{best.get('config_tag')}`",
+                f"- split_seed: `{best.get('split_seed')}`",
+                f"- event_action_accuracy: `{float(best.get('event_action_accuracy', 0.0)):.6f}`",
+                f"- event_action_macro_f1: `{float(best.get('event_action_macro_f1', 0.0)):.6f}`",
+                f"- test_accuracy: `{float(best.get('test_accuracy', 0.0)):.6f}`",
+                f"- test_macro_f1: `{float(best.get('test_macro_f1', 0.0)):.6f}`",
+                f"- command_success_rate: `{float(best.get('command_success_rate', 0.0)):.6f}`",
+                f"- false_trigger_rate: `{float(best.get('false_trigger_rate', 1.0)):.6f}`",
+                f"- false_release_rate: `{float(best.get('false_release_rate', 1.0)):.6f}`",
+                f"- relax_action_confusion: `{int(best.get('relax_action_confusion', 0))}`",
+                f"- safety_ok: `{bool(best.get('safety_ok', False))}`",
+            ]
+        )
+    else:
+        lines.append("- no valid candidate passed selection_guard")
+    lines.extend(
+        [
         "",
         "## Artifacts",
         f"- summary_json: `{summary_json}`",
         f"- summary_csv: `{summary_csv}`",
-    ]
+        ]
+    )
     if threshold_tuning_summary_path:
         lines.extend(
             [

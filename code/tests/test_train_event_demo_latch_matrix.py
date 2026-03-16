@@ -4,7 +4,12 @@ import shutil
 import uuid
 from pathlib import Path
 
-from scripts.train_event_demo_latch_matrix import _rank_key, _write_summary_csv
+from scripts.train_event_demo_latch_matrix import (
+    _build_invalid_reason_counts,
+    _compute_metric_invariant_ok,
+    _rank_key,
+    _write_summary_csv,
+)
 
 
 def test_rank_key_prefers_safety_then_event_then_control() -> None:
@@ -53,6 +58,11 @@ def test_write_summary_csv_includes_control_fields() -> None:
             "best_val_f1": 0.70,
             "relax_action_confusion": 6,
             "safety_ok": True,
+            "control_eval_present": True,
+            "control_eval_source": "control_eval_summary",
+            "metric_invariant_ok": True,
+            "control_metric_drift": False,
+            "warning_reasons": "",
             "checkpoint_path": "artifacts/runs/x/checkpoints/event_onset_best.ckpt",
             "summary_path": "artifacts/runs/x/offline_summary.json",
             "metrics_path": "artifacts/runs/x/evaluation/test_metrics.json",
@@ -64,6 +74,24 @@ def test_write_summary_csv_includes_control_fields() -> None:
         assert "command_success_rate" in text
         assert "false_trigger_rate" in text
         assert "false_release_rate" in text
+        assert "control_eval_present" in text
+        assert "warning_reasons" in text
     finally:
         if tmp_root.exists():
             shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_compute_metric_invariant_ok() -> None:
+    assert _compute_metric_invariant_ok(command_success_rate=0.0, false_trigger_rate=1.0) is True
+    assert _compute_metric_invariant_ok(command_success_rate=0.06, false_trigger_rate=0.96) is False
+
+
+def test_build_invalid_reason_counts() -> None:
+    rows = [
+        {"status": "invalid", "warning_reasons": "control_eval_invalid;metric_invariant_failed"},
+        {"status": "invalid", "warning_reasons": "control_eval_invalid"},
+        {"status": "ok", "warning_reasons": "control_eval_invalid"},
+    ]
+    counts = _build_invalid_reason_counts(rows)
+    assert counts["control_eval_invalid"] == 2
+    assert counts["metric_invariant_failed"] == 1
