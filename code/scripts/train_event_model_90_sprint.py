@@ -266,25 +266,42 @@ def _run_single_trial(
     encoder_lr_ratio: float,
     pretrained_mode: str,
 ) -> dict:
-    finetune_cmd = _build_finetune_cmd(
-        args,
-        run_id=run_id,
-        split_seed=split_seed,
-        split_manifest_path=split_manifest_path,
-        loss_type=loss_type,
-        base_channels=base_channels,
-        freeze_emg_epochs=freeze_emg_epochs,
-        encoder_lr_ratio=encoder_lr_ratio,
-        pretrained_mode=pretrained_mode,
-    )
-    _run_checked(f"{stage}:finetune:{run_id}", finetune_cmd)
-    if not bool(args.skip_control_eval):
-        control_cmd = _build_control_eval_cmd(
+    run_dir = Path(args.run_root) / str(run_id)
+    offline_summary_path = run_dir / "offline_summary.json"
+    test_metrics_path = run_dir / "evaluation" / "test_metrics.json"
+    control_eval_path = run_dir / "evaluation" / "control_eval_summary.json"
+
+    has_finetune_outputs = bool(offline_summary_path.exists() and test_metrics_path.exists())
+    if not has_finetune_outputs:
+        finetune_cmd = _build_finetune_cmd(
             args,
             run_id=run_id,
+            split_seed=split_seed,
             split_manifest_path=split_manifest_path,
+            loss_type=loss_type,
+            base_channels=base_channels,
+            freeze_emg_epochs=freeze_emg_epochs,
+            encoder_lr_ratio=encoder_lr_ratio,
+            pretrained_mode=pretrained_mode,
         )
-        _run_checked(f"{stage}:control_eval:{run_id}", control_cmd)
+        _run_checked(f"{stage}:finetune:{run_id}", finetune_cmd)
+    else:
+        print(
+            f"[MODEL90] {stage}:reuse_finetune:{run_id} -> "
+            f"{offline_summary_path} + {test_metrics_path}",
+            flush=True,
+        )
+
+    if not bool(args.skip_control_eval):
+        if control_eval_path.exists():
+            print(f"[MODEL90] {stage}:reuse_control_eval:{run_id} -> {control_eval_path}", flush=True)
+        else:
+            control_cmd = _build_control_eval_cmd(
+                args,
+                run_id=run_id,
+                split_manifest_path=split_manifest_path,
+            )
+            _run_checked(f"{stage}:control_eval:{run_id}", control_cmd)
     return _collect_metrics_row(
         args,
         stage=stage,

@@ -145,9 +145,32 @@ def _coerce_scalar(value: Any, expected_type: type[Any]) -> Any:
         return value
 
 
+def _safe_get_type_hints(cls: Type[Any]) -> dict[str, Any]:
+    """Resolve dataclass annotations with a fallback for Python 3.9 + PEP604 strings."""
+    try:
+        return get_type_hints(cls)
+    except TypeError:
+        resolved: dict[str, Any] = {}
+        raw_annotations = dict(getattr(cls, "__annotations__", {}) or {})
+        globalns = globals()
+        for name, annotation in raw_annotations.items():
+            if not isinstance(annotation, str):
+                resolved[str(name)] = annotation
+                continue
+            expr = str(annotation).strip()
+            expr = expr.replace("None | ", "").replace(" | None", "")
+            if "|" in expr:
+                expr = expr.split("|", 1)[0].strip()
+            try:
+                resolved[str(name)] = eval(expr, globalns, globalns)
+            except Exception:
+                resolved[str(name)] = Any
+        return resolved
+
+
 def _dict_to_dataclass(data: dict[str, Any], cls: Type[T]) -> T:
     kwargs: dict[str, Any] = {}
-    type_hints = get_type_hints(cls)
+    type_hints = _safe_get_type_hints(cls)
     for item in fields(cls):
         if item.name not in data:
             continue

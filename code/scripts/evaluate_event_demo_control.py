@@ -20,6 +20,7 @@ from event_onset.config import load_event_runtime_config, load_event_training_co
 from event_onset.dataset import EventClipDatasetLoader
 from event_onset.inference import EventPredictor
 from event_onset.runtime import EventOnsetController
+from shared.config import load_config
 from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
@@ -60,6 +61,31 @@ def _load_json(path: Path) -> dict:
     if not isinstance(payload, dict):
         raise ValueError(f"json payload must be object: {path}")
     return payload
+
+
+def _apply_run_model_overrides(*, model_cfg, run_dir: Path, logger: logging.Logger) -> None:
+    override_path = run_dir / "config_snapshots" / "effective_overrides.yaml"
+    if not override_path.exists():
+        return
+    payload = load_config(override_path)
+    model_section = dict(payload.get("model", {}) or {})
+    if not model_section:
+        return
+    changes: list[str] = []
+    if "base_channels" in model_section:
+        model_cfg.base_channels = int(model_section["base_channels"])
+        changes.append(f"base_channels={model_cfg.base_channels}")
+    if "use_se" in model_section:
+        model_cfg.use_se = bool(model_section["use_se"])
+        changes.append(f"use_se={model_cfg.use_se}")
+    if "dropout_rate" in model_section:
+        model_cfg.dropout_rate = float(model_section["dropout_rate"])
+        changes.append(f"dropout_rate={model_cfg.dropout_rate}")
+    if "num_classes" in model_section:
+        model_cfg.num_classes = int(model_section["num_classes"])
+        changes.append(f"num_classes={model_cfg.num_classes}")
+    if changes:
+        logger.info("Applied run model overrides from %s: %s", override_path, ", ".join(changes))
 
 
 def _validate_runtime_class_contract(
@@ -243,6 +269,7 @@ def _run(args: argparse.Namespace) -> Path:
 
     model_cfg, data_cfg, _, _ = load_event_training_config(args.training_config)
     runtime_cfg = load_event_runtime_config(args.runtime_config)
+    _apply_run_model_overrides(model_cfg=model_cfg, run_dir=run_dir, logger=logger)
 
     target_keys = _parse_keys(args.target_db5_keys)
     data_cfg.target_db5_keys = list(target_keys)
