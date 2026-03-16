@@ -109,6 +109,29 @@ def _build_finetune_cmd(
     encoder_lr_ratio: float | None,
     pretrained_mode: str,
 ) -> list[str]:
+    split_manifest_raw = str(split_manifest_path).strip()
+    split_manifest_abs = Path(split_manifest_raw)
+    if not split_manifest_abs.is_absolute():
+        split_manifest_abs = (CODE_ROOT / split_manifest_abs).resolve()
+
+    manifest_flags: list[str] = []
+    if split_manifest_raw:
+        if split_manifest_abs.exists():
+            manifest_flags.extend(
+                [
+                    "--split_manifest_in",
+                    split_manifest_raw,
+                    "--split_manifest_out",
+                    split_manifest_raw,
+                ]
+            )
+        else:
+            print(
+                f"[MODEL90] split_manifest missing, will auto-build: {split_manifest_raw}",
+                flush=True,
+            )
+            manifest_flags.extend(["--split_manifest_out", split_manifest_raw])
+
     cmd = [
         sys.executable,
         "scripts/finetune_event_onset.py",
@@ -132,15 +155,12 @@ def _build_finetune_cmd(
         str(int(split_seed)),
         "--manifest_strategy",
         "v2",
-        "--split_manifest_in",
-        str(split_manifest_path),
-        "--split_manifest_out",
-        str(split_manifest_path),
         "--budget_per_class",
         str(int(args.budget_per_class)),
         "--budget_seed",
         str(int(args.budget_seed)),
     ]
+    cmd.extend(manifest_flags)
     if loss_type:
         cmd.extend(["--loss_type", str(loss_type)])
     if base_channels is not None:
