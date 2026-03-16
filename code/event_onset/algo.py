@@ -5,9 +5,21 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
+
+ALGO_MODE_V1 = "v1_single"
+ALGO_MODE_V2 = "v2_two_stage"
+
+
+def _normalize_algo_mode(raw: str | None) -> str:
+    mode = str(raw or "").strip().lower()
+    if not mode:
+        return ALGO_MODE_V1
+    if mode not in {ALGO_MODE_V1, ALGO_MODE_V2}:
+        raise ValueError(f"Unsupported algo_mode={raw!r}. Expected one of: {ALGO_MODE_V1}, {ALGO_MODE_V2}")
+    return mode
 
 
 def _l2_normalize_rows(matrix: np.ndarray) -> np.ndarray:
@@ -97,68 +109,16 @@ def build_event_algo_feature_vector(emg_feature: np.ndarray, imu_feature: np.nda
     return flat.astype(np.float32)
 
 
-@dataclass(frozen=True)
-class EventAlgoModel:
-    class_names: tuple[str, ...]
-    feature_mean: np.ndarray
-    feature_std: np.ndarray
-    centroids: np.ndarray
-    temperature: float = 0.15
-    rule_config: dict | None = None
-
-    def to_json_dict(self) -> dict:
-        return {
-            "version": "event_algo_v1",
-            "classifier": "nearest_centroid_cosine",
-            "class_names": list(self.class_names),
-            "feature_dim": int(self.feature_mean.shape[0]),
-            "temperature": float(self.temperature),
-            "feature_mean": self.feature_mean.astype(np.float32).tolist(),
-            "feature_std": self.feature_std.astype(np.float32).tolist(),
-            "centroids": self.centroids.astype(np.float32).tolist(),
-            "rule_config": dict(self.rule_config or {}),
-        }
-
-    @staticmethod
-    def from_json_dict(payload: dict) -> "EventAlgoModel":
-        class_names = tuple(str(item).strip().upper() for item in payload.get("class_names", []))
-        feature_mean = np.asarray(payload.get("feature_mean", []), dtype=np.float32)
-        feature_std = np.asarray(payload.get("feature_std", []), dtype=np.float32)
-        centroids = np.asarray(payload.get("centroids", []), dtype=np.float32)
-        temperature = float(payload.get("temperature", 0.15))
-        if not class_names:
-            raise ValueError("algo_model missing class_names")
-        if feature_mean.ndim != 1 or feature_std.ndim != 1:
-            raise ValueError("algo_model feature_mean/feature_std must be rank-1")
-        if centroids.ndim != 2:
-            raise ValueError("algo_model centroids must be rank-2")
-        if centroids.shape[0] != len(class_names):
-            raise ValueError(
-                f"algo_model centroids rows ({centroids.shape[0]}) mismatch class_names ({len(class_names)})"
-            )
-        if centroids.shape[1] != feature_mean.shape[0] or feature_std.shape[0] != feature_mean.shape[0]:
-            raise ValueError("algo_model feature dimension mismatch among scaler/centroids")
-        safe_std = np.where(feature_std < 1e-8, 1.0, feature_std).astype(np.float32)
-        return EventAlgoModel(
-            class_names=class_names,
-            feature_mean=feature_mean.astype(np.float32),
-            feature_std=safe_std,
-            centroids=_l2_normalize_rows(centroids.astype(np.float32)),
-            temperature=max(1e-3, temperature),
-            rule_config=dict(payload.get("rule_config") or {}),
-        )
-
-
-def fit_event_algo_model(
+def _fit_centroid_bank(
     feature_vectors: np.ndarray,
     labels: np.ndarray,
     *,
     class_names: Sequence[str],
-    temperature: float = 0.15,
-) -> EventAlgoModel:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     samples = np.asarray(feature_vectors, dtype=np.float32)
     target = np.asarray(labels, dtype=np.int32)
     names = [str(name).strip().upper() for name in class_names]
+
     if samples.ndim != 2:
         raise ValueError(f"feature_vectors must be rank-2, got shape={tuple(samples.shape)}")
     if target.ndim != 1 or target.shape[0] != samples.shape[0]:
@@ -180,29 +140,439 @@ def fit_event_algo_model(
         centroid = np.mean(scaled[mask], axis=0, dtype=np.float32)
         centroids.append(centroid.astype(np.float32))
     centroid_matrix = _l2_normalize_rows(np.stack(centroids, axis=0).astype(np.float32))
-
-    return EventAlgoModel(
-        class_names=tuple(names),
-        feature_mean=mean.astype(np.float32),
-        feature_std=std.astype(np.float32),
-        centroids=centroid_matrix,
-        temperature=max(1e-3, float(temperature)),
-        rule_config={},
-    )
+    return mean.astype(np.float32), std.astype(np.float32), centroid_matrix
 
 
-def predict_algo_proba_from_vector(model: EventAlgoModel, feature_vector: np.ndarray) -> np.ndarray:
+def _predict_with_bank(
+    feature_vector: np.ndarray,
+    *,
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
+    centroids: np.ndarray,
+    temperature: float,
+) -> np.ndarray:
     vector = np.asarray(feature_vector, dtype=np.float32).reshape(-1)
-    if vector.shape[0] != model.feature_mean.shape[0]:
+    if vector.shape[0] != feature_mean.shape[0]:
         raise ValueError(
-            f"feature_dim mismatch: got={vector.shape[0]}, expected={model.feature_mean.shape[0]}"
+            f"feature_dim mismatch: got={vector.shape[0]}, expected={feature_mean.shape[0]}"
         )
-    scaled = ((vector - model.feature_mean) / model.feature_std).astype(np.float32)
+    scaled = ((vector - feature_mean) / feature_std).astype(np.float32)
     norm = float(np.linalg.norm(scaled))
     if norm > 1e-8:
         scaled = scaled / norm
-    logits = np.matmul(model.centroids, scaled) / float(model.temperature)
+    logits = np.matmul(centroids, scaled) / float(max(1e-3, temperature))
     return _softmax(np.asarray(logits, dtype=np.float32))
+
+
+@dataclass(frozen=True)
+class EventAlgoModel:
+    class_names: tuple[str, ...]
+    feature_mean: np.ndarray
+    feature_std: np.ndarray
+    centroids: np.ndarray
+    temperature: float = 0.15
+    rule_config: dict[str, Any] | None = None
+    algo_mode: str = ALGO_MODE_V1
+    gate_feature_mean: np.ndarray | None = None
+    gate_feature_std: np.ndarray | None = None
+    gate_centroids: np.ndarray | None = None
+    gate_action_threshold: float = 0.55
+    gate_margin_threshold: float = 0.05
+    action_class_names: tuple[str, ...] | None = None
+    action_feature_mean: np.ndarray | None = None
+    action_feature_std: np.ndarray | None = None
+    action_centroids: np.ndarray | None = None
+
+    def to_json_dict(self) -> dict:
+        mode = _normalize_algo_mode(self.algo_mode)
+        payload = {
+            "version": "event_algo_v2" if mode == ALGO_MODE_V2 else "event_algo_v1",
+            "algo_mode": mode,
+            "classifier": "nearest_centroid_cosine",
+            "class_names": list(self.class_names),
+            "feature_dim": int(self.feature_mean.shape[0]),
+            "temperature": float(self.temperature),
+            "feature_mean": self.feature_mean.astype(np.float32).tolist(),
+            "feature_std": self.feature_std.astype(np.float32).tolist(),
+            "centroids": self.centroids.astype(np.float32).tolist(),
+            "rule_config": dict(self.rule_config or {}),
+        }
+        if mode == ALGO_MODE_V2:
+            payload.update(
+                {
+                    "gate_action_threshold": float(self.gate_action_threshold),
+                    "gate_margin_threshold": float(self.gate_margin_threshold),
+                    "gate_classifier": {
+                        "feature_mean": np.asarray(self.gate_feature_mean, dtype=np.float32).tolist(),
+                        "feature_std": np.asarray(self.gate_feature_std, dtype=np.float32).tolist(),
+                        "centroids": np.asarray(self.gate_centroids, dtype=np.float32).tolist(),
+                    },
+                    "action_classifier": {
+                        "class_names": list(self.action_class_names or ()),
+                        "feature_mean": np.asarray(self.action_feature_mean, dtype=np.float32).tolist(),
+                        "feature_std": np.asarray(self.action_feature_std, dtype=np.float32).tolist(),
+                        "centroids": np.asarray(self.action_centroids, dtype=np.float32).tolist(),
+                    },
+                }
+            )
+        return payload
+
+    @staticmethod
+    def from_json_dict(payload: dict) -> "EventAlgoModel":
+        class_names = tuple(str(item).strip().upper() for item in payload.get("class_names", []))
+        feature_mean = np.asarray(payload.get("feature_mean", []), dtype=np.float32)
+        feature_std = np.asarray(payload.get("feature_std", []), dtype=np.float32)
+        centroids = np.asarray(payload.get("centroids", []), dtype=np.float32)
+        temperature = float(payload.get("temperature", 0.15))
+        version = str(payload.get("version", "event_algo_v1")).strip().lower()
+        implied_mode = ALGO_MODE_V2 if version == "event_algo_v2" else ALGO_MODE_V1
+        algo_mode = _normalize_algo_mode(payload.get("algo_mode", implied_mode))
+
+        if not class_names:
+            raise ValueError("algo_model missing class_names")
+        if feature_mean.ndim != 1 or feature_std.ndim != 1:
+            raise ValueError("algo_model feature_mean/feature_std must be rank-1")
+        if centroids.ndim != 2:
+            raise ValueError("algo_model centroids must be rank-2")
+        if centroids.shape[0] != len(class_names):
+            raise ValueError(
+                f"algo_model centroids rows ({centroids.shape[0]}) mismatch class_names ({len(class_names)})"
+            )
+        if centroids.shape[1] != feature_mean.shape[0] or feature_std.shape[0] != feature_mean.shape[0]:
+            raise ValueError("algo_model feature dimension mismatch among scaler/centroids")
+        safe_std = np.where(feature_std < 1e-8, 1.0, feature_std).astype(np.float32)
+
+        gate_feature_mean = None
+        gate_feature_std = None
+        gate_centroids = None
+        action_class_names: tuple[str, ...] | None = None
+        action_feature_mean = None
+        action_feature_std = None
+        action_centroids = None
+        gate_action_threshold = float(payload.get("gate_action_threshold", 0.55))
+        gate_margin_threshold = float(payload.get("gate_margin_threshold", 0.05))
+
+        if algo_mode == ALGO_MODE_V2:
+            gate_payload = dict(payload.get("gate_classifier") or {})
+            action_payload = dict(payload.get("action_classifier") or {})
+            gate_feature_mean = np.asarray(gate_payload.get("feature_mean", []), dtype=np.float32)
+            gate_feature_std = np.asarray(gate_payload.get("feature_std", []), dtype=np.float32)
+            gate_centroids = np.asarray(gate_payload.get("centroids", []), dtype=np.float32)
+            action_class_names = tuple(str(item).strip().upper() for item in action_payload.get("class_names", []))
+            action_feature_mean = np.asarray(action_payload.get("feature_mean", []), dtype=np.float32)
+            action_feature_std = np.asarray(action_payload.get("feature_std", []), dtype=np.float32)
+            action_centroids = np.asarray(action_payload.get("centroids", []), dtype=np.float32)
+
+            if gate_feature_mean.ndim != 1 or gate_feature_std.ndim != 1:
+                raise ValueError("algo_model gate_classifier feature_mean/feature_std must be rank-1")
+            if gate_centroids.ndim != 2 or gate_centroids.shape[0] != 2:
+                raise ValueError("algo_model gate_classifier centroids must have shape [2, feature_dim]")
+            if gate_centroids.shape[1] != feature_mean.shape[0] or gate_feature_mean.shape[0] != feature_mean.shape[0]:
+                raise ValueError("algo_model gate_classifier feature dimension mismatch")
+            if gate_feature_std.shape[0] != feature_mean.shape[0]:
+                raise ValueError("algo_model gate_classifier std dimension mismatch")
+
+            if not action_class_names:
+                raise ValueError("algo_model action_classifier missing class_names")
+            if action_feature_mean.ndim != 1 or action_feature_std.ndim != 1:
+                raise ValueError("algo_model action_classifier feature_mean/feature_std must be rank-1")
+            if action_centroids.ndim != 2 or action_centroids.shape[0] != len(action_class_names):
+                raise ValueError("algo_model action_classifier centroids rows mismatch class_names")
+            if action_centroids.shape[1] != feature_mean.shape[0] or action_feature_mean.shape[0] != feature_mean.shape[0]:
+                raise ValueError("algo_model action_classifier feature dimension mismatch")
+            if action_feature_std.shape[0] != feature_mean.shape[0]:
+                raise ValueError("algo_model action_classifier std dimension mismatch")
+            if "RELAX" in action_class_names:
+                raise ValueError("algo_model action_classifier class_names must not include RELAX")
+
+            gate_feature_std = np.where(gate_feature_std < 1e-8, 1.0, gate_feature_std).astype(np.float32)
+            action_feature_std = np.where(action_feature_std < 1e-8, 1.0, action_feature_std).astype(np.float32)
+            gate_centroids = _l2_normalize_rows(gate_centroids.astype(np.float32))
+            action_centroids = _l2_normalize_rows(action_centroids.astype(np.float32))
+
+        return EventAlgoModel(
+            class_names=class_names,
+            feature_mean=feature_mean.astype(np.float32),
+            feature_std=safe_std,
+            centroids=_l2_normalize_rows(centroids.astype(np.float32)),
+            temperature=max(1e-3, temperature),
+            rule_config=dict(payload.get("rule_config") or {}),
+            algo_mode=algo_mode,
+            gate_feature_mean=gate_feature_mean,
+            gate_feature_std=gate_feature_std,
+            gate_centroids=gate_centroids,
+            gate_action_threshold=float(gate_action_threshold),
+            gate_margin_threshold=float(gate_margin_threshold),
+            action_class_names=action_class_names,
+            action_feature_mean=action_feature_mean,
+            action_feature_std=action_feature_std,
+            action_centroids=action_centroids,
+        )
+
+
+def fit_event_algo_model(
+    feature_vectors: np.ndarray,
+    labels: np.ndarray,
+    *,
+    class_names: Sequence[str],
+    temperature: float = 0.15,
+    algo_mode: str = ALGO_MODE_V1,
+    gate_action_threshold: float = 0.55,
+    gate_margin_threshold: float = 0.05,
+) -> EventAlgoModel:
+    mode = _normalize_algo_mode(algo_mode)
+    names = [str(name).strip().upper() for name in class_names]
+    samples = np.asarray(feature_vectors, dtype=np.float32)
+    target = np.asarray(labels, dtype=np.int32)
+
+    mean, std, centroids = _fit_centroid_bank(samples, target, class_names=names)
+    model = EventAlgoModel(
+        class_names=tuple(names),
+        feature_mean=mean,
+        feature_std=std,
+        centroids=centroids,
+        temperature=max(1e-3, float(temperature)),
+        rule_config={},
+        algo_mode=mode,
+    )
+    if mode == ALGO_MODE_V1:
+        return model
+
+    try:
+        relax_idx = names.index("RELAX")
+    except ValueError as exc:
+        raise ValueError("Two-stage algo requires RELAX in class_names.") from exc
+
+    gate_labels = (target != int(relax_idx)).astype(np.int32)
+    gate_mean, gate_std, gate_centroids = _fit_centroid_bank(
+        samples,
+        gate_labels,
+        class_names=["RELAX_GATE", "ACTION_GATE"],
+    )
+
+    action_indices = [idx for idx, name in enumerate(names) if name != "RELAX"]
+    if not action_indices:
+        raise ValueError("Two-stage algo requires at least one non-RELAX class.")
+    action_mask = gate_labels == 1
+    action_samples = samples[action_mask]
+    if action_samples.shape[0] == 0:
+        raise ValueError("Two-stage algo requires non-RELAX train samples.")
+    action_class_names = [names[idx] for idx in action_indices]
+    raw_to_action = {raw_idx: action_idx for action_idx, raw_idx in enumerate(action_indices)}
+    action_labels = np.asarray([raw_to_action[int(item)] for item in target[action_mask]], dtype=np.int32)
+    action_mean, action_std, action_centroids = _fit_centroid_bank(
+        action_samples,
+        action_labels,
+        class_names=action_class_names,
+    )
+
+    return EventAlgoModel(
+        class_names=tuple(names),
+        feature_mean=mean,
+        feature_std=std,
+        centroids=centroids,
+        temperature=max(1e-3, float(temperature)),
+        rule_config={},
+        algo_mode=mode,
+        gate_feature_mean=gate_mean,
+        gate_feature_std=gate_std,
+        gate_centroids=gate_centroids,
+        gate_action_threshold=float(gate_action_threshold),
+        gate_margin_threshold=float(gate_margin_threshold),
+        action_class_names=tuple(action_class_names),
+        action_feature_mean=action_mean,
+        action_feature_std=action_std,
+        action_centroids=action_centroids,
+    )
+
+
+def predict_algo_proba_with_meta_from_vector(
+    model: EventAlgoModel,
+    feature_vector: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    mode = _normalize_algo_mode(model.algo_mode)
+    class_names = [str(name).strip().upper() for name in model.class_names]
+    num_classes = len(class_names)
+    relax_idx = class_names.index("RELAX") if "RELAX" in class_names else None
+
+    if mode != ALGO_MODE_V2:
+        probs = _predict_with_bank(
+            feature_vector,
+            feature_mean=model.feature_mean,
+            feature_std=model.feature_std,
+            centroids=model.centroids,
+            temperature=model.temperature,
+        )
+        gate_relax = float(probs[int(relax_idx)]) if relax_idx is not None else 0.0
+        gate_action = float(max(0.0, 1.0 - gate_relax))
+        meta = {
+            "algo_mode": ALGO_MODE_V1,
+            "rule_hit": False,
+            "rule_name": None,
+            "gate_action_prob": gate_action,
+            "gate_relax_prob": gate_relax,
+            "gate_accepted": bool(int(np.argmax(probs)) != int(relax_idx) if relax_idx is not None else True),
+            "stage2_used": False,
+            "stage2_pred_class": None,
+        }
+        return probs.astype(np.float32), meta
+
+    if (
+        model.gate_feature_mean is None
+        or model.gate_feature_std is None
+        or model.gate_centroids is None
+        or model.action_feature_mean is None
+        or model.action_feature_std is None
+        or model.action_centroids is None
+        or not model.action_class_names
+    ):
+        raise ValueError("Two-stage algo model is incomplete. Missing gate/action classifier fields.")
+
+    gate_probs = _predict_with_bank(
+        feature_vector,
+        feature_mean=np.asarray(model.gate_feature_mean, dtype=np.float32),
+        feature_std=np.asarray(model.gate_feature_std, dtype=np.float32),
+        centroids=np.asarray(model.gate_centroids, dtype=np.float32),
+        temperature=model.temperature,
+    )
+    gate_relax = float(gate_probs[0])
+    gate_action = float(gate_probs[1])
+    gate_accepted = bool(
+        gate_action >= float(model.gate_action_threshold)
+        and (gate_action - gate_relax) >= float(model.gate_margin_threshold)
+    )
+
+    if not gate_accepted:
+        if relax_idx is None:
+            probs = _predict_with_bank(
+                feature_vector,
+                feature_mean=model.feature_mean,
+                feature_std=model.feature_std,
+                centroids=model.centroids,
+                temperature=model.temperature,
+            )
+        else:
+            relax_conf = float(np.clip(max(gate_relax, 1.0 - gate_action), 0.50, 0.98))
+            probs = _one_hot_confidence(num_classes, int(relax_idx), relax_conf)
+        meta = {
+            "algo_mode": ALGO_MODE_V2,
+            "rule_hit": False,
+            "rule_name": None,
+            "gate_action_prob": gate_action,
+            "gate_relax_prob": gate_relax,
+            "gate_accepted": False,
+            "stage2_used": False,
+            "stage2_pred_class": None,
+        }
+        return probs.astype(np.float32), meta
+
+    action_probs = _predict_with_bank(
+        feature_vector,
+        feature_mean=np.asarray(model.action_feature_mean, dtype=np.float32),
+        feature_std=np.asarray(model.action_feature_std, dtype=np.float32),
+        centroids=np.asarray(model.action_centroids, dtype=np.float32),
+        temperature=model.temperature,
+    )
+
+    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
+    full_probs = np.zeros((num_classes,), dtype=np.float32)
+    action_mass = float(np.clip(gate_action, 0.0, 1.0))
+    for action_idx, action_name in enumerate(model.action_class_names or ()):  # type: ignore[arg-type]
+        mapped_idx = class_to_idx.get(str(action_name).strip().upper())
+        if mapped_idx is None:
+            continue
+        full_probs[int(mapped_idx)] = float(action_probs[action_idx]) * action_mass
+    if relax_idx is not None:
+        full_probs[int(relax_idx)] = float(max(0.0, 1.0 - action_mass))
+
+    total = float(np.sum(full_probs))
+    if total <= 1e-8:
+        full_probs = _predict_with_bank(
+            feature_vector,
+            feature_mean=model.feature_mean,
+            feature_std=model.feature_std,
+            centroids=model.centroids,
+            temperature=model.temperature,
+        )
+    else:
+        full_probs = (full_probs / total).astype(np.float32)
+
+    stage2_pred_idx = int(np.argmax(action_probs))
+    stage2_pred_class = str((model.action_class_names or ("",))[stage2_pred_idx]).strip().upper()
+    meta = {
+        "algo_mode": ALGO_MODE_V2,
+        "rule_hit": False,
+        "rule_name": None,
+        "gate_action_prob": gate_action,
+        "gate_relax_prob": gate_relax,
+        "gate_accepted": True,
+        "stage2_used": True,
+        "stage2_pred_class": stage2_pred_class,
+    }
+    return full_probs.astype(np.float32), meta
+
+
+def predict_algo_proba_from_vector(model: EventAlgoModel, feature_vector: np.ndarray) -> np.ndarray:
+    probs, _ = predict_algo_proba_with_meta_from_vector(model, feature_vector)
+    return probs.astype(np.float32)
+
+
+def compute_algo_stage_metrics(
+    model: EventAlgoModel,
+    feature_vectors: np.ndarray,
+    labels: np.ndarray,
+    *,
+    class_names: Sequence[str],
+) -> dict[str, float]:
+    samples = np.asarray(feature_vectors, dtype=np.float32)
+    target = np.asarray(labels, dtype=np.int32)
+    names = [str(name).strip().upper() for name in class_names]
+    relax_idx = names.index("RELAX") if "RELAX" in names else None
+
+    if samples.shape[0] == 0:
+        return {
+            "gate_accept_rate": 0.0,
+            "gate_action_recall": 0.0,
+            "stage2_action_acc": 0.0,
+            "rule_hit_rate": 0.0,
+        }
+
+    gate_accept_count = 0
+    action_total = 0
+    action_accept_count = 0
+    stage2_total = 0
+    stage2_correct = 0
+    rule_hit_count = 0
+
+    for idx in range(samples.shape[0]):
+        probs, meta = predict_algo_proba_with_meta_from_vector(model, samples[idx])
+        pred = int(np.argmax(probs))
+        is_action_true = bool(relax_idx is not None and int(target[idx]) != int(relax_idx))
+
+        gate_accepted = bool(meta.get("gate_accepted", False))
+        stage2_used = bool(meta.get("stage2_used", False))
+        rule_hit = bool(meta.get("rule_hit", False))
+
+        if gate_accepted:
+            gate_accept_count += 1
+        if rule_hit:
+            rule_hit_count += 1
+
+        if is_action_true:
+            action_total += 1
+            if gate_accepted:
+                action_accept_count += 1
+            if stage2_used:
+                stage2_total += 1
+                if pred == int(target[idx]):
+                    stage2_correct += 1
+
+    return {
+        "gate_accept_rate": float(gate_accept_count / samples.shape[0]),
+        "gate_action_recall": float(action_accept_count / action_total) if action_total else 0.0,
+        "stage2_action_acc": float(stage2_correct / stage2_total) if stage2_total else 0.0,
+        "rule_hit_rate": float(rule_hit_count / samples.shape[0]),
+    }
 
 
 def save_event_algo_model(model: EventAlgoModel, path: str | Path) -> Path:
@@ -248,9 +618,9 @@ class EventAlgoPredictor:
         except ValueError:
             return None
 
-    def _rule_predict(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> np.ndarray | None:
+    def _rule_predict(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> tuple[np.ndarray | None, str | None]:
         if not self.rules_enabled:
-            return None
+            return None, None
         emg = _ensure_emg_shape(emg_feature)
         imu = _ensure_imu_shape(imu_feature)
         num_classes = len(self.tuple_class_names)
@@ -266,16 +636,38 @@ class EventAlgoPredictor:
             name = "WRIST_CW" if cw_score > ccw_score else "WRIST_CCW"
             idx = self._find_class_idx(name)
             if idx is not None:
-                return _one_hot_confidence(num_classes, idx, self.rule_confidence)
+                return _one_hot_confidence(num_classes, idx, self.rule_confidence), name
 
         release_idx = self._find_class_idx("TENSE_OPEN")
         if release_idx is not None and emg_energy >= self.release_emg_min and imu_motion <= self.release_imu_max:
-            return _one_hot_confidence(num_classes, release_idx, self.rule_confidence)
-        return None
+            return _one_hot_confidence(num_classes, release_idx, self.rule_confidence), "TENSE_OPEN"
+        return None, None
+
+    def _predict_internal(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+        rule_output, rule_name = self._rule_predict(emg_feature, imu_feature)
+        if rule_output is not None:
+            meta = {
+                "algo_mode": _normalize_algo_mode(self.model.algo_mode),
+                "rule_hit": True,
+                "rule_name": str(rule_name or "").strip().upper() or None,
+                "gate_action_prob": 1.0,
+                "gate_relax_prob": 0.0,
+                "gate_accepted": True,
+                "stage2_used": False,
+                "stage2_pred_class": None,
+            }
+            return rule_output.astype(np.float32), meta
+
+        vector = build_event_algo_feature_vector(emg_feature, imu_feature)
+        probs, meta = predict_algo_proba_with_meta_from_vector(self.model, vector)
+        meta = dict(meta)
+        meta["rule_hit"] = False
+        meta["rule_name"] = None
+        return probs.astype(np.float32), meta
 
     def predict_proba(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> np.ndarray:
-        rule_output = self._rule_predict(emg_feature, imu_feature)
-        if rule_output is not None:
-            return rule_output.astype(np.float32)
-        vector = build_event_algo_feature_vector(emg_feature, imu_feature)
-        return predict_algo_proba_from_vector(self.model, vector)
+        probs, _ = self._predict_internal(emg_feature, imu_feature)
+        return probs.astype(np.float32)
+
+    def predict_proba_with_meta(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+        return self._predict_internal(emg_feature, imu_feature)

@@ -106,10 +106,60 @@ def _evaluate_window_metrics(
     test_imu = imu_samples[mask]
     y_true = labels[mask].astype(np.int32)
     y_pred = np.zeros_like(y_true)
+    relax_idx = next((idx for idx, name in enumerate(class_names) if str(name).strip().upper() == "RELAX"), None)
+    gate_accept_count = 0
+    action_total = 0
+    action_accept_count = 0
+    stage2_total = 0
+    stage2_correct = 0
+    rule_hit_count = 0
+    has_algo_meta = False
     for idx in range(test_emg.shape[0]):
-        probs = np.asarray(predictor.predict_proba(test_emg[idx], test_imu[idx]), dtype=np.float32)
+        if hasattr(predictor, "predict_proba_with_meta"):
+            probs, meta = predictor.predict_proba_with_meta(test_emg[idx], test_imu[idx])
+            has_algo_meta = True
+        else:
+            probs = predictor.predict_proba(test_emg[idx], test_imu[idx])
+            meta = {}
+        probs = np.asarray(probs, dtype=np.float32)
         y_pred[idx] = int(np.argmax(probs))
-    return compute_classification_report(y_true, y_pred, class_names=class_names)
+        if has_algo_meta:
+            gate_accepted = bool(meta.get("gate_accepted", False))
+            stage2_used = bool(meta.get("stage2_used", False))
+            rule_hit = bool(meta.get("rule_hit", False))
+            if gate_accepted:
+                gate_accept_count += 1
+            if rule_hit:
+                rule_hit_count += 1
+            is_action = bool(relax_idx is not None and int(y_true[idx]) != int(relax_idx))
+            if is_action:
+                action_total += 1
+                if gate_accepted:
+                    action_accept_count += 1
+                if stage2_used:
+                    stage2_total += 1
+                    if int(y_pred[idx]) == int(y_true[idx]):
+                        stage2_correct += 1
+    report = compute_classification_report(y_true, y_pred, class_names=class_names)
+    if has_algo_meta:
+        report.update(
+            {
+                "gate_accept_rate": float(gate_accept_count / test_emg.shape[0]) if test_emg.shape[0] else 0.0,
+                "gate_action_recall": float(action_accept_count / action_total) if action_total else 0.0,
+                "stage2_action_acc": float(stage2_correct / stage2_total) if stage2_total else 0.0,
+                "rule_hit_rate": float(rule_hit_count / test_emg.shape[0]) if test_emg.shape[0] else 0.0,
+            }
+        )
+    else:
+        report.update(
+            {
+                "gate_accept_rate": 0.0,
+                "gate_action_recall": 0.0,
+                "stage2_action_acc": 0.0,
+                "rule_hit_rate": 0.0,
+            }
+        )
+    return report
 
 
 def _evaluate_control_metrics(
@@ -345,6 +395,10 @@ def main() -> None:
         "window_macro_f1": float(model_window.get("macro_f1", 0.0)),
         "event_action_accuracy": float(model_window.get("event_action_accuracy", 0.0)),
         "event_action_macro_f1": float(model_window.get("event_action_macro_f1", 0.0)),
+        "gate_accept_rate": float(model_window.get("gate_accept_rate", 0.0)),
+        "gate_action_recall": float(model_window.get("gate_action_recall", 0.0)),
+        "stage2_action_acc": float(model_window.get("stage2_action_acc", 0.0)),
+        "rule_hit_rate": float(model_window.get("rule_hit_rate", 0.0)),
         "command_success_rate": float(model_control.get("command_success_rate", 0.0)),
         "false_release_rate": float(model_control.get("false_release_rate", 0.0)),
         "false_trigger_rate": float(model_control.get("false_trigger_rate", 0.0)),
@@ -357,6 +411,10 @@ def main() -> None:
         "window_macro_f1": float(algo_window.get("macro_f1", 0.0)),
         "event_action_accuracy": float(algo_window.get("event_action_accuracy", 0.0)),
         "event_action_macro_f1": float(algo_window.get("event_action_macro_f1", 0.0)),
+        "gate_accept_rate": float(algo_window.get("gate_accept_rate", 0.0)),
+        "gate_action_recall": float(algo_window.get("gate_action_recall", 0.0)),
+        "stage2_action_acc": float(algo_window.get("stage2_action_acc", 0.0)),
+        "rule_hit_rate": float(algo_window.get("rule_hit_rate", 0.0)),
         "command_success_rate": float(algo_control.get("command_success_rate", 0.0)),
         "false_release_rate": float(algo_control.get("false_release_rate", 0.0)),
         "false_trigger_rate": float(algo_control.get("false_trigger_rate", 0.0)),
