@@ -54,6 +54,7 @@ runtime:
   post_transition_lock_ms: 220
   poll_interval_ms: 10
   low_energy_release_threshold: 2.5
+  release_mode: command_only
 
 device:
   target: CPU

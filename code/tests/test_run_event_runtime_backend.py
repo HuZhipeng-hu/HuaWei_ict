@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.run_event_runtime import _validate_startup_artifacts
+from scripts.run_event_runtime import _validate_release_contract, _validate_startup_artifacts
 
 
 def _touch(path: Path) -> Path:
@@ -75,3 +75,24 @@ def test_validate_startup_artifacts_fails_on_missing_file(tmp_path: Path):
             algo_model_path=None,
         )
 
+
+def test_validate_release_contract_requires_tense_open_for_command_only():
+    with pytest.raises(ValueError, match="requires class TENSE_OPEN"):
+        _validate_release_contract(
+            release_mode="command_only",
+            class_names=["RELAX", "THUMB_UP"],
+            mapping_by_name={"RELAX": "RELAX", "THUMB_UP": "THUMB_UP"},
+        )
+
+    with pytest.raises(ValueError, match="requires mapping TENSE_OPEN -> RELAX"):
+        _validate_release_contract(
+            release_mode="command_only",
+            class_names=["RELAX", "TENSE_OPEN", "THUMB_UP"],
+            mapping_by_name={"RELAX": "RELAX", "TENSE_OPEN": "THUMB_UP", "THUMB_UP": "THUMB_UP"},
+        )
+
+    _validate_release_contract(
+        release_mode="command_only",
+        class_names=["RELAX", "TENSE_OPEN", "THUMB_UP"],
+        mapping_by_name={"RELAX": "RELAX", "TENSE_OPEN": "RELAX", "THUMB_UP": "THUMB_UP"},
+    )

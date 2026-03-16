@@ -96,17 +96,19 @@ def test_event_loader_selects_top_k_action_windows_and_uses_target_state(tmp_pat
     config_path.write_text(BASE_TRAINING_CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
     loader, manifest_path = _build_loader(tmp_path)
 
-    action_a_path = tmp_path / "E1_G01" / "clip_e1_g01.csv"
-    action_b_path = tmp_path / "E1_G02" / "clip_e1_g02.csv"
+    action_a = loader.label_spec.class_names[1]
+    action_b = loader.label_spec.class_names[2]
+    action_a_path = tmp_path / action_a / "clip_a.csv"
+    action_b_path = tmp_path / action_b / "clip_b.csv"
     _write_standard_csv(action_a_path, _build_action_matrix())
     _write_standard_csv(action_b_path, _build_action_matrix(amp=32.0))
     upsert_event_manifest(
         manifest_path,
-        _manifest_row("E1_G01/clip_e1_g01.csv", start_state="RELAX", target_state="E1_G01", sample_count=600),
+        _manifest_row(f"{action_a}/clip_a.csv", start_state="RELAX", target_state=action_a, sample_count=600),
     )
     upsert_event_manifest(
         manifest_path,
-        _manifest_row("E1_G02/clip_e1_g02.csv", start_state="E1_G01", target_state="E1_G02", sample_count=600),
+        _manifest_row(f"{action_b}/clip_b.csv", start_state=action_a, target_state=action_b, sample_count=600),
     )
 
     emg, imu, labels, source_ids, metadata = loader.load_all_with_sources(return_metadata=True)
@@ -116,8 +118,9 @@ def test_event_loader_selects_top_k_action_windows_and_uses_target_state(tmp_pat
     assert set(labels.tolist()) == {1, 2}
     assert sum(label == 1 for label in labels.tolist()) == 2
     assert sum(label == 2 for label in labels.tolist()) == 2
-    assert set(source_ids.tolist()) == {"E1_G01/clip_e1_g01.csv", "E1_G02/clip_e1_g02.csv"}
-    assert all(item["selection_mode"] == "top_k_energy" for item in metadata)
+    assert set(source_ids.tolist()) == {f"{action_a}/clip_a.csv", f"{action_b}/clip_b.csv"}
+    assert all(item["selection_mode"] == "onset_peak_top_k" for item in metadata)
+    assert all("onset_idx" in item for item in metadata)
 
 
 def test_event_loader_relax_clip_only_produces_idle_samples(tmp_path: Path):
@@ -143,11 +146,12 @@ def test_event_loader_filters_low_energy_action_clip(tmp_path: Path):
     loader, manifest_path = _build_loader(tmp_path)
 
     low_energy = _build_action_matrix(amp=0.6)
-    action_path = tmp_path / "E1_G01" / "clip_low.csv"
+    action_name = loader.label_spec.class_names[1]
+    action_path = tmp_path / action_name / "clip_low.csv"
     _write_standard_csv(action_path, low_energy)
     upsert_event_manifest(
         manifest_path,
-        _manifest_row("E1_G01/clip_low.csv", start_state="RELAX", target_state="E1_G01", sample_count=600),
+        _manifest_row(f"{action_name}/clip_low.csv", start_state="RELAX", target_state=action_name, sample_count=600),
     )
 
     try:

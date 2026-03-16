@@ -89,12 +89,41 @@ def compute_classification_report(
     macro_r = float(np.mean([m["recall"] for m in per_class_rows])) if per_class_rows else 0.0
     macro_f1 = float(np.mean([m["f1"] for m in per_class_rows])) if per_class_rows else 0.0
 
+    relax_idx = next(
+        (idx for idx, name in enumerate(class_names) if str(name).strip().upper() == "RELAX"),
+        None,
+    )
+    if relax_idx is None:
+        action_mask = np.ones_like(y_true, dtype=bool)
+        action_indices = list(range(num_classes))
+    else:
+        action_mask = y_true != int(relax_idx)
+        action_indices = [idx for idx in range(num_classes) if idx != int(relax_idx)]
+
+    if int(np.sum(action_mask)) > 0 and action_indices:
+        action_true = y_true[action_mask]
+        action_pred = y_pred[action_mask]
+        action_cm = confusion_matrix(action_true, action_pred, num_classes)
+        action_rows = per_class_metrics(action_cm, class_names)
+        action_rows = [row for row in action_rows if int(row["class_id"]) in action_indices]
+        action_accuracy = float((action_true == action_pred).mean())
+        action_macro_f1 = float(np.mean([row["f1"] for row in action_rows])) if action_rows else 0.0
+        action_macro_recall = float(np.mean([row["recall"] for row in action_rows])) if action_rows else 0.0
+    else:
+        action_accuracy = 0.0
+        action_macro_f1 = 0.0
+        action_macro_recall = 0.0
+
     return {
         "num_samples": int(len(y_true)),
         "accuracy": acc,
         "macro_precision": macro_p,
         "macro_recall": macro_r,
         "macro_f1": macro_f1,
+        "event_action_num_samples": int(np.sum(action_mask)),
+        "event_action_accuracy": action_accuracy,
+        "event_action_macro_recall": action_macro_recall,
+        "event_action_macro_f1": action_macro_f1,
         "per_class": per_class_map,
         "per_class_rows": per_class_rows,
         "confusion_matrix": cm.tolist(),

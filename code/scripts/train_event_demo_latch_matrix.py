@@ -1,4 +1,4 @@
-"""Run 4-action+RELAX demo training matrix and rank by test accuracy first."""
+"""Run 4-action+RELAX demo training matrix and rank by event-action accuracy first."""
 
 from __future__ import annotations
 
@@ -71,9 +71,11 @@ def _compute_relax_action_confusion(top_pairs: list[dict], *, action_keys: set[s
     return int(total)
 
 
-def _rank_key(row: dict) -> tuple[int, float, float, float]:
+def _rank_key(row: dict) -> tuple[int, float, float, float, float, float]:
     return (
         int(bool(row.get("safety_ok", False))),
+        float(row.get("event_action_accuracy", 0.0)),
+        float(row.get("event_action_macro_f1", 0.0)),
         float(row.get("test_accuracy", 0.0)),
         float(row.get("test_macro_f1", 0.0)),
         -float(row.get("relax_action_confusion", 0.0)),
@@ -131,6 +133,8 @@ def _write_summary_csv(path: Path, rows: list[dict]) -> None:
         "config_tag",
         "config_path",
         "split_seed",
+        "event_action_accuracy",
+        "event_action_macro_f1",
         "test_accuracy",
         "test_macro_f1",
         "best_val_acc",
@@ -205,6 +209,20 @@ def main() -> None:
                     "config_tag": config_tag,
                     "config_path": str(config_path),
                     "split_seed": int(seed),
+                    "event_action_accuracy": float(
+                        metrics.get(
+                            "event_action_accuracy",
+                            offline.get("event_action_accuracy", 0.0),
+                        )
+                        or 0.0
+                    ),
+                    "event_action_macro_f1": float(
+                        metrics.get(
+                            "event_action_macro_f1",
+                            offline.get("event_action_macro_f1", 0.0),
+                        )
+                        or 0.0
+                    ),
                     "test_accuracy": float(metrics.get("accuracy", offline.get("test_accuracy", 0.0)) or 0.0),
                     "test_macro_f1": float(metrics.get("macro_f1", offline.get("test_macro_f1", 0.0)) or 0.0),
                     "best_val_acc": float(offline.get("best_val_acc", 0.0) or 0.0),
@@ -248,7 +266,10 @@ def main() -> None:
         "seeds": [int(seed) for seed in seeds],
         "rows": rows,
         "best_run": best,
-        "rank_rule": "safety_ok desc, test_accuracy desc, test_macro_f1 desc, relax_action_confusion asc",
+        "rank_rule": (
+            "safety_ok desc, event_action_accuracy desc, event_action_macro_f1 desc, "
+            "test_accuracy desc, test_macro_f1 desc, relax_action_confusion asc"
+        ),
         "safety": {
             "relax_action_confusion_limit": int(args.relax_action_confusion_limit),
             "safety_fail_count": int(sum(1 for row in rows if not bool(row.get("safety_ok", False)))),
@@ -274,6 +295,8 @@ def main() -> None:
         f"- run_id: `{best.get('run_id')}`",
         f"- config_tag: `{best.get('config_tag')}`",
         f"- split_seed: `{best.get('split_seed')}`",
+        f"- event_action_accuracy: `{float(best.get('event_action_accuracy', 0.0)):.6f}`",
+        f"- event_action_macro_f1: `{float(best.get('event_action_macro_f1', 0.0)):.6f}`",
         f"- test_accuracy: `{float(best.get('test_accuracy', 0.0)):.6f}`",
         f"- test_macro_f1: `{float(best.get('test_macro_f1', 0.0)):.6f}`",
         f"- relax_action_confusion: `{int(best.get('relax_action_confusion', 0))}`",

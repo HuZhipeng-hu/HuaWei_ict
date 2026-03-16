@@ -52,6 +52,8 @@ OFFLINE_SUMMARY_FIELDS = [
     "test_accuracy",
     "test_macro_f1",
     "test_macro_recall",
+    "event_action_accuracy",
+    "event_action_macro_f1",
     "top_confusion_pair",
 ]
 
@@ -498,6 +500,11 @@ def run_event_training(args) -> None:
                 "window_step_ms": data_cfg.feature.window_step_ms,
                 "top_k_windows_per_clip": data_cfg.top_k_windows_per_clip,
                 "idle_top_k_windows_per_clip": data_cfg.idle_top_k_windows_per_clip,
+                "action_window_policy": data_cfg.action_window_policy,
+                "action_onset_pre_ms": data_cfg.action_onset_pre_ms,
+                "action_onset_post_ms": data_cfg.action_onset_post_ms,
+                "action_onset_min_gap_ms": data_cfg.action_onset_min_gap_ms,
+                "action_onset_threshold_alpha": data_cfg.action_onset_threshold_alpha,
                 "use_imu": data_cfg.use_imu,
                 "budget_per_class": int(getattr(args, "budget_per_class", 0) or 0),
                 "budget_seed": int(getattr(args, "budget_seed", train_cfg.split_seed) or train_cfg.split_seed),
@@ -659,6 +666,8 @@ def run_event_training(args) -> None:
         "test_accuracy": report["accuracy"],
         "test_macro_f1": report["macro_f1"],
         "test_macro_recall": report["macro_recall"],
+        "event_action_accuracy": report.get("event_action_accuracy", 0.0),
+        "event_action_macro_f1": report.get("event_action_macro_f1", 0.0),
         "top_confusion_pair": _top_confusion_pair_text(report),
     }
     dump_json(run_dir / "offline_summary.json", summary)

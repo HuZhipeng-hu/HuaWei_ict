@@ -22,6 +22,17 @@ def _softmax(logits: np.ndarray) -> np.ndarray:
     return (exp_logits / np.sum(exp_logits)).astype(np.float32)
 
 
+def _one_hot_confidence(num_classes: int, index: int, confidence: float) -> np.ndarray:
+    conf = min(max(float(confidence), 0.0), 1.0)
+    if num_classes <= 1:
+        return np.asarray([1.0], dtype=np.float32)
+    base = float((1.0 - conf) / float(max(1, num_classes - 1)))
+    probs = np.full((num_classes,), base, dtype=np.float32)
+    probs[int(index)] = conf
+    probs = np.clip(probs, 0.0, 1.0).astype(np.float32)
+    return (probs / float(np.sum(probs))).astype(np.float32)
+
+
 def _ensure_emg_shape(emg_feature: np.ndarray) -> np.ndarray:
     emg = np.asarray(emg_feature, dtype=np.float32)
     if emg.ndim == 4:
@@ -93,6 +104,7 @@ class EventAlgoModel:
     feature_std: np.ndarray
     centroids: np.ndarray
     temperature: float = 0.15
+    rule_config: dict | None = None
 
     def to_json_dict(self) -> dict:
         return {
@@ -104,6 +116,7 @@ class EventAlgoModel:
             "feature_mean": self.feature_mean.astype(np.float32).tolist(),
             "feature_std": self.feature_std.astype(np.float32).tolist(),
             "centroids": self.centroids.astype(np.float32).tolist(),
+            "rule_config": dict(self.rule_config or {}),
         }
 
     @staticmethod
@@ -132,6 +145,7 @@ class EventAlgoModel:
             feature_std=safe_std,
             centroids=_l2_normalize_rows(centroids.astype(np.float32)),
             temperature=max(1e-3, temperature),
+            rule_config=dict(payload.get("rule_config") or {}),
         )
 
 
@@ -173,6 +187,7 @@ def fit_event_algo_model(
         feature_std=std.astype(np.float32),
         centroids=centroid_matrix,
         temperature=max(1e-3, float(temperature)),
+        rule_config={},
     )
 
 
@@ -213,12 +228,54 @@ class EventAlgoPredictor:
     def __init__(self, *, model_path: str | Path):
         self.model_path = Path(model_path)
         self.model = load_event_algo_model(self.model_path)
+        cfg = dict(self.model.rule_config or {})
+        self.rules_enabled = bool(cfg.get("enabled", False))
+        self.wrist_rule_min = float(cfg.get("wrist_rule_min", 0.55))
+        self.wrist_rule_margin = float(cfg.get("wrist_rule_margin", 0.10))
+        self.release_emg_min = float(cfg.get("release_emg_min", 0.45))
+        self.release_imu_max = float(cfg.get("release_imu_max", 1.50))
+        self.rule_confidence = float(cfg.get("rule_confidence", 0.94))
+        self.tuple_class_names = tuple(str(name).strip().upper() for name in self.model.class_names)
 
     @property
     def class_names(self) -> tuple[str, ...]:
-        return self.model.class_names
+        return self.tuple_class_names
+
+    def _find_class_idx(self, name: str) -> int | None:
+        query = str(name).strip().upper()
+        try:
+            return self.tuple_class_names.index(query)
+        except ValueError:
+            return None
+
+    def _rule_predict(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> np.ndarray | None:
+        if not self.rules_enabled:
+            return None
+        emg = _ensure_emg_shape(emg_feature)
+        imu = _ensure_imu_shape(imu_feature)
+        num_classes = len(self.tuple_class_names)
+
+        emg_energy = float(np.mean(np.abs(emg)))
+        imu_motion = float(np.mean(np.abs(np.diff(imu, axis=1)))) if imu.shape[1] > 1 else 0.0
+
+        gyro_z_idx = 5 if imu.shape[0] > 5 else (imu.shape[0] - 1)
+        gyro_z = imu[int(max(0, gyro_z_idx))]
+        cw_score = float(np.mean(np.maximum(gyro_z, 0.0)))
+        ccw_score = float(np.mean(np.maximum(-gyro_z, 0.0)))
+        if max(cw_score, ccw_score) >= self.wrist_rule_min and abs(cw_score - ccw_score) >= self.wrist_rule_margin:
+            name = "WRIST_CW" if cw_score > ccw_score else "WRIST_CCW"
+            idx = self._find_class_idx(name)
+            if idx is not None:
+                return _one_hot_confidence(num_classes, idx, self.rule_confidence)
+
+        release_idx = self._find_class_idx("TENSE_OPEN")
+        if release_idx is not None and emg_energy >= self.release_emg_min and imu_motion <= self.release_imu_max:
+            return _one_hot_confidence(num_classes, release_idx, self.rule_confidence)
+        return None
 
     def predict_proba(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> np.ndarray:
+        rule_output = self._rule_predict(emg_feature, imu_feature)
+        if rule_output is not None:
+            return rule_output.astype(np.float32)
         vector = build_event_algo_feature_vector(emg_feature, imu_feature)
         return predict_algo_proba_from_vector(self.model, vector)
-

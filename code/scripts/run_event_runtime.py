@@ -143,6 +143,27 @@ def _validate_runtime_class_contract(
         )
 
 
+def _validate_release_contract(
+    *,
+    release_mode: str,
+    class_names: list[str],
+    mapping_by_name: dict[str, str],
+) -> None:
+    mode = str(release_mode).strip().lower()
+    if mode != "command_only":
+        return
+    normalized = [str(name).strip().upper() for name in class_names]
+    if "TENSE_OPEN" not in normalized:
+        raise ValueError(
+            "release_mode=command_only requires class TENSE_OPEN in runtime label set."
+        )
+    mapped = str(mapping_by_name.get("TENSE_OPEN", "")).strip().upper()
+    if mapped != "RELAX":
+        raise ValueError(
+            "release_mode=command_only requires mapping TENSE_OPEN -> RELAX."
+        )
+
+
 def _ensure_file_exists(path: str | Path, *, desc: str) -> Path:
     resolved = Path(path)
     if not resolved.exists():
@@ -257,6 +278,11 @@ def main() -> None:
         metadata_class_names=metadata_class_names,
         recognizer_class_names=recognizer_class_names,
     )
+    _validate_release_contract(
+        release_mode=runtime_cfg.runtime.release_mode,
+        class_names=list(label_spec.class_names),
+        mapping_by_name=mapping_by_name,
+    )
 
     actuator = create_actuator(runtime_cfg.hardware)
     if hasattr(actuator, "connect"):
@@ -280,6 +306,7 @@ def main() -> None:
         logger.info("Algo artifact: algo_model_path=%s", startup_artifacts["algo_model_path"])
     logger.info("Class order: %s", list(label_spec.class_names))
     logger.info("Class mapping: %s", mapping_by_name)
+    logger.info("Release mode: %s", runtime_cfg.runtime.release_mode)
     if recognizer_backend == "model" and model_backend == "ckpt":
         logger.warning("CKPT backend is intended for debugging only. Use --backend lite for production deployment.")
 

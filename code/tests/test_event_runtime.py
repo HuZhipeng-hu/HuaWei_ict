@@ -145,6 +145,7 @@ def test_event_runtime_latch_and_tense_open_release_without_idle_auto_fallback()
             min_transition_gap_ms=120,
             post_transition_lock_ms=220,
             low_energy_release_threshold=2.5,
+            release_mode="command_only",
         ),
         low_energy_threshold=2.5,
         class_names=["RELAX", "TENSE_OPEN", "THUMB_UP"],

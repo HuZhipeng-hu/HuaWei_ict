@@ -15,6 +15,7 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.algo import (
+    EventAlgoModel,
     build_event_algo_feature_vector,
     fit_event_algo_model,
     predict_algo_proba_from_vector,
@@ -34,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split_manifest", default=None)
     parser.add_argument("--target_db5_keys", default=None)
     parser.add_argument("--temperature", type=float, default=0.15)
+    parser.add_argument("--wrist_rule_min", type=float, default=0.55)
+    parser.add_argument("--wrist_rule_margin", type=float, default=0.10)
+    parser.add_argument("--release_emg_min", type=float, default=0.45)
+    parser.add_argument("--release_imu_max", type=float, default=1.50)
+    parser.add_argument("--rule_confidence", type=float, default=0.94)
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_id", default="event_algo_baseline")
     parser.add_argument("--algo_model_out", default=None)
@@ -168,6 +174,21 @@ def main() -> None:
         class_names=class_names,
         temperature=float(args.temperature),
     )
+    model = EventAlgoModel(
+        class_names=model.class_names,
+        feature_mean=model.feature_mean,
+        feature_std=model.feature_std,
+        centroids=model.centroids,
+        temperature=model.temperature,
+        rule_config={
+            "enabled": True,
+            "wrist_rule_min": float(args.wrist_rule_min),
+            "wrist_rule_margin": float(args.wrist_rule_margin),
+            "release_emg_min": float(args.release_emg_min),
+            "release_imu_max": float(args.release_imu_max),
+            "rule_confidence": float(args.rule_confidence),
+        },
+    )
 
     model_out = Path(args.algo_model_out) if str(args.algo_model_out or "").strip() else (run_dir / "models" / "algo_model.json")
     model_out = save_event_algo_model(model, model_out)
@@ -200,6 +221,7 @@ def main() -> None:
         "split_manifest": str(resolved_split_manifest),
         "target_db5_keys": ",".join(data_cfg.target_db5_keys),
         "temperature": float(args.temperature),
+        "rule_config": dict(model.rule_config or {}),
         "train_window_count": int(np.sum(train_mask)),
         "val_window_count": int(np.sum(val_mask)),
         "test_window_count": int(np.sum(test_mask)),
@@ -218,4 +240,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

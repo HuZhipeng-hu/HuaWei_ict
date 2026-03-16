@@ -114,12 +114,22 @@ def _resolve_split_manifest(*, args: argparse.Namespace, run_dir: Path, training
     return (CODE_ROOT / str(training_data_cfg.split_manifest_path)).resolve()
 
 
-def _load_window_metrics(run_dir: Path) -> tuple[float, float]:
+def _load_window_metrics(run_dir: Path) -> dict[str, float]:
     metrics_path = run_dir / "evaluation" / "test_metrics.json"
     if not metrics_path.exists():
-        return 0.0, 0.0
+        return {
+            "window_test_accuracy": 0.0,
+            "window_macro_f1": 0.0,
+            "event_action_accuracy": 0.0,
+            "event_action_macro_f1": 0.0,
+        }
     payload = _load_json(metrics_path)
-    return float(payload.get("accuracy", 0.0) or 0.0), float(payload.get("macro_f1", 0.0) or 0.0)
+    return {
+        "window_test_accuracy": float(payload.get("accuracy", 0.0) or 0.0),
+        "window_macro_f1": float(payload.get("macro_f1", 0.0) or 0.0),
+        "event_action_accuracy": float(payload.get("event_action_accuracy", 0.0) or 0.0),
+        "event_action_macro_f1": float(payload.get("event_action_macro_f1", 0.0) or 0.0),
+    }
 
 
 def _evaluate_control_metrics(
@@ -297,7 +307,7 @@ def main() -> None:
         label_to_state=label_to_state,
     )
 
-    window_test_accuracy, window_macro_f1 = _load_window_metrics(run_dir)
+    window_metrics = _load_window_metrics(run_dir)
 
     output = {
         "status": "ok",
@@ -306,8 +316,10 @@ def main() -> None:
         "runtime_config": str(args.runtime_config),
         "training_config": str(args.training_config),
         "checkpoint_path": str(runtime_cfg.checkpoint_path),
-        "window_test_accuracy": float(window_test_accuracy),
-        "window_macro_f1": float(window_macro_f1),
+        "window_test_accuracy": float(window_metrics["window_test_accuracy"]),
+        "window_macro_f1": float(window_metrics["window_macro_f1"]),
+        "event_action_accuracy": float(window_metrics["event_action_accuracy"]),
+        "event_action_macro_f1": float(window_metrics["event_action_macro_f1"]),
         "command_success_rate": float(control["command_success_rate"]),
         "false_release_rate": float(control["false_release_rate"]),
         "false_trigger_rate": float(control["false_trigger_rate"]),

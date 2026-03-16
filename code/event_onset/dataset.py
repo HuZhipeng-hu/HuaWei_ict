@@ -146,6 +146,55 @@ class EventClipDatasetLoader:
             window = matrix[start:end]
             yield end, window[:, :8], window[:, 8:14]
 
+    def _ms_to_samples(self, value_ms: int) -> int:
+        rate = float(self.data_config.device_sampling_rate_hz)
+        return max(1, int(round(float(value_ms) * rate / 1000.0)))
+
+    @staticmethod
+    def _smooth_signal(values: np.ndarray, kernel_size: int) -> np.ndarray:
+        if kernel_size <= 1 or values.size <= 1:
+            return values.astype(np.float32)
+        kernel_size = int(max(1, kernel_size))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel = np.ones((kernel_size,), dtype=np.float32) / float(kernel_size)
+        return np.convolve(values.astype(np.float32), kernel, mode="same").astype(np.float32)
+
+    def _detect_action_onsets(self, emg_matrix: np.ndarray) -> list[int]:
+        if emg_matrix.size == 0:
+            return []
+        envelope = np.mean(np.abs(emg_matrix), axis=1).astype(np.float32)
+        smoothed = self._smooth_signal(envelope, kernel_size=self._ms_to_samples(40))
+        baseline = float(np.percentile(smoothed, 20))
+        peak = float(np.max(smoothed))
+        alpha = float(self.data_config.action_onset_threshold_alpha)
+        alpha = min(max(alpha, 0.0), 1.0)
+        threshold = baseline + alpha * (peak - baseline)
+        min_gap = self._ms_to_samples(int(self.data_config.action_onset_min_gap_ms))
+        candidates = np.where(smoothed >= threshold)[0].astype(np.int32).tolist()
+        if not candidates:
+            return []
+
+        onsets: list[int] = []
+        last = -10**9
+        for idx in candidates:
+            if idx - last < min_gap:
+                continue
+            lo = max(0, idx - min_gap // 2)
+            hi = min(smoothed.shape[0], idx + min_gap // 2 + 1)
+            local_peak = int(lo + int(np.argmax(smoothed[lo:hi])))
+            if onsets and local_peak - onsets[-1] < min_gap:
+                if smoothed[local_peak] > smoothed[onsets[-1]]:
+                    onsets[-1] = local_peak
+                continue
+            onsets.append(local_peak)
+            last = local_peak
+        return sorted(set(int(v) for v in onsets))
+
+    @staticmethod
+    def _window_center(start: int, end: int) -> int:
+        return int((int(start) + int(end)) // 2)
+
     def _resample_imu(self, imu_window: np.ndarray) -> np.ndarray:
         target_steps = int(self.data_config.feature.imu_resample_steps)
         if imu_window.shape[0] == target_steps:
@@ -161,7 +210,11 @@ class EventClipDatasetLoader:
         std = np.where(std < 1e-6, 1.0, std)
         return (centered / std).T.astype(np.float32)
 
-    def _build_event_windows(self, matrix: np.ndarray, metadata: dict[str, str]) -> list[EventWindowRecord]:
+    def _build_event_windows(
+        self,
+        matrix: np.ndarray,
+        metadata: dict[str, str],
+    ) -> tuple[list[EventWindowRecord], dict[str, Any]]:
         qf = self.data_config.quality_filter
         target_state = str(metadata["target_state"]).strip().upper()
         if target_state not in self.label_spec.gesture_to_idx:
@@ -171,8 +224,35 @@ class EventClipDatasetLoader:
         is_relax_clip = target_state == "RELAX"
         relax_candidates: list[EventWindowRecord] = []
         scored_action_windows: list[EventWindowRecord] = []
+        action_policy = str(self.data_config.action_window_policy).strip().lower()
+        onset_indices: list[int] = []
+        onset_pre = self._ms_to_samples(int(self.data_config.action_onset_pre_ms))
+        onset_post = self._ms_to_samples(int(self.data_config.action_onset_post_ms))
+        if not is_relax_clip and action_policy == "onset_peak":
+            onset_indices = self._detect_action_onsets(matrix[:, :8])
+            if onset_indices:
+                # Single-action clips: keep strongest onset first for stable slicing.
+                onset_indices = [int(onset_indices[0])]
+
+        clip_diag: dict[str, Any] = {
+            "relative_path": source_id,
+            "target_state": target_state,
+            "policy": action_policy if not is_relax_clip else "relax_idle",
+            "onset_indices": list(onset_indices),
+            "selected_window_ranges": [],
+            "dropped_reasons": [],
+            "selected_count": 0,
+        }
 
         for end, emg_window, imu_window in self._iter_window_slices(matrix):
+            start = int(end - self.data_config.context_samples)
+            if not is_relax_clip and action_policy == "onset_peak":
+                if not onset_indices:
+                    continue
+                center = self._window_center(start, int(end))
+                in_region = any((onset - onset_pre) <= center <= (onset + onset_post) for onset in onset_indices)
+                if not in_region:
+                    continue
             energy = self._window_energy(emg_window)
             clip_ratio = self._clip_ratio(emg_window, qf.saturation_abs)
             mean_std = self._window_std(emg_window)
@@ -184,8 +264,11 @@ class EventClipDatasetLoader:
             imu_feature = self._resample_imu(imu_window)
             merged_metadata = dict(metadata)
             merged_metadata["window_end_index"] = end
+            merged_metadata["window_start_index"] = int(start)
             merged_metadata["window_energy"] = energy
             merged_metadata["imu_motion"] = imu_motion
+            if onset_indices:
+                merged_metadata["onset_idx"] = int(onset_indices[0])
 
             if is_relax_clip:
                 if energy <= float(qf.energy_min) and imu_motion <= float(self.data_config.feature.imu_motion_std_max):
@@ -223,13 +306,29 @@ class EventClipDatasetLoader:
             chosen = relax_candidates[: int(self.data_config.idle_top_k_windows_per_clip)]
             for entry in chosen:
                 entry.metadata["selection_mode"] = "idle_relax"
-            return chosen
+                clip_diag["selected_window_ranges"].append(
+                    [int(entry.metadata["window_start_index"]), int(entry.metadata["window_end_index"])]
+                )
+            clip_diag["selected_count"] = int(len(chosen))
+            if not chosen:
+                clip_diag["dropped_reasons"].append("no_relax_window_after_filter")
+            return chosen, clip_diag
 
         scored_action_windows.sort(key=lambda item: item.energy, reverse=True)
         selected = scored_action_windows[: int(self.data_config.top_k_windows_per_clip)]
         for entry in selected:
-            entry.metadata["selection_mode"] = "top_k_energy"
-        return selected
+            entry.metadata["selection_mode"] = (
+                "onset_peak_top_k" if action_policy == "onset_peak" else "top_k_energy"
+            )
+            clip_diag["selected_window_ranges"].append(
+                [int(entry.metadata["window_start_index"]), int(entry.metadata["window_end_index"])]
+            )
+        clip_diag["selected_count"] = int(len(selected))
+        if action_policy == "onset_peak" and not onset_indices:
+            clip_diag["dropped_reasons"].append("no_onset_detected")
+        if not selected and onset_indices:
+            clip_diag["dropped_reasons"].append("no_action_window_after_filter")
+        return selected, clip_diag
 
     def load_all_with_sources(
         self,
@@ -241,15 +340,17 @@ class EventClipDatasetLoader:
         labels: list[int] = []
         source_ids: list[str] = []
         metadata_rows: list[dict[str, Any]] = []
+        clip_diagnostics: list[dict[str, Any]] = []
 
         clip_stats: dict[str, int] = Counter()
         window_stats = defaultdict(int)
         for csv_path, metadata in self._iter_clip_rows():
             matrix = self._read_csv_matrix(csv_path)
-            selected = self._build_event_windows(matrix, metadata)
+            selected, clip_diag = self._build_event_windows(matrix, metadata)
             clip_stats[metadata["target_state"]] += 1
             window_stats["clips_total"] += 1
             window_stats["selected_windows"] += len(selected)
+            clip_diagnostics.append(dict(clip_diag))
             if not selected:
                 window_stats["filtered_clips"] += 1
                 continue
@@ -267,6 +368,8 @@ class EventClipDatasetLoader:
         self._quality_report = {
             "clip_counts": dict(clip_stats),
             "window_counts": dict(window_stats),
+            "action_window_policy": str(self.data_config.action_window_policy),
+            "clip_diagnostics": clip_diagnostics,
             "manifest_path": str(self.recordings_manifest_path) if self.recordings_manifest_path else None,
         }
         emg_array = np.stack(emg_features, axis=0).astype(np.float32)

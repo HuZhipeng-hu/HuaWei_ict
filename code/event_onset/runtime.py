@@ -55,6 +55,12 @@ class EventRuntimeStateMachine:
         self.class_names = [str(name).strip().upper() for name in class_names]
         self.label_to_state = dict(label_to_state)
         self.action_labels = {idx for idx in range(1, len(self.class_names))}
+        self.release_mode = str(getattr(runtime_config, "release_mode", "idle_or_command")).strip().lower()
+        if self.release_mode not in {"idle_or_command", "command_only"}:
+            raise ValueError(
+                f"Unsupported release_mode={self.release_mode!r}. "
+                "Expected one of: idle_or_command, command_only."
+            )
 
         self.current_label = 0
         self.current_state = self.label_to_state.get(0, GestureType.RELAX)
@@ -171,9 +177,11 @@ class EventRuntimeStateMachine:
         else:
             self._idle_since_ms = None
 
-        if self._idle_since_ms is not None and (
-            now_ms - self._idle_since_ms
-        ) >= float(self.runtime_config.idle_release_hold_ms):
+        if (
+            self.release_mode != "command_only"
+            and self._idle_since_ms is not None
+            and (now_ms - self._idle_since_ms) >= float(self.runtime_config.idle_release_hold_ms)
+        ):
             self.current_label = 0
             target_state = self.label_to_state.get(0, GestureType.RELAX)
             changed = self.current_state != target_state
@@ -329,4 +337,3 @@ class EventOnsetController:
             confidence=confidence,
             decision=decision,
         )
-

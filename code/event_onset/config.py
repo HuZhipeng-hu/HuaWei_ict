@@ -54,6 +54,11 @@ class EventDataConfig:
     pre_roll_ms: int = 400
     top_k_windows_per_clip: int = 2
     idle_top_k_windows_per_clip: int = 4
+    action_window_policy: str = "onset_peak"
+    action_onset_pre_ms: int = 120
+    action_onset_post_ms: int = 220
+    action_onset_min_gap_ms: int = 180
+    action_onset_threshold_alpha: float = 0.25
     use_imu: bool = True
     feature: EventFeatureConfig = field(default_factory=EventFeatureConfig)
     quality_filter: QualityFilterConfig = field(default_factory=QualityFilterConfig)
@@ -102,6 +107,7 @@ class EventRuntimeBehaviorConfig:
     post_transition_lock_ms: int = 220
     poll_interval_ms: int = 10
     low_energy_release_threshold: float | None = None
+    release_mode: str = "idle_or_command"
 
 
 @dataclass

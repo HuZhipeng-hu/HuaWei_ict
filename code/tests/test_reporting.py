@@ -58,3 +58,7 @@ def test_classification_report_metrics_and_confusion_matrix():
     assert abs(report["macro_precision"] - expected_macro_precision) < 1e-9
     assert abs(report["macro_recall"] - expected_macro_recall) < 1e-9
     assert abs(report["macro_f1"] - expected_macro_f1) < 1e-9
+
+    # event-action metrics should exclude RELAX when present
+    assert "event_action_accuracy" in report
+    assert "event_action_macro_f1" in report

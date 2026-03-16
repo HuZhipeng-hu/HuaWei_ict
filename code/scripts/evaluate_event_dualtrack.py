@@ -193,8 +193,8 @@ def _rank_backend(metrics: dict) -> tuple[float, float, float, float, float]:
         float(metrics.get("command_success_rate", 0.0)),
         -float(metrics.get("false_trigger_rate", 1.0)),
         -float(metrics.get("false_release_rate", 1.0)),
-        float(metrics.get("window_test_accuracy", 0.0)),
-        float(metrics.get("window_macro_f1", 0.0)),
+        float(metrics.get("event_action_accuracy", 0.0)),
+        float(metrics.get("event_action_macro_f1", 0.0)),
     )
 
 
@@ -343,6 +343,8 @@ def main() -> None:
         "model_metadata_path": model_metadata_path,
         "window_test_accuracy": float(model_window.get("accuracy", 0.0)),
         "window_macro_f1": float(model_window.get("macro_f1", 0.0)),
+        "event_action_accuracy": float(model_window.get("event_action_accuracy", 0.0)),
+        "event_action_macro_f1": float(model_window.get("event_action_macro_f1", 0.0)),
         "command_success_rate": float(model_control.get("command_success_rate", 0.0)),
         "false_release_rate": float(model_control.get("false_release_rate", 0.0)),
         "false_trigger_rate": float(model_control.get("false_trigger_rate", 0.0)),
@@ -353,6 +355,8 @@ def main() -> None:
         "algo_model_path": str(algo_model_path),
         "window_test_accuracy": float(algo_window.get("accuracy", 0.0)),
         "window_macro_f1": float(algo_window.get("macro_f1", 0.0)),
+        "event_action_accuracy": float(algo_window.get("event_action_accuracy", 0.0)),
+        "event_action_macro_f1": float(algo_window.get("event_action_macro_f1", 0.0)),
         "command_success_rate": float(algo_control.get("command_success_rate", 0.0)),
         "false_release_rate": float(algo_control.get("false_release_rate", 0.0)),
         "false_trigger_rate": float(algo_control.get("false_trigger_rate", 0.0)),
@@ -373,7 +377,7 @@ def main() -> None:
         "mapping": mapping_by_name,
         "rank_rule": (
             "command_success_rate desc, false_trigger_rate asc, false_release_rate asc, "
-            "window_test_accuracy desc, window_macro_f1 desc"
+            "event_action_accuracy desc, event_action_macro_f1 desc"
         ),
         "tracks": {
             "model": model_metrics,
@@ -397,4 +401,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
