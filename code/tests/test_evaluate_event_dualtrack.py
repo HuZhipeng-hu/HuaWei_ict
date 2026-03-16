@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 import scripts.evaluate_event_dualtrack as dualtrack
+from shared.gestures import GestureType
 
 
 def _prepare_stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -144,3 +145,49 @@ def test_dualtrack_requires_algo_model_path(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(ValueError, match="requires --algo_model_path"):
         dualtrack.main()
+
+
+def test_control_metrics_excludes_release_command_from_action_denominator() -> None:
+    class _Decision:
+        def __init__(self, state: GestureType, changed: bool = True) -> None:
+            self.state = state
+            self.changed = changed
+
+    class _Step:
+        def __init__(self, decision: _Decision) -> None:
+            self.decision = decision
+
+    class _Controller:
+        def __init__(self, transitions: list[GestureType], final_state: GestureType) -> None:
+            self.state_machine = SimpleNamespace(current_label=0, current_state=GestureType.RELAX)
+            self.current_state = final_state
+            self._transitions = transitions
+
+        def ingest_rows(self, _matrix: np.ndarray) -> list[_Step]:
+            return [_Step(_Decision(state=item, changed=True)) for item in self._transitions]
+
+    class _Loader:
+        def iter_clips(self):
+            rows = np.zeros((32, 14), dtype=np.float32)
+            yield "THUMB_UP", "TENSE_OPEN", rows, {"relative_path": "clip_release"}
+            yield "RELAX", "THUMB_UP", rows, {"relative_path": "clip_action"}
+            yield "RELAX", "RELAX", rows, {"relative_path": "clip_relax"}
+
+    controllers = iter(
+        [
+            _Controller([GestureType.RELAX], GestureType.RELAX),
+            _Controller([GestureType.THUMB_UP], GestureType.THUMB_UP),
+            _Controller([], GestureType.RELAX),
+        ]
+    )
+
+    metrics = dualtrack._evaluate_control_metrics(
+        controller_factory=lambda: next(controllers),
+        loader=_Loader(),
+        test_sources={"clip_release", "clip_action", "clip_relax"},
+        class_names=["RELAX", "TENSE_OPEN", "THUMB_UP"],
+        label_to_state={0: GestureType.RELAX, 1: GestureType.RELAX, 2: GestureType.THUMB_UP},
+    )
+    assert metrics["action_clip_count"] == 1
+    assert metrics["release_command_clip_count"] == 1
+    assert metrics["false_release_rate"] == 0.0

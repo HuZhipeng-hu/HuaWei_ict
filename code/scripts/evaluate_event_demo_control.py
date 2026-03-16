@@ -168,6 +168,16 @@ def _compute_sanity_flags(*, command_success_rate: float, false_trigger_rate: fl
     return {"metric_invariant_ok": bool(metric_invariant_ok)}
 
 
+def _derive_release_command_labels(*, label_to_state: dict[int, object], relax_label: int = 0) -> set[int]:
+    """Return non-RELAX label ids that are mapped to RELAX actuator state."""
+    relax_state = label_to_state[int(relax_label)]
+    return {
+        int(label)
+        for label, state in label_to_state.items()
+        if int(label) != int(relax_label) and state == relax_state
+    }
+
+
 def _evaluate_control_metrics(
     *,
     controller_factory,
@@ -178,11 +188,17 @@ def _evaluate_control_metrics(
 ) -> dict:
     class_to_idx = {str(name).strip().upper(): int(idx) for idx, name in enumerate(class_names)}
     relax_state = label_to_state[0]
-    action_states = {label_to_state[idx] for idx in range(1, len(class_names))}
+    action_states = {
+        state
+        for idx, state in label_to_state.items()
+        if int(idx) != 0 and state != relax_state
+    }
+    release_command_labels = _derive_release_command_labels(label_to_state=label_to_state)
 
     total = 0
     action_total = 0
     relax_total = 0
+    release_command_total = 0
     command_success = 0
     false_release = 0
     false_trigger = 0
@@ -214,6 +230,17 @@ def _evaluate_control_metrics(
             success = (not triggered_action) and (controller.current_state == relax_state)
             if triggered_action:
                 false_trigger += 1
+        elif target_label in release_command_labels:
+            # command_only release classes (e.g. TENSE_OPEN -> RELAX) should not be
+            # mixed into action hold/release penalties.
+            release_command_total += 1
+            reached_target = any(step.decision.state == relax_state for step in transitions) or (
+                controller.current_state == relax_state
+            )
+            wrong_action = any(step.decision.state in action_states for step in transitions)
+            if wrong_action:
+                false_trigger += 1
+            success = reached_target and (not wrong_action)
         else:
             action_total += 1
             reached_idx = next(
@@ -247,6 +274,7 @@ def _evaluate_control_metrics(
         "total_clip_count": int(total),
         "action_clip_count": int(action_total),
         "relax_clip_count": int(relax_total),
+        "release_command_clip_count": int(release_command_total),
         "command_success_rate": float(command_success / total) if total else 0.0,
         "false_release_rate": float(false_release / action_total) if action_total else 0.0,
         "false_trigger_rate": float(false_trigger / total) if total else 0.0,
@@ -260,7 +288,6 @@ def _run(args: argparse.Namespace) -> Path:
         datefmt="%H:%M:%S",
     )
     logger = logging.getLogger("event_demo_control_eval")
-    args = build_parser().parse_args()
 
     run_root = Path(args.run_root)
     run_dir = run_root / str(args.run_id)

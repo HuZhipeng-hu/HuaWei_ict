@@ -214,9 +214,19 @@ def _evaluate_combo(
     inference_cfg.switch_confidence_boost = float(params["switch_confidence_boost"])
 
     relax_state = label_to_state[0]
-    action_states = {label_to_state[idx] for idx in range(1, len(class_names))}
+    action_states = {
+        state
+        for idx, state in label_to_state.items()
+        if int(idx) != 0 and state != relax_state
+    }
+    release_command_labels = {
+        int(label)
+        for label, state in label_to_state.items()
+        if int(label) != 0 and state == relax_state
+    }
     total = 0
     action_total = 0
+    release_command_total = 0
     command_success = 0
     false_release = 0
     false_trigger = 0
@@ -243,6 +253,17 @@ def _evaluate_combo(
             success = (not triggered_action) and (controller.current_state == relax_state)
             if triggered_action:
                 false_trigger += 1
+        elif int(target_label) in release_command_labels:
+            # command_only release classes (e.g. TENSE_OPEN -> RELAX) should not
+            # affect false_release denominator used for action-hold stability.
+            release_command_total += 1
+            reached_target = any(step.decision.state == relax_state for step in transitions) or (
+                controller.current_state == relax_state
+            )
+            wrong_action = any(step.decision.state in action_states for step in transitions)
+            if wrong_action:
+                false_trigger += 1
+            success = reached_target and (not wrong_action)
         else:
             action_total += 1
             reached_idx = next(
@@ -275,6 +296,7 @@ def _evaluate_combo(
         "false_trigger_rate": float(false_trigger / total) if total else 0.0,
         "total_clip_count": int(total),
         "action_clip_count": int(action_total),
+        "release_command_clip_count": int(release_command_total),
     }
 
 
@@ -298,6 +320,7 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "false_release_rate",
         "total_clip_count",
         "action_clip_count",
+        "release_command_clip_count",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as handle:
