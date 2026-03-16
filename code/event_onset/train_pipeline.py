@@ -65,6 +65,20 @@ class _ManifestLoadIssue(ValueError):
 _MANIFEST_FIELD_NAMES = {item.name for item in dataclass_fields(SplitManifest)}
 
 
+def _set_training_device(*, target: str, device_id: int) -> None:
+    """Configure MindSpore runtime device for the training stage."""
+    try:
+        from mindspore import context
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("MindSpore is required for event training.") from exc
+
+    mode = context.GRAPH_MODE
+    context.set_context(mode=mode, device_target=str(target))
+    if str(target).strip().upper() in {"GPU", "ASCEND"}:
+        context.set_context(device_id=int(device_id))
+    logger.info("Training device configured: mode=graph target=%s device_id=%d", str(target), int(device_id))
+
+
 def _apply_cli_overrides(args, model_cfg: EventModelConfig, train_cfg, augmentation_cfg):
     if args.base_channels is not None:
         model_cfg.base_channels = int(args.base_channels)
@@ -74,6 +88,10 @@ def _apply_cli_overrides(args, model_cfg: EventModelConfig, train_cfg, augmentat
         train_cfg.loss.type = args.loss_type
     if args.hard_mining_ratio is not None:
         train_cfg.sampler.hard_mining_ratio = float(args.hard_mining_ratio)
+    if getattr(args, "freeze_emg_epochs", None) is not None:
+        train_cfg.freeze_emg_epochs = int(args.freeze_emg_epochs)
+    if getattr(args, "encoder_lr_ratio", None) is not None:
+        train_cfg.encoder_lr_ratio = float(args.encoder_lr_ratio)
     if args.augment_factor is not None:
         augmentation_cfg.augment_factor = int(args.augment_factor)
     if args.use_mixup is not None:
@@ -463,6 +481,10 @@ def run_event_training(args) -> None:
     data_cfg = _apply_data_cli_overrides(args, data_cfg)
     label_spec = get_label_mode_spec(data_cfg.label_mode, data_cfg.target_db5_keys)
     model_cfg.num_classes = int(len(label_spec.class_names))
+    _set_training_device(
+        target=str(getattr(args, "device_target", "CPU")),
+        device_id=int(getattr(args, "device_id", 0)),
+    )
     incremental_checkpoint = str(getattr(args, "incremental_from_checkpoint", "") or "").strip()
     incremental_old_action_keys = normalize_action_keys(getattr(args, "incremental_old_target_db5_keys", None))
     incremental_head_only = bool(getattr(args, "incremental_head_only", True))

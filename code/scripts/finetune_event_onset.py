@@ -46,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use_se", type=_parse_optional_bool, default=None)
     parser.add_argument("--loss_type", default=None)
     parser.add_argument("--hard_mining_ratio", type=float, default=None)
+    parser.add_argument("--freeze_emg_epochs", type=int, default=None)
+    parser.add_argument("--encoder_lr_ratio", type=float, default=None)
     parser.add_argument("--augment_factor", type=int, default=None)
     parser.add_argument("--use_mixup", type=_parse_optional_bool, default=None)
     parser.add_argument("--augmentation_enabled", type=_parse_optional_bool, default=None)
