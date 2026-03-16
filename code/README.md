@@ -29,6 +29,10 @@ This repository now uses a single production path:
 - Convert: `scripts/convert_event_onset.py`
 - Runtime: `scripts/run_event_runtime.py`
 
+Optional dual-track tools (offline compare only):
+- Algo train/export: `scripts/train_event_algo_baseline.py`
+- Model vs Algo A/B: `scripts/evaluate_event_dualtrack.py`
+
 ## Cloud Commands
 
 ### 1) Pretrain (public DB5 only)
@@ -113,13 +117,53 @@ python scripts/collect_event_data_continuous.py \
 ```bash
 python scripts/run_event_runtime.py \
   --config configs/runtime_event_onset.yaml \
+  --recognizer_backend model \
   --backend lite
 ```
 
 Standalone smoke:
 
 ```bash
-python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --backend lite --standalone --duration_sec 10
+python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --recognizer_backend model --backend lite --standalone --duration_sec 10
+```
+
+Algorithm backend (startup single-select, no runtime switching):
+
+```bash
+python scripts/run_event_runtime.py \
+  --config configs/runtime_event_onset.yaml \
+  --recognizer_backend algo \
+  --algo_model_path artifacts/runs/event_algo_baseline/models/algo_model.json
+```
+
+If selected backend artifact is missing, runtime exits immediately (no fallback).
+
+## Dual-track Offline A/B (same split, same control settings)
+
+Train/export algorithm recognizer:
+
+```bash
+python scripts/train_event_algo_baseline.py \
+  --config configs/training_event_onset_demo_p0.yaml \
+  --data_dir ../data \
+  --recordings_manifest s2_train_manifest_relax12.csv \
+  --split_manifest artifacts/splits/s2_stable4_relax12_seed77.json \
+  --run_root artifacts/runs \
+  --run_id s2_algo_baseline_seed77
+```
+
+Evaluate model vs algo:
+
+```bash
+python scripts/evaluate_event_dualtrack.py \
+  --run_root artifacts/runs \
+  --model_run_id s2_stable4_relax12_seed77 \
+  --algo_model_path artifacts/runs/s2_algo_baseline_seed77/models/algo_model.json \
+  --training_config configs/training_event_onset_demo_p0.yaml \
+  --runtime_config configs/runtime_event_onset_demo_latch.yaml \
+  --data_dir ../data \
+  --recordings_manifest s2_train_manifest_relax12.csv \
+  --split_manifest artifacts/splits/s2_stable4_relax12_seed77.json
 ```
 
 ## Key Artifacts

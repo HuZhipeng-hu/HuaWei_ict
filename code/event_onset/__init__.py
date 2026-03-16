@@ -12,6 +12,7 @@ from .config import (
 )
 from .dataset import EventClipDatasetLoader
 from .inference import EventPredictor
+from .algo import EventAlgoPredictor
 from .manifest import EVENT_MANIFEST_FIELDS
 from .runtime import EventRuntimeStateMachine
 
@@ -21,6 +22,7 @@ __all__ = [
     "EventDataConfig",
     "EventFeatureConfig",
     "EventInferenceConfig",
+    "EventAlgoPredictor",
     "EventModelConfig",
     "EventPredictor",
     "EventRuntimeBehaviorConfig",

@@ -17,6 +17,7 @@ if str(CODE_ROOT) not in sys.path:
 
 from event_onset.config import load_event_runtime_config, load_event_training_config
 from event_onset.inference import EventPredictor
+from event_onset.algo import EventAlgoPredictor
 from event_onset.actuation_mapping import load_and_validate_actuation_map
 from event_onset.runtime import EventOnsetController
 from runtime.hardware.factory import create_actuator
@@ -26,11 +27,22 @@ from shared.label_modes import get_label_mode_spec
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run event-onset runtime controller")
+    parser.add_argument(
+        "--recognizer_backend",
+        default="model",
+        choices=["model", "algo"],
+        help="Choose recognizer backend once at startup.",
+    )
     parser.add_argument("--config", default="configs/runtime_event_onset.yaml")
     parser.add_argument("--backend", default="lite", choices=["lite", "ckpt"])
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--model_path", default=None, help="MindIR model path for --backend lite")
     parser.add_argument("--model_metadata", default=None, help="Model metadata json path for --backend lite")
+    parser.add_argument(
+        "--algo_model_path",
+        default=None,
+        help="Algorithm model json path when --recognizer_backend=algo.",
+    )
     parser.add_argument("--actuation_mapping", default=None, help="Class-to-actuator mapping YAML path.")
     parser.add_argument(
         "--target_db5_keys",
@@ -79,18 +91,15 @@ def _rows_from_frame(parsed: dict) -> np.ndarray:
 
 def _validate_runtime_class_contract(
     *,
-    backend: str,
+    recognizer_backend: str,
+    model_backend: str,
     expected_class_names: list[str],
-    model_num_classes: int,
     mapping_by_name: dict[str, str],
-    metadata,
+    model_num_classes: int | None,
+    metadata_class_names: list[str] | None,
+    recognizer_class_names: list[str] | None = None,
 ) -> None:
     normalized_expected = [str(name).strip().upper() for name in expected_class_names]
-    if int(model_num_classes) != len(normalized_expected):
-        raise ValueError(
-            f"model.num_classes={model_num_classes} mismatches expected labels={len(normalized_expected)} "
-            f"({normalized_expected})"
-        )
 
     mapping_keys = sorted(str(key).strip().upper() for key in mapping_by_name.keys())
     if mapping_keys != sorted(normalized_expected):
@@ -99,14 +108,32 @@ def _validate_runtime_class_contract(
             f"expected={sorted(normalized_expected)}"
         )
 
-    if metadata is None:
-        if backend == "lite":
+    if recognizer_backend == "algo":
+        names = [str(item).strip().upper() for item in (recognizer_class_names or [])]
+        if not names:
+            raise ValueError("Algorithm backend must provide non-empty class_names.")
+        if names != normalized_expected:
+            raise ValueError(
+                "Runtime class order mismatch between config and algo model: "
+                f"config={normalized_expected}, algo={names}"
+            )
+        return
+
+    if model_num_classes is None:
+        raise ValueError("model_num_classes is required for recognizer_backend=model.")
+    if int(model_num_classes) != len(normalized_expected):
+        raise ValueError(
+            f"model.num_classes={model_num_classes} mismatches expected labels={len(normalized_expected)} "
+            f"({normalized_expected})"
+        )
+
+    if metadata_class_names is None:
+        if model_backend == "lite":
             raise ValueError("Lite backend requires model metadata with class_names for strict runtime validation.")
         return
 
-    metadata_class_names = [str(name).strip().upper() for name in metadata.class_names]
     if not metadata_class_names:
-        if backend == "lite":
+        if model_backend == "lite":
             raise ValueError("Lite backend metadata must include non-empty class_names.")
         return
     if metadata_class_names != normalized_expected:
@@ -114,6 +141,42 @@ def _validate_runtime_class_contract(
             "Runtime class order mismatch between config and model metadata: "
             f"config={normalized_expected}, metadata={metadata_class_names}"
         )
+
+
+def _ensure_file_exists(path: str | Path, *, desc: str) -> Path:
+    resolved = Path(path)
+    if not resolved.exists():
+        raise FileNotFoundError(f"{desc} not found: {resolved}")
+    if not resolved.is_file():
+        raise FileNotFoundError(f"{desc} is not a file: {resolved}")
+    return resolved
+
+
+def _validate_startup_artifacts(
+    *,
+    recognizer_backend: str,
+    model_backend: str,
+    checkpoint_path: str | Path,
+    model_path: str | Path,
+    model_metadata_path: str | Path,
+    algo_model_path: str | Path | None,
+) -> dict[str, str]:
+    if recognizer_backend == "algo":
+        if not str(algo_model_path or "").strip():
+            raise ValueError(
+                "--algo_model_path is required when --recognizer_backend=algo."
+            )
+        algo_path = _ensure_file_exists(str(algo_model_path), desc="Algorithm model")
+        return {"algo_model_path": str(algo_path)}
+
+    if model_backend == "ckpt":
+        ckpt = _ensure_file_exists(checkpoint_path, desc="Model checkpoint")
+        return {"checkpoint_path": str(ckpt)}
+    if model_backend == "lite":
+        model = _ensure_file_exists(model_path, desc="MindIR model")
+        metadata = _ensure_file_exists(model_metadata_path, desc="Model metadata")
+        return {"model_path": str(model), "model_metadata_path": str(metadata)}
+    raise ValueError(f"Unsupported model backend: {model_backend}")
 
 
 def main() -> None:
@@ -126,6 +189,8 @@ def main() -> None:
     args = build_parser().parse_args()
 
     runtime_cfg = load_event_runtime_config(args.config)
+    recognizer_backend = str(args.recognizer_backend).strip().lower()
+    model_backend = str(args.backend).strip().lower()
     if args.checkpoint:
         runtime_cfg.checkpoint_path = args.checkpoint
     if args.model_path:
@@ -153,20 +218,44 @@ def main() -> None:
         runtime_cfg.actuation_mapping_path,
         class_names=label_spec.class_names,
     )
-    predictor = EventPredictor(
-        backend=args.backend,
-        model_config=model_cfg,
-        device_target=runtime_cfg.device.target,
+    startup_artifacts = _validate_startup_artifacts(
+        recognizer_backend=recognizer_backend,
+        model_backend=model_backend,
         checkpoint_path=runtime_cfg.checkpoint_path,
         model_path=runtime_cfg.model_path,
         model_metadata_path=runtime_cfg.model_metadata_path,
+        algo_model_path=args.algo_model_path,
     )
+
+    predictor = None
+    predict_proba = None
+    metadata_class_names: list[str] | None = None
+    recognizer_class_names: list[str] | None = None
+    if recognizer_backend == "model":
+        predictor = EventPredictor(
+            backend=model_backend,
+            model_config=model_cfg,
+            device_target=runtime_cfg.device.target,
+            checkpoint_path=runtime_cfg.checkpoint_path,
+            model_path=runtime_cfg.model_path,
+            model_metadata_path=runtime_cfg.model_metadata_path,
+        )
+        predict_proba = predictor.predict_proba
+        if predictor.metadata is not None and predictor.metadata.class_names:
+            metadata_class_names = [str(name).strip().upper() for name in predictor.metadata.class_names]
+    else:
+        algo_predictor = EventAlgoPredictor(model_path=str(startup_artifacts["algo_model_path"]))
+        predict_proba = algo_predictor.predict_proba
+        recognizer_class_names = [str(name).strip().upper() for name in algo_predictor.class_names]
+
     _validate_runtime_class_contract(
-        backend=args.backend,
+        recognizer_backend=recognizer_backend,
+        model_backend=model_backend,
         expected_class_names=list(label_spec.class_names),
-        model_num_classes=int(model_cfg.num_classes),
+        model_num_classes=int(model_cfg.num_classes) if recognizer_backend == "model" else None,
         mapping_by_name=mapping_by_name,
-        metadata=predictor.metadata,
+        metadata_class_names=metadata_class_names,
+        recognizer_class_names=recognizer_class_names,
     )
 
     actuator = create_actuator(runtime_cfg.hardware)
@@ -174,15 +263,24 @@ def main() -> None:
         actuator.connect()
 
     logger.info(
-        "Event runtime started: backend=%s device=%s checkpoint=%s model=%s actuation_mapping=%s",
-        args.backend,
+        "Event runtime started: recognizer_backend=%s model_backend=%s device=%s actuation_mapping=%s",
+        recognizer_backend,
+        model_backend if recognizer_backend == "model" else "n/a",
         runtime_cfg.device.target,
-        runtime_cfg.checkpoint_path,
-        runtime_cfg.model_path,
         runtime_cfg.actuation_mapping_path,
     )
+    if recognizer_backend == "model":
+        logger.info(
+            "Model artifacts: checkpoint=%s model=%s metadata=%s",
+            runtime_cfg.checkpoint_path,
+            runtime_cfg.model_path,
+            runtime_cfg.model_metadata_path,
+        )
+    else:
+        logger.info("Algo artifact: algo_model_path=%s", startup_artifacts["algo_model_path"])
+    logger.info("Class order: %s", list(label_spec.class_names))
     logger.info("Class mapping: %s", mapping_by_name)
-    if args.backend == "ckpt":
+    if recognizer_backend == "model" and model_backend == "ckpt":
         logger.warning("CKPT backend is intended for debugging only. Use --backend lite for production deployment.")
 
     controller = EventOnsetController(
@@ -191,7 +289,7 @@ def main() -> None:
         runtime_config=runtime_cfg.runtime,
         class_names=label_spec.class_names,
         label_to_state=label_to_state,
-        predict_proba=predictor.predict_proba,
+        predict_proba=predict_proba,
         actuator=actuator,
     )
 
