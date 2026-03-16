@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from event_onset.config import EventModelConfig
-from event_onset.inference import EventPredictor
+from event_onset.inference import EventModelMetadata, EventPredictor
 
 
 class _FakeInput:
@@ -57,3 +57,24 @@ def test_event_predictor_lite_backend_uses_two_inputs(monkeypatch):
     assert probs.shape == (3,)
     assert np.isclose(np.sum(probs), 1.0, atol=1e-5)
     assert np.argmax(probs) == 1
+
+
+def test_event_predictor_ckpt_does_not_require_model_metadata(monkeypatch):
+    def _fake_load_ckpt(self, _checkpoint_path):
+        self._ckpt_model = object()
+        self._expected_emg_shape = (1, 8, 24, 3)
+        self._expected_imu_shape = (1, 6, 16)
+
+    def _fail_if_called(_path):
+        raise AssertionError("EventModelMetadata.load should not be called for ckpt backend")
+
+    monkeypatch.setattr(EventPredictor, "_load_ckpt", _fake_load_ckpt)
+    monkeypatch.setattr(EventModelMetadata, "load", staticmethod(_fail_if_called))
+
+    predictor = EventPredictor(
+        backend="ckpt",
+        model_config=EventModelConfig(),
+        checkpoint_path="artifacts/runs/any/checkpoints/event_onset_best.ckpt",
+        model_metadata_path="models/event_onset.model_metadata.json",
+    )
+    assert predictor.metadata is None

@@ -91,7 +91,8 @@ class EventPredictor:
         self.backend = normalized
         self.model_config = model_config
         self.device_target = device_target
-        self.metadata = EventModelMetadata.load(model_metadata_path)
+        # CKPT backend does not need model metadata; keep it optional to avoid false file-not-found failures.
+        self.metadata = EventModelMetadata.load(model_metadata_path) if self.backend == "lite" else None
         self._ckpt_model = None
         self._lite_model = None
         self._emg_input_index = 0

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import uuid
 from pathlib import Path
 
 from scripts.train_event_demo_latch_matrix import _rank_key, _write_summary_csv
@@ -30,8 +32,10 @@ def test_rank_key_prefers_safety_then_event_then_control() -> None:
     assert ranked[0] is safe_lower
 
 
-def test_write_summary_csv_includes_control_fields(tmp_path: Path) -> None:
-    out = tmp_path / "summary.csv"
+def test_write_summary_csv_includes_control_fields() -> None:
+    tmp_root = Path(__file__).resolve().parent / ".tmp_testdata" / f"csv_{uuid.uuid4().hex}"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    out = tmp_root / "summary.csv"
     rows = [
         {
             "run_id": "exp_1",
@@ -54,8 +58,12 @@ def test_write_summary_csv_includes_control_fields(tmp_path: Path) -> None:
             "metrics_path": "artifacts/runs/x/evaluation/test_metrics.json",
         }
     ]
-    _write_summary_csv(out, rows)
-    text = out.read_text(encoding="utf-8")
-    assert "command_success_rate" in text
-    assert "false_trigger_rate" in text
-    assert "false_release_rate" in text
+    try:
+        _write_summary_csv(out, rows)
+        text = out.read_text(encoding="utf-8")
+        assert "command_success_rate" in text
+        assert "false_trigger_rate" in text
+        assert "false_release_rate" in text
+    finally:
+        if tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
