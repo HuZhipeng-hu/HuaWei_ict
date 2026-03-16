@@ -654,9 +654,48 @@ def _stage_tune(args: argparse.Namespace, *, longrun_summary: dict | None = None
     return summary
 
 
+def _stage_audit(args: argparse.Namespace) -> dict:
+    output_json = Path(args.run_root) / f"{args.run_prefix}_audit_report.json"
+    cmd = [
+        sys.executable,
+        "scripts/audit_event_model90_pipeline.py",
+        "--run_root",
+        str(args.run_root),
+        "--run_prefix",
+        str(args.run_prefix),
+        "--training_config",
+        str(args.training_config),
+        "--runtime_config",
+        str(args.runtime_config),
+        "--screen_loss_types",
+        str(args.screen_loss_types),
+        "--screen_base_channels",
+        str(args.screen_base_channels),
+        "--screen_freeze_emg_epochs",
+        str(args.screen_freeze_emg_epochs),
+        "--screen_encoder_lr_ratios",
+        str(args.screen_encoder_lr_ratios),
+        "--screen_pretrained_modes",
+        str(args.screen_pretrained_modes),
+        "--longrun_seeds",
+        str(args.longrun_seeds),
+        "--output_json",
+        str(output_json),
+    ]
+    _run_checked("audit:design_impl_params", cmd)
+    summary = {
+        "status": "ok",
+        "stage": "audit",
+        "output_json": str(output_json),
+    }
+    out = Path(args.run_root) / f"{args.run_prefix}_audit_summary.json"
+    out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Model 0.9 sprint orchestration")
-    parser.add_argument("--stage", default="all", choices=["baseline", "screen", "longrun", "tune", "all"])
+    parser.add_argument("--stage", default="all", choices=["baseline", "screen", "longrun", "tune", "audit", "all"])
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_prefix", default="s2_model90")
     parser.add_argument("--training_config", default="configs/training_event_onset_demo_p0.yaml")
@@ -706,6 +745,7 @@ def main() -> None:
         screen_summary = None
         longrun_summary = None
         tune_summary = None
+        audit_summary = None
 
         if args.stage in {"baseline", "all"}:
             last_stage = "baseline"
@@ -723,6 +763,10 @@ def main() -> None:
             last_stage = "tune"
             tune_summary = _stage_tune(args, longrun_summary=longrun_summary, screen_summary=screen_summary)
 
+        if args.stage in {"audit", "all"}:
+            last_stage = "audit"
+            audit_summary = _stage_audit(args)
+
         report = {
             "status": "ok",
             "stage": str(args.stage),
@@ -732,11 +776,13 @@ def main() -> None:
                 "screen_summary": str(Path(args.run_root) / f"{args.run_prefix}_screen_summary.json"),
                 "longrun_summary": str(Path(args.run_root) / f"{args.run_prefix}_longrun_summary.json"),
                 "tune_summary": str(Path(args.run_root) / f"{args.run_prefix}_tune_summary.json"),
+                "audit_summary": str(Path(args.run_root) / f"{args.run_prefix}_audit_summary.json"),
             },
             "baseline_done": bool(baseline_summary),
             "screen_done": bool(screen_summary),
             "longrun_done": bool(longrun_summary),
             "tune_done": bool(tune_summary),
+            "audit_done": bool(audit_summary),
         }
         out = Path(args.run_root) / f"{args.run_prefix}_pipeline_report.json"
         out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
