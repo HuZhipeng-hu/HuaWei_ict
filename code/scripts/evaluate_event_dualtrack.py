@@ -32,7 +32,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate model/algo backends on same split and control policy")
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--model_run_id", required=True)
-    parser.add_argument("--algo_model_path", required=True)
+    parser.add_argument("--eval_mode", default="dualtrack", choices=["dualtrack", "model_only"])
+    parser.add_argument("--algo_model_path", default=None)
     parser.add_argument("--training_config", default="configs/training_event_onset_demo_p0.yaml")
     parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
     parser.add_argument("--data_dir", default="../data")
@@ -47,6 +48,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_json", default=None)
     parser.add_argument("--target_event_action_accuracy_model", type=float, default=0.8)
     parser.add_argument("--target_event_action_accuracy_algo", type=float, default=0.9)
+    parser.add_argument("--target_command_success_rate", type=float, default=0.9)
+    parser.add_argument("--max_false_trigger_rate", type=float, default=0.05)
+    parser.add_argument("--max_false_release_rate", type=float, default=0.05)
     return parser
 
 
@@ -250,6 +254,42 @@ def _rank_backend(metrics: dict) -> tuple[float, float, float, float, float]:
     )
 
 
+def _attach_acceptance_flags(
+    metrics: dict,
+    *,
+    target_event_action_accuracy: float,
+    target_command_success_rate: float,
+    max_false_trigger_rate: float,
+    max_false_release_rate: float,
+) -> dict:
+    payload = dict(metrics)
+    payload["event_action_accuracy_target"] = float(target_event_action_accuracy)
+    payload["event_action_accuracy_gap"] = float(target_event_action_accuracy) - float(
+        payload.get("event_action_accuracy", 0.0)
+    )
+    payload["command_success_rate_target"] = float(target_command_success_rate)
+    payload["false_trigger_rate_limit"] = float(max_false_trigger_rate)
+    payload["false_release_rate_limit"] = float(max_false_release_rate)
+    payload["pass_event_action_accuracy"] = bool(
+        float(payload.get("event_action_accuracy", 0.0)) >= float(target_event_action_accuracy)
+    )
+    payload["pass_command_success_rate"] = bool(
+        float(payload.get("command_success_rate", 0.0)) >= float(target_command_success_rate)
+    )
+    payload["pass_false_trigger_rate"] = bool(
+        float(payload.get("false_trigger_rate", 1.0)) <= float(max_false_trigger_rate)
+    )
+    payload["pass_false_release_rate"] = bool(
+        float(payload.get("false_release_rate", 1.0)) <= float(max_false_release_rate)
+    )
+    payload["pass_strict_online_gate"] = bool(
+        payload["pass_command_success_rate"]
+        and payload["pass_false_trigger_rate"]
+        and payload["pass_false_release_rate"]
+    )
+    return payload
+
+
 def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -293,9 +333,17 @@ def main() -> None:
         if str(args.model_metadata or "").strip()
         else str(runtime_cfg.model_metadata_path)
     )
-    algo_model_path = Path(str(args.algo_model_path)).resolve()
-    if not algo_model_path.exists():
-        raise FileNotFoundError(f"algo model not found: {algo_model_path}")
+    eval_mode = str(args.eval_mode).strip().lower()
+    if eval_mode not in {"dualtrack", "model_only"}:
+        raise ValueError(f"Unsupported eval_mode={args.eval_mode!r}.")
+
+    algo_model_path: Path | None = None
+    if eval_mode == "dualtrack":
+        if not str(args.algo_model_path or "").strip():
+            raise ValueError("dualtrack mode requires --algo_model_path.")
+        algo_model_path = Path(str(args.algo_model_path)).resolve()
+        if not algo_model_path.exists():
+            raise FileNotFoundError(f"algo model not found: {algo_model_path}")
 
     label_spec = get_label_mode_spec(data_cfg.label_mode, data_cfg.target_db5_keys)
     model_cfg.num_classes = int(len(label_spec.class_names))
@@ -323,12 +371,15 @@ def main() -> None:
         recognized_class_names=model_class_names,
     )
 
-    algo_predictor = EventAlgoPredictor(model_path=algo_model_path)
-    _validate_backend_class_contract(
-        backend_name="algo",
-        expected_class_names=list(label_spec.class_names),
-        recognized_class_names=list(algo_predictor.class_names),
-    )
+    algo_predictor = None
+    if eval_mode == "dualtrack":
+        assert algo_model_path is not None
+        algo_predictor = EventAlgoPredictor(model_path=algo_model_path)
+        _validate_backend_class_contract(
+            backend_name="algo",
+            expected_class_names=list(label_spec.class_names),
+            recognized_class_names=list(algo_predictor.class_names),
+        )
 
     manifest = load_manifest(str(split_manifest))
     test_sources = set(manifest.test_sources)
@@ -351,15 +402,18 @@ def main() -> None:
         test_sources=test_sources,
         class_names=class_names,
     )
-    algo_window = _evaluate_window_metrics(
-        predictor=algo_predictor,
-        emg_samples=emg_samples,
-        imu_samples=imu_samples,
-        labels=labels,
-        source_ids=source_ids,
-        test_sources=test_sources,
-        class_names=class_names,
-    )
+    algo_window = None
+    if eval_mode == "dualtrack":
+        assert algo_predictor is not None
+        algo_window = _evaluate_window_metrics(
+            predictor=algo_predictor,
+            emg_samples=emg_samples,
+            imu_samples=imu_samples,
+            labels=labels,
+            source_ids=source_ids,
+            test_sources=test_sources,
+            class_names=class_names,
+        )
 
     def _build_controller_factory(predictor):
         return lambda: EventOnsetController(
@@ -379,15 +433,19 @@ def main() -> None:
         class_names=class_names,
         label_to_state=label_to_state,
     )
-    algo_control = _evaluate_control_metrics(
-        controller_factory=_build_controller_factory(algo_predictor),
-        loader=loader,
-        test_sources=test_sources,
-        class_names=class_names,
-        label_to_state=label_to_state,
-    )
+    algo_control = None
+    if eval_mode == "dualtrack":
+        assert algo_predictor is not None
+        algo_control = _evaluate_control_metrics(
+            controller_factory=_build_controller_factory(algo_predictor),
+            loader=loader,
+            test_sources=test_sources,
+            class_names=class_names,
+            label_to_state=label_to_state,
+        )
 
-    model_metrics = {
+    model_metrics = _attach_acceptance_flags(
+        {
         "backend": "model",
         "model_backend": str(args.model_backend),
         "checkpoint_path": checkpoint_path,
@@ -405,37 +463,55 @@ def main() -> None:
         "false_release_rate": float(model_control.get("false_release_rate", 0.0)),
         "false_trigger_rate": float(model_control.get("false_trigger_rate", 0.0)),
         "top_confusion_pairs": list(model_window.get("top_confusion_pairs", []))[:10],
-    }
-    algo_metrics = {
-        "backend": "algo",
-        "algo_model_path": str(algo_model_path),
-        "window_test_accuracy": float(algo_window.get("accuracy", 0.0)),
-        "window_macro_f1": float(algo_window.get("macro_f1", 0.0)),
-        "event_action_accuracy": float(algo_window.get("event_action_accuracy", 0.0)),
-        "event_action_macro_f1": float(algo_window.get("event_action_macro_f1", 0.0)),
-        "gate_accept_rate": float(algo_window.get("gate_accept_rate", 0.0)),
-        "gate_action_recall": float(algo_window.get("gate_action_recall", 0.0)),
-        "stage2_action_acc": float(algo_window.get("stage2_action_acc", 0.0)),
-        "rule_hit_rate": float(algo_window.get("rule_hit_rate", 0.0)),
-        "command_success_rate": float(algo_control.get("command_success_rate", 0.0)),
-        "false_release_rate": float(algo_control.get("false_release_rate", 0.0)),
-        "false_trigger_rate": float(algo_control.get("false_trigger_rate", 0.0)),
-        "top_confusion_pairs": list(algo_window.get("top_confusion_pairs", []))[:10],
-    }
-    model_goal_gap = float(args.target_event_action_accuracy_model) - float(model_metrics["event_action_accuracy"])
-    algo_goal_gap = float(args.target_event_action_accuracy_algo) - float(algo_metrics["event_action_accuracy"])
-    model_metrics["event_action_accuracy_target"] = float(args.target_event_action_accuracy_model)
-    model_metrics["event_action_accuracy_gap"] = float(model_goal_gap)
-    algo_metrics["event_action_accuracy_target"] = float(args.target_event_action_accuracy_algo)
-    algo_metrics["event_action_accuracy_gap"] = float(algo_goal_gap)
+        },
+        target_event_action_accuracy=float(args.target_event_action_accuracy_model),
+        target_command_success_rate=float(args.target_command_success_rate),
+        max_false_trigger_rate=float(args.max_false_trigger_rate),
+        max_false_release_rate=float(args.max_false_release_rate),
+    )
 
-    candidates = [model_metrics, algo_metrics]
+    tracks = {"model": model_metrics}
+    candidates = [model_metrics]
+
+    if eval_mode == "dualtrack":
+        assert algo_model_path is not None
+        assert algo_window is not None
+        assert algo_control is not None
+        algo_metrics = _attach_acceptance_flags(
+            {
+                "backend": "algo",
+                "algo_model_path": str(algo_model_path),
+                "window_test_accuracy": float(algo_window.get("accuracy", 0.0)),
+                "window_macro_f1": float(algo_window.get("macro_f1", 0.0)),
+                "event_action_accuracy": float(algo_window.get("event_action_accuracy", 0.0)),
+                "event_action_macro_f1": float(algo_window.get("event_action_macro_f1", 0.0)),
+                "gate_accept_rate": float(algo_window.get("gate_accept_rate", 0.0)),
+                "gate_action_recall": float(algo_window.get("gate_action_recall", 0.0)),
+                "stage2_action_acc": float(algo_window.get("stage2_action_acc", 0.0)),
+                "rule_hit_rate": float(algo_window.get("rule_hit_rate", 0.0)),
+                "command_success_rate": float(algo_control.get("command_success_rate", 0.0)),
+                "false_release_rate": float(algo_control.get("false_release_rate", 0.0)),
+                "false_trigger_rate": float(algo_control.get("false_trigger_rate", 0.0)),
+                "top_confusion_pairs": list(algo_window.get("top_confusion_pairs", []))[:10],
+            },
+            target_event_action_accuracy=float(args.target_event_action_accuracy_algo),
+            target_command_success_rate=float(args.target_command_success_rate),
+            max_false_trigger_rate=float(args.max_false_trigger_rate),
+            max_false_release_rate=float(args.max_false_release_rate),
+        )
+        tracks["algo"] = algo_metrics
+        candidates.append(algo_metrics)
+
     candidates_sorted = sorted(candidates, key=_rank_backend, reverse=True)
     recommended = dict(candidates_sorted[0])
     recommended_backend = str(recommended.get("backend"))
     alternative = dict(candidates_sorted[1]) if len(candidates_sorted) > 1 else None
     recommended_reason = {
-        "primary": "higher command_success_rate under same safety constraints",
+        "primary": (
+            "higher command_success_rate under same safety constraints"
+            if eval_mode == "dualtrack"
+            else "model_only mode"
+        ),
         "recommended_command_success_rate": float(recommended.get("command_success_rate", 0.0)),
         "recommended_false_trigger_rate": float(recommended.get("false_trigger_rate", 1.0)),
         "recommended_false_release_rate": float(recommended.get("false_release_rate", 1.0)),
@@ -449,6 +525,7 @@ def main() -> None:
     summary = {
         "status": "ok",
         "model_run_id": str(args.model_run_id),
+        "eval_mode": eval_mode,
         "target_db5_keys": list(target_keys),
         "split_manifest": str(split_manifest),
         "recordings_manifest": str(data_cfg.recordings_manifest_path),
@@ -457,16 +534,18 @@ def main() -> None:
             "command_success_rate desc, false_trigger_rate asc, false_release_rate asc, "
             "event_action_accuracy desc, event_action_macro_f1 desc"
         ),
-        "tracks": {
-            "model": model_metrics,
-            "algo": algo_metrics,
-        },
+        "tracks": tracks,
         "recommended_backend": recommended_backend,
         "recommended_metrics": recommended,
         "recommended_reason": recommended_reason,
         "targets": {
             "model_event_action_accuracy": float(args.target_event_action_accuracy_model),
-            "algo_event_action_accuracy": float(args.target_event_action_accuracy_algo),
+            "algo_event_action_accuracy": (
+                float(args.target_event_action_accuracy_algo) if eval_mode == "dualtrack" else None
+            ),
+            "command_success_rate": float(args.target_command_success_rate),
+            "max_false_trigger_rate": float(args.max_false_trigger_rate),
+            "max_false_release_rate": float(args.max_false_release_rate),
         },
     }
 
