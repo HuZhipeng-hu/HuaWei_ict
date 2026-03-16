@@ -8,7 +8,7 @@ data:
   label_mode: event_onset
   capture_mode_filter: event_onset
   split_mode: grouped_file
-  split_manifest_path: artifacts/splits/event_onset_split_manifest.json
+  split_manifest_path: artifacts/splits/s2_relax12_4class_seed42_v2.json
   recordings_manifest_path: s2_train_manifest_relax12.csv
   target_db5_keys: [TENSE_OPEN, THUMB_UP, WRIST_CW, WRIST_CCW]
   device_sampling_rate_hz: 500
