@@ -24,6 +24,7 @@ from event_onset.algo import (
     fit_event_algo_model,
     predict_algo_proba_with_meta_from_vector,
     save_event_algo_model,
+    suggest_rule_thresholds_from_features,
 )
 from event_onset.config import load_event_runtime_config, load_event_training_config
 from event_onset.dataset import EventClipDatasetLoader
@@ -48,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wrist_rule_margin", type=float, default=0.10)
     parser.add_argument("--release_emg_min", type=float, default=0.45)
     parser.add_argument("--release_imu_max", type=float, default=1.50)
+    parser.add_argument("--wrist_rule_min_delta", type=float, default=0.0)
+    parser.add_argument("--wrist_rule_margin_delta", type=float, default=0.0)
+    parser.add_argument("--release_emg_min_delta", type=float, default=0.0)
+    parser.add_argument("--release_imu_max_delta", type=float, default=0.0)
+    parser.add_argument("--rule_auto_calibrate", default="true")
     parser.add_argument("--rule_confidence", type=float, default=0.94)
     parser.add_argument("--actuation_mapping", default=None)
     parser.add_argument("--run_root", default="artifacts/runs")
@@ -63,6 +69,19 @@ def _parse_target_keys(raw: str | None) -> list[str] | None:
     if not keys:
         raise ValueError("--target_db5_keys provided but no valid tokens were parsed.")
     return keys
+
+
+def _parse_bool(raw: str | bool | None, *, default: bool = False) -> bool:
+    if raw is None:
+        return bool(default)
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
 
 
 def _resolve_manifest_path(base_dir: Path, raw: str | None, *, desc: str) -> Path:
@@ -304,6 +323,54 @@ def main() -> None:
         gate_action_threshold=float(args.gate_action_threshold),
         gate_margin_threshold=float(args.gate_margin_threshold),
     )
+    auto_calibration_enabled = _parse_bool(args.rule_auto_calibrate, default=True)
+    base_rule_thresholds = {
+        "wrist_rule_min": float(args.wrist_rule_min),
+        "wrist_rule_margin": float(args.wrist_rule_margin),
+        "release_emg_min": float(args.release_emg_min),
+        "release_imu_max": float(args.release_imu_max),
+    }
+    calibration_report = {
+        "enabled": bool(auto_calibration_enabled),
+        "status": "manual",
+        "thresholds": dict(base_rule_thresholds),
+        "stats": {},
+        "sample_count": int(np.sum(train_mask)),
+    }
+    calibrated_thresholds = dict(base_rule_thresholds)
+    if auto_calibration_enabled:
+        calibration = suggest_rule_thresholds_from_features(
+            emg_samples,
+            imu_samples,
+            labels,
+            class_names=class_names,
+            mask=train_mask,
+            fallback=base_rule_thresholds,
+        )
+        calibrated_thresholds = dict(calibration.get("thresholds", base_rule_thresholds))
+        calibration_report = {
+            "enabled": True,
+            "status": str(calibration.get("status", "unknown")),
+            "thresholds": dict(calibrated_thresholds),
+            "stats": dict(calibration.get("stats", {})),
+            "sample_count": int(calibration.get("sample_count", int(np.sum(train_mask)))),
+        }
+
+    final_rule_thresholds = {
+        "wrist_rule_min": float(calibrated_thresholds.get("wrist_rule_min", base_rule_thresholds["wrist_rule_min"]))
+        + float(args.wrist_rule_min_delta),
+        "wrist_rule_margin": float(calibrated_thresholds.get("wrist_rule_margin", base_rule_thresholds["wrist_rule_margin"]))
+        + float(args.wrist_rule_margin_delta),
+        "release_emg_min": float(calibrated_thresholds.get("release_emg_min", base_rule_thresholds["release_emg_min"]))
+        + float(args.release_emg_min_delta),
+        "release_imu_max": float(calibrated_thresholds.get("release_imu_max", base_rule_thresholds["release_imu_max"]))
+        + float(args.release_imu_max_delta),
+    }
+    final_rule_thresholds["wrist_rule_min"] = float(np.clip(final_rule_thresholds["wrist_rule_min"], 0.10, 6.00))
+    final_rule_thresholds["wrist_rule_margin"] = float(np.clip(final_rule_thresholds["wrist_rule_margin"], 0.01, 2.00))
+    final_rule_thresholds["release_emg_min"] = float(np.clip(final_rule_thresholds["release_emg_min"], 0.05, 8.00))
+    final_rule_thresholds["release_imu_max"] = float(np.clip(final_rule_thresholds["release_imu_max"], 0.10, 8.00))
+
     model = EventAlgoModel(
         class_names=model.class_names,
         feature_mean=model.feature_mean,
@@ -312,10 +379,10 @@ def main() -> None:
         temperature=model.temperature,
         rule_config={
             "enabled": True,
-            "wrist_rule_min": float(args.wrist_rule_min),
-            "wrist_rule_margin": float(args.wrist_rule_margin),
-            "release_emg_min": float(args.release_emg_min),
-            "release_imu_max": float(args.release_imu_max),
+            "wrist_rule_min": float(final_rule_thresholds["wrist_rule_min"]),
+            "wrist_rule_margin": float(final_rule_thresholds["wrist_rule_margin"]),
+            "release_emg_min": float(final_rule_thresholds["release_emg_min"]),
+            "release_imu_max": float(final_rule_thresholds["release_imu_max"]),
             "rule_confidence": float(args.rule_confidence),
         },
         algo_mode=model.algo_mode,
@@ -396,6 +463,15 @@ def main() -> None:
         "temperature": float(args.temperature),
         "gate_action_threshold": float(model.gate_action_threshold),
         "gate_margin_threshold": float(model.gate_margin_threshold),
+        "rule_calibration": calibration_report,
+        "rule_thresholds_input": dict(base_rule_thresholds),
+        "rule_thresholds_final": dict(final_rule_thresholds),
+        "rule_threshold_deltas": {
+            "wrist_rule_min_delta": float(args.wrist_rule_min_delta),
+            "wrist_rule_margin_delta": float(args.wrist_rule_margin_delta),
+            "release_emg_min_delta": float(args.release_emg_min_delta),
+            "release_imu_max_delta": float(args.release_imu_max_delta),
+        },
         "rule_config": dict(model.rule_config or {}),
         "train_window_count": int(np.sum(train_mask)),
         "val_window_count": int(np.sum(val_mask)),

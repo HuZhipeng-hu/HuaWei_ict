@@ -58,6 +58,7 @@ data:
   action_onset_post_ms: 220
   action_onset_min_gap_ms: 180
   action_onset_threshold_alpha: 0.25
+  action_onset_energy_ratio_min: 0.70
   use_imu: true
   feature:
     context_window_ms: 240

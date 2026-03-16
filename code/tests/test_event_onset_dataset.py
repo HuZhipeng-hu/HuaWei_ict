@@ -119,7 +119,7 @@ def test_event_loader_selects_top_k_action_windows_and_uses_target_state(tmp_pat
     assert sum(label == 1 for label in labels.tolist()) == 2
     assert sum(label == 2 for label in labels.tolist()) == 2
     assert set(source_ids.tolist()) == {f"{action_a}/clip_a.csv", f"{action_b}/clip_b.csv"}
-    assert all(item["selection_mode"] == "onset_peak_top_k" for item in metadata)
+    assert all(item["selection_mode"] == "onset_peak_distance_energy" for item in metadata)
     assert all("onset_idx" in item for item in metadata)
 
 

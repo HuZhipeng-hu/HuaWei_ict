@@ -59,6 +59,7 @@ class EventDataConfig:
     action_onset_post_ms: int = 220
     action_onset_min_gap_ms: int = 180
     action_onset_threshold_alpha: float = 0.25
+    action_onset_energy_ratio_min: float = 0.65
     use_imu: bool = True
     feature: EventFeatureConfig = field(default_factory=EventFeatureConfig)
     quality_filter: QualityFilterConfig = field(default_factory=QualityFilterConfig)

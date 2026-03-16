@@ -45,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_path", default=None)
     parser.add_argument("--model_metadata", default=None)
     parser.add_argument("--output_json", default=None)
+    parser.add_argument("--target_event_action_accuracy_model", type=float, default=0.8)
+    parser.add_argument("--target_event_action_accuracy_algo", type=float, default=0.9)
     return parser
 
 
@@ -420,11 +422,29 @@ def main() -> None:
         "false_trigger_rate": float(algo_control.get("false_trigger_rate", 0.0)),
         "top_confusion_pairs": list(algo_window.get("top_confusion_pairs", []))[:10],
     }
+    model_goal_gap = float(args.target_event_action_accuracy_model) - float(model_metrics["event_action_accuracy"])
+    algo_goal_gap = float(args.target_event_action_accuracy_algo) - float(algo_metrics["event_action_accuracy"])
+    model_metrics["event_action_accuracy_target"] = float(args.target_event_action_accuracy_model)
+    model_metrics["event_action_accuracy_gap"] = float(model_goal_gap)
+    algo_metrics["event_action_accuracy_target"] = float(args.target_event_action_accuracy_algo)
+    algo_metrics["event_action_accuracy_gap"] = float(algo_goal_gap)
 
     candidates = [model_metrics, algo_metrics]
     candidates_sorted = sorted(candidates, key=_rank_backend, reverse=True)
     recommended = dict(candidates_sorted[0])
     recommended_backend = str(recommended.get("backend"))
+    alternative = dict(candidates_sorted[1]) if len(candidates_sorted) > 1 else None
+    recommended_reason = {
+        "primary": "higher command_success_rate under same safety constraints",
+        "recommended_command_success_rate": float(recommended.get("command_success_rate", 0.0)),
+        "recommended_false_trigger_rate": float(recommended.get("false_trigger_rate", 1.0)),
+        "recommended_false_release_rate": float(recommended.get("false_release_rate", 1.0)),
+        "recommended_event_action_accuracy": float(recommended.get("event_action_accuracy", 0.0)),
+    }
+    if alternative is not None:
+        recommended_reason["runner_up_backend"] = str(alternative.get("backend"))
+        recommended_reason["runner_up_command_success_rate"] = float(alternative.get("command_success_rate", 0.0))
+        recommended_reason["runner_up_event_action_accuracy"] = float(alternative.get("event_action_accuracy", 0.0))
 
     summary = {
         "status": "ok",
@@ -443,6 +463,11 @@ def main() -> None:
         },
         "recommended_backend": recommended_backend,
         "recommended_metrics": recommended,
+        "recommended_reason": recommended_reason,
+        "targets": {
+            "model_event_action_accuracy": float(args.target_event_action_accuracy_model),
+            "algo_event_action_accuracy": float(args.target_event_action_accuracy_algo),
+        },
     }
 
     output_path = (

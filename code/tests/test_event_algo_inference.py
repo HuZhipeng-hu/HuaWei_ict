@@ -8,11 +8,13 @@ from event_onset.algo import (
     EventAlgoModel,
     EventAlgoPredictor,
     build_event_algo_feature_vector,
+    compute_rule_signal_scores,
     compute_algo_stage_metrics,
     fit_event_algo_model,
     predict_algo_proba_from_vector,
     predict_algo_proba_with_meta_from_vector,
     save_event_algo_model,
+    suggest_rule_thresholds_from_features,
 )
 
 
@@ -168,3 +170,50 @@ def test_event_algo_stage_metrics_keys():
     for key in ["gate_accept_rate", "gate_action_recall", "stage2_action_acc", "rule_hit_rate"]:
         assert key in metrics
         assert 0.0 <= float(metrics[key]) <= 1.0
+
+
+def test_rule_signal_scores_and_calibration_from_features():
+    class_names = ["RELAX", "TENSE_OPEN", "THUMB_UP", "WRIST_CW", "WRIST_CCW"]
+    vectors, labels = _make_dataset(class_names)
+    # Rebuild synthetic features to compute rule statistics.
+    emg_list = []
+    imu_list = []
+    for label in labels.tolist():
+        name = class_names[int(label)]
+        if name == "RELAX":
+            emg, imu = _make_sample(0.05, gyro_bias=0.0, emg_boost=0.0)
+        elif name == "TENSE_OPEN":
+            emg, imu = _make_sample(0.9, gyro_bias=0.0, emg_boost=0.7)
+        elif name == "THUMB_UP":
+            emg, imu = _make_sample(1.7, gyro_bias=0.1, emg_boost=1.2)
+        elif name == "WRIST_CW":
+            emg, imu = _make_sample(0.8, gyro_bias=2.2, emg_boost=0.4)
+        else:
+            emg, imu = _make_sample(-0.8, gyro_bias=-2.2, emg_boost=0.3)
+        emg_list.append(emg)
+        imu_list.append(imu)
+    emg_samples = np.asarray(emg_list, dtype=np.float32)
+    imu_samples = np.asarray(imu_list, dtype=np.float32)
+
+    scores = compute_rule_signal_scores(emg_samples[0], imu_samples[0])
+    for key in ["emg_energy", "imu_motion", "cw_score", "ccw_score", "wrist_peak", "wrist_margin"]:
+        assert key in scores
+        assert np.isfinite(float(scores[key]))
+
+    report = suggest_rule_thresholds_from_features(
+        emg_samples,
+        imu_samples,
+        labels,
+        class_names=class_names,
+        fallback={
+            "wrist_rule_min": 0.55,
+            "wrist_rule_margin": 0.10,
+            "release_emg_min": 0.45,
+            "release_imu_max": 1.50,
+        },
+    )
+    assert report["status"] in {"ok", "fallback_no_samples"}
+    thresholds = report["thresholds"]
+    for key in ["wrist_rule_min", "wrist_rule_margin", "release_emg_min", "release_imu_max"]:
+        assert key in thresholds
+        assert np.isfinite(float(thresholds[key]))

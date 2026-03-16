@@ -67,6 +67,162 @@ def _ensure_imu_shape(imu_feature: np.ndarray) -> np.ndarray:
     return imu
 
 
+def compute_rule_signal_scores(emg_feature: np.ndarray, imu_feature: np.ndarray) -> dict[str, float]:
+    emg = _ensure_emg_shape(emg_feature)
+    imu = _ensure_imu_shape(imu_feature)
+
+    emg_energy = float(np.mean(np.abs(emg)))
+    imu_motion = float(np.mean(np.abs(np.diff(imu, axis=1)))) if imu.shape[1] > 1 else 0.0
+
+    gyro_z_idx = 5 if imu.shape[0] > 5 else max(0, imu.shape[0] - 1)
+    gyro_z = imu[int(gyro_z_idx)]
+    cw_score = float(np.mean(np.maximum(gyro_z, 0.0)))
+    ccw_score = float(np.mean(np.maximum(-gyro_z, 0.0)))
+    wrist_peak = float(max(cw_score, ccw_score))
+    wrist_margin = float(abs(cw_score - ccw_score))
+
+    return {
+        "emg_energy": emg_energy,
+        "imu_motion": imu_motion,
+        "cw_score": cw_score,
+        "ccw_score": ccw_score,
+        "wrist_peak": wrist_peak,
+        "wrist_margin": wrist_margin,
+    }
+
+
+def _safe_percentile(values: np.ndarray, percentile: float) -> float | None:
+    arr = np.asarray(values, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return None
+    return float(np.percentile(arr, float(percentile)))
+
+
+def suggest_rule_thresholds_from_features(
+    emg_samples: np.ndarray,
+    imu_samples: np.ndarray,
+    labels: np.ndarray,
+    *,
+    class_names: Sequence[str],
+    mask: np.ndarray | None = None,
+    fallback: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    fallback = dict(fallback or {})
+    names = [str(name).strip().upper() for name in class_names]
+    if emg_samples.shape[0] != imu_samples.shape[0] or emg_samples.shape[0] != labels.shape[0]:
+        raise ValueError("emg_samples/imu_samples/labels size mismatch")
+
+    use_mask = np.asarray(mask, dtype=bool) if mask is not None else np.ones((labels.shape[0],), dtype=bool)
+    if use_mask.shape[0] != labels.shape[0]:
+        raise ValueError("mask size mismatch")
+
+    emg_used = np.asarray(emg_samples[use_mask], dtype=np.float32)
+    imu_used = np.asarray(imu_samples[use_mask], dtype=np.float32)
+    label_used = np.asarray(labels[use_mask], dtype=np.int32)
+
+    if emg_used.shape[0] == 0:
+        return {
+            "status": "fallback_no_samples",
+            "thresholds": {
+                "wrist_rule_min": float(fallback.get("wrist_rule_min", 0.55)),
+                "wrist_rule_margin": float(fallback.get("wrist_rule_margin", 0.10)),
+                "release_emg_min": float(fallback.get("release_emg_min", 0.45)),
+                "release_imu_max": float(fallback.get("release_imu_max", 1.50)),
+            },
+            "stats": {},
+            "sample_count": 0,
+        }
+
+    score_rows = [compute_rule_signal_scores(emg_used[idx], imu_used[idx]) for idx in range(emg_used.shape[0])]
+    wrist_peak = np.asarray([row["wrist_peak"] for row in score_rows], dtype=np.float32)
+    wrist_margin = np.asarray([row["wrist_margin"] for row in score_rows], dtype=np.float32)
+    emg_energy = np.asarray([row["emg_energy"] for row in score_rows], dtype=np.float32)
+    imu_motion = np.asarray([row["imu_motion"] for row in score_rows], dtype=np.float32)
+
+    wrist_indices = {idx for idx, name in enumerate(names) if name in {"WRIST_CW", "WRIST_CCW"}}
+    tense_index = next((idx for idx, name in enumerate(names) if name == "TENSE_OPEN"), None)
+
+    wrist_pos = np.asarray([label in wrist_indices for label in label_used], dtype=bool)
+    wrist_neg = ~wrist_pos
+    tense_pos = np.asarray([int(label) == int(tense_index) for label in label_used], dtype=bool) if tense_index is not None else None
+    tense_neg = ~tense_pos if tense_pos is not None else None
+
+    def _blend_cutoff(pos_values: np.ndarray, neg_values: np.ndarray, *, pos_pct: float, neg_pct: float, default: float) -> float:
+        pos_anchor = _safe_percentile(pos_values, pos_pct)
+        neg_anchor = _safe_percentile(neg_values, neg_pct)
+        if pos_anchor is not None and neg_anchor is not None:
+            return float((pos_anchor + neg_anchor) / 2.0)
+        if pos_anchor is not None:
+            return float(pos_anchor)
+        if neg_anchor is not None:
+            return float(neg_anchor)
+        return float(default)
+
+    wrist_rule_min = _blend_cutoff(
+        wrist_peak[wrist_pos],
+        wrist_peak[wrist_neg],
+        pos_pct=20.0,
+        neg_pct=90.0,
+        default=float(fallback.get("wrist_rule_min", 0.55)),
+    )
+    wrist_rule_margin = _blend_cutoff(
+        wrist_margin[wrist_pos],
+        wrist_margin[wrist_neg],
+        pos_pct=20.0,
+        neg_pct=90.0,
+        default=float(fallback.get("wrist_rule_margin", 0.10)),
+    )
+
+    if tense_pos is None:
+        release_emg_min = float(fallback.get("release_emg_min", 0.45))
+        release_imu_max = float(fallback.get("release_imu_max", 1.50))
+    else:
+        release_emg_min = _blend_cutoff(
+            emg_energy[tense_pos],
+            emg_energy[tense_neg],
+            pos_pct=20.0,
+            neg_pct=90.0,
+            default=float(fallback.get("release_emg_min", 0.45)),
+        )
+        pos_imu_hi = _safe_percentile(imu_motion[tense_pos], 80.0)
+        neg_imu_lo = _safe_percentile(imu_motion[tense_neg], 10.0)
+        if pos_imu_hi is not None and neg_imu_lo is not None:
+            release_imu_max = float((pos_imu_hi + neg_imu_lo) / 2.0)
+        elif pos_imu_hi is not None:
+            release_imu_max = float(pos_imu_hi)
+        else:
+            release_imu_max = float(fallback.get("release_imu_max", 1.50))
+
+    thresholds = {
+        "wrist_rule_min": float(np.clip(wrist_rule_min, 0.20, 4.00)),
+        "wrist_rule_margin": float(np.clip(wrist_rule_margin, 0.02, 1.20)),
+        "release_emg_min": float(np.clip(release_emg_min, 0.10, 6.00)),
+        "release_imu_max": float(np.clip(release_imu_max, 0.20, 6.00)),
+    }
+
+    stats = {
+        "wrist_pos_count": int(np.sum(wrist_pos)),
+        "wrist_neg_count": int(np.sum(wrist_neg)),
+        "tense_pos_count": int(np.sum(tense_pos)) if tense_pos is not None else 0,
+        "tense_neg_count": int(np.sum(tense_neg)) if tense_neg is not None else 0,
+        "wrist_peak_p20_pos": _safe_percentile(wrist_peak[wrist_pos], 20.0),
+        "wrist_peak_p90_neg": _safe_percentile(wrist_peak[wrist_neg], 90.0),
+        "wrist_margin_p20_pos": _safe_percentile(wrist_margin[wrist_pos], 20.0),
+        "wrist_margin_p90_neg": _safe_percentile(wrist_margin[wrist_neg], 90.0),
+        "release_emg_p20_pos": _safe_percentile(emg_energy[tense_pos], 20.0) if tense_pos is not None else None,
+        "release_emg_p90_neg": _safe_percentile(emg_energy[tense_neg], 90.0) if tense_pos is not None else None,
+        "release_imu_p80_pos": _safe_percentile(imu_motion[tense_pos], 80.0) if tense_pos is not None else None,
+        "release_imu_p10_neg": _safe_percentile(imu_motion[tense_neg], 10.0) if tense_pos is not None else None,
+    }
+
+    return {
+        "status": "ok",
+        "thresholds": thresholds,
+        "stats": stats,
+        "sample_count": int(emg_used.shape[0]),
+    }
+
+
 def build_event_algo_feature_vector(emg_feature: np.ndarray, imu_feature: np.ndarray) -> np.ndarray:
     """Build a compact deterministic feature vector from EMG/IMU runtime features."""
 
@@ -621,17 +777,10 @@ class EventAlgoPredictor:
     def _rule_predict(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> tuple[np.ndarray | None, str | None]:
         if not self.rules_enabled:
             return None, None
-        emg = _ensure_emg_shape(emg_feature)
-        imu = _ensure_imu_shape(imu_feature)
+        scores = compute_rule_signal_scores(emg_feature, imu_feature)
         num_classes = len(self.tuple_class_names)
-
-        emg_energy = float(np.mean(np.abs(emg)))
-        imu_motion = float(np.mean(np.abs(np.diff(imu, axis=1)))) if imu.shape[1] > 1 else 0.0
-
-        gyro_z_idx = 5 if imu.shape[0] > 5 else (imu.shape[0] - 1)
-        gyro_z = imu[int(max(0, gyro_z_idx))]
-        cw_score = float(np.mean(np.maximum(gyro_z, 0.0)))
-        ccw_score = float(np.mean(np.maximum(-gyro_z, 0.0)))
+        cw_score = float(scores["cw_score"])
+        ccw_score = float(scores["ccw_score"])
         if max(cw_score, ccw_score) >= self.wrist_rule_min and abs(cw_score - ccw_score) >= self.wrist_rule_margin:
             name = "WRIST_CW" if cw_score > ccw_score else "WRIST_CCW"
             idx = self._find_class_idx(name)
@@ -639,7 +788,11 @@ class EventAlgoPredictor:
                 return _one_hot_confidence(num_classes, idx, self.rule_confidence), name
 
         release_idx = self._find_class_idx("TENSE_OPEN")
-        if release_idx is not None and emg_energy >= self.release_emg_min and imu_motion <= self.release_imu_max:
+        if (
+            release_idx is not None
+            and float(scores["emg_energy"]) >= self.release_emg_min
+            and float(scores["imu_motion"]) <= self.release_imu_max
+        ):
             return _one_hot_confidence(num_classes, release_idx, self.rule_confidence), "TENSE_OPEN"
         return None, None
 

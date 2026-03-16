@@ -246,13 +246,15 @@ class EventClipDatasetLoader:
 
         for end, emg_window, imu_window in self._iter_window_slices(matrix):
             start = int(end - self.data_config.context_samples)
+            center = self._window_center(start, int(end))
+            onset_distance = 10**9
             if not is_relax_clip and action_policy == "onset_peak":
                 if not onset_indices:
                     continue
-                center = self._window_center(start, int(end))
                 in_region = any((onset - onset_pre) <= center <= (onset + onset_post) for onset in onset_indices)
                 if not in_region:
                     continue
+                onset_distance = min(abs(center - int(onset)) for onset in onset_indices)
             energy = self._window_energy(emg_window)
             clip_ratio = self._clip_ratio(emg_window, qf.saturation_abs)
             mean_std = self._window_std(emg_window)
@@ -267,6 +269,8 @@ class EventClipDatasetLoader:
             merged_metadata["window_start_index"] = int(start)
             merged_metadata["window_energy"] = energy
             merged_metadata["imu_motion"] = imu_motion
+            merged_metadata["window_center_index"] = int(center)
+            merged_metadata["onset_distance"] = int(onset_distance)
             if onset_indices:
                 merged_metadata["onset_idx"] = int(onset_indices[0])
 
@@ -314,11 +318,30 @@ class EventClipDatasetLoader:
                 clip_diag["dropped_reasons"].append("no_relax_window_after_filter")
             return chosen, clip_diag
 
-        scored_action_windows.sort(key=lambda item: item.energy, reverse=True)
-        selected = scored_action_windows[: int(self.data_config.top_k_windows_per_clip)]
+        candidate_windows = list(scored_action_windows)
+        if action_policy == "onset_peak" and candidate_windows:
+            peak_energy = float(max(item.energy for item in candidate_windows))
+            ratio = float(min(max(self.data_config.action_onset_energy_ratio_min, 0.0), 1.0))
+            min_energy = max(float(qf.energy_min), peak_energy * ratio)
+            filtered = [item for item in candidate_windows if float(item.energy) >= float(min_energy)]
+            if filtered:
+                candidate_windows = filtered
+            else:
+                clip_diag["dropped_reasons"].append("all_onset_windows_below_energy_ratio")
+            candidate_windows.sort(
+                key=lambda item: (
+                    int(item.metadata.get("onset_distance", 10**9)),
+                    -float(item.energy),
+                    int(item.metadata.get("window_end_index", 0)),
+                )
+            )
+        else:
+            candidate_windows.sort(key=lambda item: item.energy, reverse=True)
+
+        selected = candidate_windows[: int(self.data_config.top_k_windows_per_clip)]
         for entry in selected:
             entry.metadata["selection_mode"] = (
-                "onset_peak_top_k" if action_policy == "onset_peak" else "top_k_energy"
+                "onset_peak_distance_energy" if action_policy == "onset_peak" else "top_k_energy"
             )
             clip_diag["selected_window_ranges"].append(
                 [int(entry.metadata["window_start_index"]), int(entry.metadata["window_end_index"])]

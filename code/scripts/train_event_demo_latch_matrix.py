@@ -19,6 +19,7 @@ DEFAULT_CONFIGS = "configs/training_event_onset_demo_p0.yaml,configs/training_ev
 DEFAULT_TAGS = "demo_p0,demo_p1"
 DEFAULT_SEEDS = "42,77,99"
 DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW,WRIST_CCW"
+DEFAULT_RUNTIME_CONFIG = "configs/runtime_event_onset_demo_latch.yaml"
 
 
 def _format_cmd(cmd: list[str]) -> str:
@@ -71,14 +72,16 @@ def _compute_relax_action_confusion(top_pairs: list[dict], *, action_keys: set[s
     return int(total)
 
 
-def _rank_key(row: dict) -> tuple[int, float, float, float, float, float]:
+def _rank_key(row: dict) -> tuple[int, float, float, float, float, float, float, float]:
     return (
         int(bool(row.get("safety_ok", False))),
         float(row.get("event_action_accuracy", 0.0)),
         float(row.get("event_action_macro_f1", 0.0)),
+        float(row.get("command_success_rate", 0.0)),
+        -float(row.get("false_trigger_rate", 1.0)),
+        -float(row.get("false_release_rate", 1.0)),
         float(row.get("test_accuracy", 0.0)),
         float(row.get("test_macro_f1", 0.0)),
-        -float(row.get("relax_action_confusion", 0.0)),
     )
 
 
@@ -120,11 +123,49 @@ def _build_finetune_cmd(
     return cmd
 
 
+def _build_control_eval_cmd(
+    args: argparse.Namespace,
+    *,
+    config_path: str,
+    run_id: str,
+    output_json: Path,
+) -> list[str]:
+    return [
+        sys.executable,
+        "scripts/evaluate_event_demo_control.py",
+        "--run_root",
+        str(args.run_root),
+        "--run_id",
+        str(run_id),
+        "--training_config",
+        str(config_path),
+        "--runtime_config",
+        str(args.runtime_config),
+        "--data_dir",
+        str(args.data_dir),
+        "--recordings_manifest",
+        str(args.recordings_manifest),
+        "--target_db5_keys",
+        str(args.target_db5_keys),
+        "--backend",
+        str(args.control_backend),
+        "--device_target",
+        str(args.device_target),
+        "--output_json",
+        str(output_json),
+    ]
+
+
 def _load_run_metrics(run_root: Path, run_id: str) -> tuple[dict, dict]:
     run_dir = run_root / run_id
     offline = _load_json(run_dir / "offline_summary.json")
     metrics = _load_json(run_dir / "evaluation" / "test_metrics.json")
     return offline, metrics
+
+
+def _load_control_metrics(run_root: Path, run_id: str) -> dict:
+    run_dir = run_root / run_id
+    return _load_json(run_dir / "evaluation" / "control_eval_summary.json")
 
 
 def _write_summary_csv(path: Path, rows: list[dict]) -> None:
@@ -137,6 +178,9 @@ def _write_summary_csv(path: Path, rows: list[dict]) -> None:
         "event_action_macro_f1",
         "test_accuracy",
         "test_macro_f1",
+        "command_success_rate",
+        "false_trigger_rate",
+        "false_release_rate",
         "best_val_acc",
         "best_val_f1",
         "relax_action_confusion",
@@ -161,6 +205,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default="s2_train_manifest_relax12.csv")
     parser.add_argument("--target_db5_keys", default=DEFAULT_TARGET_KEYS)
+    parser.add_argument("--runtime_config", default=DEFAULT_RUNTIME_CONFIG)
+    parser.add_argument("--control_backend", default="ckpt", choices=["ckpt", "lite"])
     parser.add_argument("--budget_per_class", type=int, default=0)
     parser.add_argument("--budget_seed", type=int, default=42)
     parser.add_argument("--device_target", default="Ascend", choices=["CPU", "GPU", "Ascend"])
@@ -169,6 +215,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_prefix", default="s2_demo_latch_matrix_v1")
     parser.add_argument("--relax_action_confusion_limit", type=int, default=8)
+    parser.add_argument("--max_false_trigger_rate", type=float, default=0.15)
+    parser.add_argument("--max_false_release_rate", type=float, default=0.15)
+    parser.add_argument("--skip_control_eval", action="store_true")
+    parser.add_argument("--skip_threshold_tuning", action="store_true")
     return parser
 
 
@@ -200,9 +250,31 @@ def main() -> None:
                 _run_checked(stage, cmd)
 
                 offline, metrics = _load_run_metrics(run_root, run_id)
+                control = {
+                    "command_success_rate": 0.0,
+                    "false_release_rate": 1.0,
+                    "false_trigger_rate": 1.0,
+                }
+                if not bool(args.skip_control_eval):
+                    control_output = run_root / run_id / "evaluation" / "control_eval_summary.json"
+                    control_cmd = _build_control_eval_cmd(
+                        args,
+                        config_path=config_path,
+                        run_id=run_id,
+                        output_json=control_output,
+                    )
+                    last_stage = f"{stage}_control_eval"
+                    last_cmd = _format_cmd(control_cmd)
+                    _run_checked(last_stage, control_cmd)
+                    control = _load_control_metrics(run_root, run_id)
+
                 top_pairs = list(metrics.get("top_confusion_pairs") or [])
                 relax_action_confusion = _compute_relax_action_confusion(top_pairs, action_keys=action_keys)
-                safety_ok = relax_action_confusion <= int(args.relax_action_confusion_limit)
+                safety_ok = (
+                    relax_action_confusion <= int(args.relax_action_confusion_limit)
+                    and float(control.get("false_trigger_rate", 1.0) or 1.0) <= float(args.max_false_trigger_rate)
+                    and float(control.get("false_release_rate", 1.0) or 1.0) <= float(args.max_false_release_rate)
+                )
 
                 row = {
                     "run_id": run_id,
@@ -225,6 +297,9 @@ def main() -> None:
                     ),
                     "test_accuracy": float(metrics.get("accuracy", offline.get("test_accuracy", 0.0)) or 0.0),
                     "test_macro_f1": float(metrics.get("macro_f1", offline.get("test_macro_f1", 0.0)) or 0.0),
+                    "command_success_rate": float(control.get("command_success_rate", 0.0) or 0.0),
+                    "false_trigger_rate": float(control.get("false_trigger_rate", 1.0) or 1.0),
+                    "false_release_rate": float(control.get("false_release_rate", 1.0) or 1.0),
                     "best_val_acc": float(offline.get("best_val_acc", 0.0) or 0.0),
                     "best_val_f1": float(offline.get("best_val_f1", offline.get("best_val_macro_f1", 0.0)) or 0.0),
                     "relax_action_confusion": int(relax_action_confusion),
@@ -259,6 +334,48 @@ def main() -> None:
     for row in rows:
         row["selected"] = row["run_id"] == best["run_id"]
 
+    threshold_tuning_summary_path = ""
+    threshold_tuning_csv_path = ""
+    threshold_tuning_runtime_config = ""
+    if not bool(args.skip_threshold_tuning):
+        tuning_json = run_root / f"{args.run_prefix}_summary" / "runtime_threshold_tuning_summary.json"
+        tuning_csv = run_root / f"{args.run_prefix}_summary" / "runtime_threshold_tuning_summary.csv"
+        tuning_runtime_cfg = run_root / f"{args.run_prefix}_summary" / "runtime_event_onset_demo_latch_tuned.yaml"
+        tune_cmd = [
+            sys.executable,
+            "scripts/tune_event_runtime_thresholds.py",
+            "--run_root",
+            str(args.run_root),
+            "--run_id",
+            str(best.get("run_id", "")),
+            "--training_config",
+            str(best.get("config_path", DEFAULT_CONFIGS.split(",")[0])),
+            "--runtime_config",
+            str(args.runtime_config),
+            "--data_dir",
+            str(args.data_dir),
+            "--recordings_manifest",
+            str(args.recordings_manifest),
+            "--target_db5_keys",
+            str(args.target_db5_keys),
+            "--backend",
+            str(args.control_backend),
+            "--device_target",
+            str(args.device_target),
+            "--output_json",
+            str(tuning_json),
+            "--output_csv",
+            str(tuning_csv),
+            "--output_runtime_config",
+            str(tuning_runtime_cfg),
+        ]
+        last_stage = "threshold_tuning"
+        last_cmd = _format_cmd(tune_cmd)
+        _run_checked(last_stage, tune_cmd)
+        threshold_tuning_summary_path = str(tuning_json)
+        threshold_tuning_csv_path = str(tuning_csv)
+        threshold_tuning_runtime_config = str(tuning_runtime_cfg)
+
     summary = {
         "run_prefix": str(args.run_prefix),
         "target_db5_keys": sorted(action_keys),
@@ -268,11 +385,25 @@ def main() -> None:
         "best_run": best,
         "rank_rule": (
             "safety_ok desc, event_action_accuracy desc, event_action_macro_f1 desc, "
-            "test_accuracy desc, test_macro_f1 desc, relax_action_confusion asc"
+            "command_success_rate desc, false_trigger_rate asc, false_release_rate asc, "
+            "test_accuracy desc, test_macro_f1 desc"
         ),
         "safety": {
             "relax_action_confusion_limit": int(args.relax_action_confusion_limit),
+            "max_false_trigger_rate": float(args.max_false_trigger_rate),
+            "max_false_release_rate": float(args.max_false_release_rate),
             "safety_fail_count": int(sum(1 for row in rows if not bool(row.get("safety_ok", False)))),
+        },
+        "control_eval": {
+            "enabled": not bool(args.skip_control_eval),
+            "runtime_config": str(args.runtime_config),
+            "backend": str(args.control_backend),
+        },
+        "threshold_tuning": {
+            "enabled": not bool(args.skip_threshold_tuning),
+            "summary_json": threshold_tuning_summary_path,
+            "summary_csv": threshold_tuning_csv_path,
+            "runtime_config": threshold_tuning_runtime_config,
         },
     }
 
@@ -299,6 +430,9 @@ def main() -> None:
         f"- event_action_macro_f1: `{float(best.get('event_action_macro_f1', 0.0)):.6f}`",
         f"- test_accuracy: `{float(best.get('test_accuracy', 0.0)):.6f}`",
         f"- test_macro_f1: `{float(best.get('test_macro_f1', 0.0)):.6f}`",
+        f"- command_success_rate: `{float(best.get('command_success_rate', 0.0)):.6f}`",
+        f"- false_trigger_rate: `{float(best.get('false_trigger_rate', 1.0)):.6f}`",
+        f"- false_release_rate: `{float(best.get('false_release_rate', 1.0)):.6f}`",
         f"- relax_action_confusion: `{int(best.get('relax_action_confusion', 0))}`",
         f"- safety_ok: `{bool(best.get('safety_ok', False))}`",
         "",
@@ -306,6 +440,14 @@ def main() -> None:
         f"- summary_json: `{summary_json}`",
         f"- summary_csv: `{summary_csv}`",
     ]
+    if threshold_tuning_summary_path:
+        lines.extend(
+            [
+                f"- threshold_tuning_json: `{threshold_tuning_summary_path}`",
+                f"- threshold_tuning_csv: `{threshold_tuning_csv_path}`",
+                f"- tuned_runtime_config: `{threshold_tuning_runtime_config}`",
+            ]
+        )
     summary_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print(f"[DEMO-MATRIX] summary_json={summary_json}")
