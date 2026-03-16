@@ -495,6 +495,10 @@ def run_event_training(args) -> None:
         run_dir / "config_snapshots" / "effective_overrides.yaml",
         {
             "run_id": run_id,
+            "device": {
+                "device_target": str(getattr(args, "device_target", "CPU")),
+                "device_id": int(getattr(args, "device_id", 0)),
+            },
             "model": {
                 "model_type": model_cfg.model_type,
                 "num_classes": model_cfg.num_classes,
@@ -710,6 +714,10 @@ def run_event_training(args) -> None:
             "run_id": run_id,
             "run_dir": str(run_dir),
             "config_path": args.config,
+            "training_device": {
+                "target": str(getattr(args, "device_target", "CPU")),
+                "id": int(getattr(args, "device_id", 0)),
+            },
             "recordings_manifest_path": str(recordings_manifest_path),
             "quality_report": str(q_path),
             "training_history": str(history_path),

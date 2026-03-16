@@ -511,6 +511,206 @@ def _longrun_rank_key(summary_row: dict) -> tuple[float, float, float, float, fl
     )
 
 
+def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> list[dict]:
+    base_ch = int(reference["base_channels"])
+    freeze_ep = int(reference["freeze_emg_epochs"])
+    enc_lr = float(reference["encoder_lr_ratio"])
+    loss_type = str(reference["loss_type"])
+    pretrained_mode = str(reference.get("pretrained_mode", "off"))
+
+    lr_delta_ratio = max(0.01, float(args.neighbor_lr_delta_ratio))
+    freeze_delta = max(1, int(args.neighbor_freeze_delta))
+    loss_types = _parse_tokens(args.screen_loss_types, name="--screen_loss_types")
+    base_channel_space = _parse_int_tokens(args.screen_base_channels, name="--screen_base_channels")
+
+    raw_candidates = [
+        {
+            "variant": "ref",
+            "loss_type": loss_type,
+            "base_channels": base_ch,
+            "freeze_emg_epochs": freeze_ep,
+            "encoder_lr_ratio": enc_lr,
+            "pretrained_mode": pretrained_mode,
+        },
+        {
+            "variant": "lr_down",
+            "loss_type": loss_type,
+            "base_channels": base_ch,
+            "freeze_emg_epochs": freeze_ep,
+            "encoder_lr_ratio": max(0.01, enc_lr * (1.0 - lr_delta_ratio)),
+            "pretrained_mode": pretrained_mode,
+        },
+        {
+            "variant": "lr_up",
+            "loss_type": loss_type,
+            "base_channels": base_ch,
+            "freeze_emg_epochs": freeze_ep,
+            "encoder_lr_ratio": enc_lr * (1.0 + lr_delta_ratio),
+            "pretrained_mode": pretrained_mode,
+        },
+        {
+            "variant": "freeze_down",
+            "loss_type": loss_type,
+            "base_channels": base_ch,
+            "freeze_emg_epochs": max(1, freeze_ep - freeze_delta),
+            "encoder_lr_ratio": enc_lr,
+            "pretrained_mode": pretrained_mode,
+        },
+        {
+            "variant": "freeze_up",
+            "loss_type": loss_type,
+            "base_channels": base_ch,
+            "freeze_emg_epochs": freeze_ep + freeze_delta,
+            "encoder_lr_ratio": enc_lr,
+            "pretrained_mode": pretrained_mode,
+        },
+    ]
+
+    for candidate_base in base_channel_space:
+        if int(candidate_base) == base_ch:
+            continue
+        raw_candidates.append(
+            {
+                "variant": f"base{int(candidate_base)}",
+                "loss_type": loss_type,
+                "base_channels": int(candidate_base),
+                "freeze_emg_epochs": freeze_ep,
+                "encoder_lr_ratio": enc_lr,
+                "pretrained_mode": pretrained_mode,
+            }
+        )
+        break
+
+    for alt_loss in loss_types:
+        if str(alt_loss) == loss_type:
+            continue
+        raw_candidates.append(
+            {
+                "variant": f"loss_{str(alt_loss)}",
+                "loss_type": str(alt_loss),
+                "base_channels": base_ch,
+                "freeze_emg_epochs": freeze_ep,
+                "encoder_lr_ratio": enc_lr,
+                "pretrained_mode": pretrained_mode,
+            }
+        )
+        break
+
+    deduped: list[dict] = []
+    seen = set()
+    for item in raw_candidates:
+        key = (
+            str(item["loss_type"]),
+            int(item["base_channels"]),
+            int(item["freeze_emg_epochs"]),
+            round(float(item["encoder_lr_ratio"]), 6),
+            str(item["pretrained_mode"]),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        item["encoder_lr_ratio"] = float(f"{float(item['encoder_lr_ratio']):.6f}")
+        deduped.append(item)
+    return deduped
+
+
+def _stage_neighbor(args: argparse.Namespace, *, longrun_summary: dict | None = None) -> dict:
+    run_root = Path(args.run_root)
+    if longrun_summary is None:
+        longrun_summary = _load_json(run_root / f"{args.run_prefix}_longrun_summary.json")
+
+    reference = dict(longrun_summary.get("best_run") or {})
+    if not reference:
+        rows = list(longrun_summary.get("rows") or [])
+        if rows:
+            reference = dict(sorted(rows, key=_rank_row, reverse=True)[0])
+    if not reference:
+        raise RuntimeError("Cannot determine neighbor reference run from longrun summary.")
+
+    split_seed = int(reference.get("split_seed", args.screen_split_seed))
+    if int(args.neighbor_split_seed) >= 0:
+        split_seed = int(args.neighbor_split_seed)
+    split_manifest = f"artifacts/splits/s2_relax12_4class_seed{int(split_seed)}_v2.json"
+
+    candidates = _build_neighbor_candidates(args, reference=reference)
+    rows: list[dict] = []
+    for idx, candidate in enumerate(candidates, start=1):
+        run_id = (
+            f"{args.run_prefix}_nbr_{idx:02d}_"
+            f"{candidate['variant']}_"
+            f"l{candidate['loss_type']}_bc{int(candidate['base_channels'])}_"
+            f"fz{int(candidate['freeze_emg_epochs'])}_"
+            f"elr{_safe_float_token(float(candidate['encoder_lr_ratio']))}"
+        )
+        row = _run_single_trial(
+            args,
+            stage="neighbor",
+            run_id=run_id,
+            split_seed=int(split_seed),
+            split_manifest_path=split_manifest,
+            loss_type=str(candidate["loss_type"]),
+            base_channels=int(candidate["base_channels"]),
+            freeze_emg_epochs=int(candidate["freeze_emg_epochs"]),
+            encoder_lr_ratio=float(candidate["encoder_lr_ratio"]),
+            pretrained_mode=str(candidate["pretrained_mode"]),
+        )
+        row["neighbor_variant"] = str(candidate["variant"])
+        row["neighbor_index"] = int(idx)
+        rows.append(row)
+
+    ranked = sorted(rows, key=_rank_row, reverse=True)
+    best = dict(ranked[0]) if ranked else {}
+    ref_event = float(reference.get("event_action_accuracy", 0.0))
+    ref_cmd = float(reference.get("command_success_rate", 0.0))
+    event_gain = float(best.get("event_action_accuracy", 0.0)) - ref_event
+    cmd_gain = float(best.get("command_success_rate", 0.0)) - ref_cmd
+    significant = bool(
+        event_gain >= float(args.neighbor_min_event_gain)
+        or cmd_gain >= float(args.neighbor_min_command_gain)
+    )
+
+    summary = {
+        "status": "ok",
+        "stage": "neighbor",
+        "run_prefix": str(args.run_prefix),
+        "split_seed": int(split_seed),
+        "split_manifest_path": split_manifest,
+        "reference_run": reference,
+        "rows": rows,
+        "best_neighbor_run": best,
+        "event_action_accuracy_gain": float(event_gain),
+        "command_success_rate_gain": float(cmd_gain),
+        "neighbor_min_event_gain": float(args.neighbor_min_event_gain),
+        "neighbor_min_command_gain": float(args.neighbor_min_command_gain),
+        "significant_improvement_found": significant,
+    }
+    out_json = run_root / f"{args.run_prefix}_neighbor_summary.json"
+    out_csv = run_root / f"{args.run_prefix}_neighbor_summary.csv"
+    out_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_csv(
+        out_csv,
+        rows,
+        [
+            "run_id",
+            "neighbor_index",
+            "neighbor_variant",
+            "loss_type",
+            "base_channels",
+            "freeze_emg_epochs",
+            "encoder_lr_ratio",
+            "pretrained_mode",
+            "event_action_accuracy",
+            "event_action_macro_f1",
+            "command_success_rate",
+            "false_trigger_rate",
+            "false_release_rate",
+            "pass_strict_online_gate",
+            "checkpoint_path",
+        ],
+    )
+    return summary
+
+
 def _stage_longrun(args: argparse.Namespace, *, screen_summary: dict | None = None) -> dict:
     if screen_summary is None:
         screen_summary = _load_json(Path(args.run_root) / f"{args.run_prefix}_screen_summary.json")
@@ -594,16 +794,27 @@ def _stage_longrun(args: argparse.Namespace, *, screen_summary: dict | None = No
     return summary
 
 
-def _stage_tune(args: argparse.Namespace, *, longrun_summary: dict | None = None, screen_summary: dict | None = None) -> dict:
+def _stage_tune(
+    args: argparse.Namespace,
+    *,
+    longrun_summary: dict | None = None,
+    screen_summary: dict | None = None,
+    neighbor_summary: dict | None = None,
+) -> dict:
     run_root = Path(args.run_root)
     if longrun_summary is None and (run_root / f"{args.run_prefix}_longrun_summary.json").exists():
         longrun_summary = _load_json(run_root / f"{args.run_prefix}_longrun_summary.json")
     if screen_summary is None and (run_root / f"{args.run_prefix}_screen_summary.json").exists():
         screen_summary = _load_json(run_root / f"{args.run_prefix}_screen_summary.json")
+    if neighbor_summary is None and (run_root / f"{args.run_prefix}_neighbor_summary.json").exists():
+        neighbor_summary = _load_json(run_root / f"{args.run_prefix}_neighbor_summary.json")
 
     best_run_id = ""
+    if neighbor_summary:
+        best_run_id = str((neighbor_summary.get("best_neighbor_run") or {}).get("run_id", "")).strip()
     if longrun_summary:
-        best_run_id = str((longrun_summary.get("best_run") or {}).get("run_id", "")).strip()
+        if not best_run_id:
+            best_run_id = str((longrun_summary.get("best_run") or {}).get("run_id", "")).strip()
     if not best_run_id and screen_summary:
         best_run_id = str((screen_summary.get("top_candidates") or [{}])[0].get("run_id", "")).strip()
     if not best_run_id:
@@ -656,6 +867,9 @@ def _stage_tune(args: argparse.Namespace, *, longrun_summary: dict | None = None
 
 def _stage_audit(args: argparse.Namespace) -> dict:
     output_json = Path(args.run_root) / f"{args.run_prefix}_audit_report.json"
+    neighbor_summary = Path(args.run_root) / f"{args.run_prefix}_neighbor_summary.json"
+    runtime_tuning_summary = Path(args.run_root) / f"{args.run_prefix}_runtime_threshold_tuning_summary.json"
+    tune_summary = Path(args.run_root) / f"{args.run_prefix}_tune_summary.json"
     cmd = [
         sys.executable,
         "scripts/audit_event_model90_pipeline.py",
@@ -667,6 +881,16 @@ def _stage_audit(args: argparse.Namespace) -> dict:
         str(args.training_config),
         "--runtime_config",
         str(args.runtime_config),
+        "--data_dir",
+        str(args.data_dir),
+        "--recordings_manifest",
+        str(args.recordings_manifest),
+        "--target_db5_keys",
+        str(args.target_db5_keys),
+        "--control_backend",
+        str(args.control_backend),
+        "--device_target",
+        str(args.device_target),
         "--screen_loss_types",
         str(args.screen_loss_types),
         "--screen_base_channels",
@@ -679,9 +903,33 @@ def _stage_audit(args: argparse.Namespace) -> dict:
         str(args.screen_pretrained_modes),
         "--longrun_seeds",
         str(args.longrun_seeds),
+        "--neighbor_summary",
+        str(neighbor_summary),
+        "--runtime_tuning_summary",
+        str(runtime_tuning_summary),
+        "--tune_summary",
+        str(tune_summary),
+        "--stability_repeats",
+        str(int(args.audit_stability_repeats)),
+        "--stability_tolerance",
+        str(float(args.audit_stability_tolerance)),
+        "--target_event_action_accuracy",
+        str(float(args.target_event_action_accuracy)),
+        "--target_event_action_macro_f1",
+        str(float(args.target_event_action_macro_f1)),
+        "--target_command_success_rate",
+        str(float(args.target_command_success_rate)),
+        "--max_false_trigger_rate",
+        str(float(args.max_false_trigger_rate)),
+        "--max_false_release_rate",
+        str(float(args.max_false_release_rate)),
         "--output_json",
         str(output_json),
     ]
+    if bool(args.audit_skip_stability_check):
+        cmd.append("--skip_stability_check")
+    if str(args.audit_stability_run_id or "").strip():
+        cmd.extend(["--stability_run_id", str(args.audit_stability_run_id)])
     _run_checked("audit:design_impl_params", cmd)
     summary = {
         "status": "ok",
@@ -695,7 +943,7 @@ def _stage_audit(args: argparse.Namespace) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Model 0.9 sprint orchestration")
-    parser.add_argument("--stage", default="all", choices=["baseline", "screen", "longrun", "tune", "audit", "all"])
+    parser.add_argument("--stage", default="all", choices=["baseline", "screen", "longrun", "neighbor", "tune", "audit", "all"])
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_prefix", default="s2_model90")
     parser.add_argument("--training_config", default="configs/training_event_onset_demo_p0.yaml")
@@ -726,10 +974,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screen_pretrained_modes", default="off,on")
     parser.add_argument("--topk_for_longrun", type=int, default=2)
     parser.add_argument("--longrun_seeds", default="42,52,62")
+    parser.add_argument("--neighbor_lr_delta_ratio", type=float, default=0.2)
+    parser.add_argument("--neighbor_freeze_delta", type=int, default=2)
+    parser.add_argument("--neighbor_split_seed", type=int, default=-1)
+    parser.add_argument("--neighbor_min_event_gain", type=float, default=0.01)
+    parser.add_argument("--neighbor_min_command_gain", type=float, default=0.02)
 
+    parser.add_argument("--target_event_action_accuracy", type=float, default=0.9)
+    parser.add_argument("--target_event_action_macro_f1", type=float, default=0.88)
     parser.add_argument("--target_command_success_rate", type=float, default=0.9)
     parser.add_argument("--max_false_trigger_rate", type=float, default=0.05)
     parser.add_argument("--max_false_release_rate", type=float, default=0.05)
+    parser.add_argument("--audit_stability_repeats", type=int, default=2)
+    parser.add_argument("--audit_stability_tolerance", type=float, default=1e-6)
+    parser.add_argument("--audit_stability_run_id", default="")
+    parser.add_argument("--audit_skip_stability_check", action="store_true")
     return parser
 
 
@@ -744,6 +1003,7 @@ def main() -> None:
         baseline_summary = None
         screen_summary = None
         longrun_summary = None
+        neighbor_summary = None
         tune_summary = None
         audit_summary = None
 
@@ -759,9 +1019,18 @@ def main() -> None:
             last_stage = "longrun"
             longrun_summary = _stage_longrun(args, screen_summary=screen_summary)
 
+        if args.stage in {"neighbor", "all"}:
+            last_stage = "neighbor"
+            neighbor_summary = _stage_neighbor(args, longrun_summary=longrun_summary)
+
         if args.stage in {"tune", "all"}:
             last_stage = "tune"
-            tune_summary = _stage_tune(args, longrun_summary=longrun_summary, screen_summary=screen_summary)
+            tune_summary = _stage_tune(
+                args,
+                longrun_summary=longrun_summary,
+                screen_summary=screen_summary,
+                neighbor_summary=neighbor_summary,
+            )
 
         if args.stage in {"audit", "all"}:
             last_stage = "audit"
@@ -775,12 +1044,14 @@ def main() -> None:
                 "baseline_summary": str(Path(args.run_root) / f"{args.run_prefix}_baseline_summary.json"),
                 "screen_summary": str(Path(args.run_root) / f"{args.run_prefix}_screen_summary.json"),
                 "longrun_summary": str(Path(args.run_root) / f"{args.run_prefix}_longrun_summary.json"),
+                "neighbor_summary": str(Path(args.run_root) / f"{args.run_prefix}_neighbor_summary.json"),
                 "tune_summary": str(Path(args.run_root) / f"{args.run_prefix}_tune_summary.json"),
                 "audit_summary": str(Path(args.run_root) / f"{args.run_prefix}_audit_summary.json"),
             },
             "baseline_done": bool(baseline_summary),
             "screen_done": bool(screen_summary),
             "longrun_done": bool(longrun_summary),
+            "neighbor_done": bool(neighbor_summary),
             "tune_done": bool(tune_summary),
             "audit_done": bool(audit_summary),
         }

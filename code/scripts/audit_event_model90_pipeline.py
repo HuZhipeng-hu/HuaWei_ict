@@ -1,3 +1,4 @@
+﻿
 """Audit model-line pipeline to rule out design/implementation/parameter issues."""
 
 from __future__ import annotations
@@ -5,13 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shlex
+import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 CODE_ROOT = Path(__file__).resolve().parent.parent
-
-import sys
 
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
@@ -20,6 +22,8 @@ from event_onset.actuation_mapping import load_and_validate_actuation_map
 from event_onset.config import load_event_runtime_config, load_event_training_config
 from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
+
+TARGET_CLASS_ORDER = ["RELAX", "TENSE_OPEN", "THUMB_UP", "WRIST_CW", "WRIST_CCW"]
 
 
 def _parse_tokens(raw: str) -> list[str]:
@@ -37,6 +41,10 @@ def _load_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _load_optional_json(path: Path) -> dict[str, Any]:
+    return _load_json(path) if path.exists() else {}
+
+
 def _resolve_code_path(raw: str | Path) -> Path:
     path = Path(str(raw))
     if path.is_absolute():
@@ -50,6 +58,25 @@ def _is_finite_prob(value: Any) -> bool:
     except Exception:
         return False
     return math.isfinite(number) and 0.0 <= number <= 1.0
+
+
+def _metric_close(lhs: float, rhs: float, *, atol: float = 1e-6) -> bool:
+    return abs(float(lhs) - float(rhs)) <= float(atol)
+
+
+def _format_cmd(parts: list[str]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _rank_row(row: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+    return (
+        float(row.get("event_action_accuracy", 0.0)),
+        float(row.get("event_action_macro_f1", 0.0)),
+        float(row.get("command_success_rate", 0.0)),
+        -float(row.get("false_trigger_rate", 1.0)),
+        -float(row.get("false_release_rate", 1.0)),
+        float(row.get("test_accuracy", 0.0)),
+    )
 
 
 @dataclass
@@ -77,6 +104,11 @@ def _check_design_contract(args: argparse.Namespace) -> CheckResult:
     label_spec = get_label_mode_spec(train_data_cfg.label_mode, train_data_cfg.target_db5_keys)
     expected_class_names = [str(item).strip().upper() for item in label_spec.class_names]
     model_cfg.num_classes = int(len(expected_class_names))
+    if expected_class_names != TARGET_CLASS_ORDER:
+        result.fail(
+            f"label contract mismatch: expected={TARGET_CLASS_ORDER}, actual={expected_class_names}"
+        )
+
     label_to_state, mapping_by_name = load_and_validate_actuation_map(
         runtime_cfg.actuation_mapping_path,
         class_names=expected_class_names,
@@ -96,7 +128,11 @@ def _check_design_contract(args: argparse.Namespace) -> CheckResult:
     )
     release_mode = str(runtime_cfg.runtime.release_mode).strip().lower()
     if release_mode == "command_only" and not release_labels:
-        result.fail("release_mode=command_only but no non-RELAX label is mapped to RELAX actuator state")
+        result.fail("release_mode=command_only but no non-RELAX label maps to RELAX actuator state")
+
+    tense_open_idx = expected_class_names.index("TENSE_OPEN") if "TENSE_OPEN" in expected_class_names else -1
+    if release_mode == "command_only" and tense_open_idx >= 0 and tense_open_idx not in release_labels:
+        result.fail("release_mode=command_only expects TENSE_OPEN to map to RELAX state")
 
     split_manifest_raw = str(args.split_manifest or "").strip() or str(train_data_cfg.split_manifest_path)
     split_manifest_path = _resolve_code_path(split_manifest_raw)
@@ -141,18 +177,28 @@ def _check_design_contract(args: argparse.Namespace) -> CheckResult:
     return result
 
 
+def _extract_run_ids(*summaries: dict[str, Any]) -> list[str]:
+    run_ids: set[str] = set()
+    for summary in summaries:
+        for row in list(summary.get("rows") or []):
+            run_id = str(row.get("run_id", "")).strip()
+            if run_id:
+                run_ids.add(run_id)
+    return sorted(run_ids)
+
 def _check_run_artifacts(
     *,
     run_root: Path,
     run_ids: list[str],
     expected_num_classes: int,
+    metric_tolerance: float,
 ) -> CheckResult:
     result = CheckResult(name="implementation_artifacts")
     result.details["run_count"] = len(run_ids)
     result.details["runs_checked"] = list(run_ids)
 
     if not run_ids:
-        result.fail("no runs found from screen/longrun summaries")
+        result.fail("no runs found from screen/longrun/neighbor summaries")
         return result
 
     for run_id in run_ids:
@@ -160,10 +206,12 @@ def _check_run_artifacts(
         if not run_dir.exists():
             result.fail(f"missing run dir: {run_dir}")
             continue
+
         offline_path = run_dir / "offline_summary.json"
         test_metrics_path = run_dir / "evaluation" / "test_metrics.json"
         control_eval_path = run_dir / "evaluation" / "control_eval_summary.json"
         overrides_path = run_dir / "config_snapshots" / "effective_overrides.yaml"
+        run_metadata_path = run_dir / "run_metadata.json"
 
         if not offline_path.exists():
             result.fail(f"{run_id}: missing offline_summary.json")
@@ -174,13 +222,22 @@ def _check_run_artifacts(
 
         offline = _load_json(offline_path)
         test_metrics = _load_json(test_metrics_path)
-        event_acc_offline = float(offline.get("event_action_accuracy", 0.0) or 0.0)
-        event_acc_eval = float(test_metrics.get("event_action_accuracy", 0.0) or 0.0)
-        if abs(event_acc_offline - event_acc_eval) > 1e-6:
-            result.fail(
-                f"{run_id}: event_action_accuracy mismatch offline({event_acc_offline:.6f}) "
-                f"vs eval({event_acc_eval:.6f})"
-            )
+
+        metric_pairs = [
+            ("test_accuracy", "accuracy"),
+            ("test_macro_f1", "macro_f1"),
+            ("event_action_accuracy", "event_action_accuracy"),
+            ("event_action_macro_f1", "event_action_macro_f1"),
+        ]
+        for left_key, right_key in metric_pairs:
+            if left_key not in offline or right_key not in test_metrics:
+                continue
+            left = float(offline.get(left_key, 0.0) or 0.0)
+            right = float(test_metrics.get(right_key, 0.0) or 0.0)
+            if not _metric_close(left, right, atol=metric_tolerance):
+                result.fail(
+                    f"{run_id}: metric mismatch {left_key}={left:.6f} vs {right_key}={right:.6f}"
+                )
 
         for metric_name in [
             "accuracy",
@@ -225,11 +282,31 @@ def _check_run_artifacts(
                 result.fail(
                     f"{run_id}: overrides num_classes not {expected_num_classes} (check effective_overrides.yaml)"
                 )
+            if "device_target" not in text:
+                result.fail(f"{run_id}: overrides missing device_target evidence")
+            if "device_id" not in text:
+                result.fail(f"{run_id}: overrides missing device_id evidence")
+
+        if not run_metadata_path.exists():
+            result.fail(f"{run_id}: missing run_metadata.json")
+        else:
+            run_metadata = _load_json(run_metadata_path)
+            device_info = dict(run_metadata.get("training_device") or {})
+            if not str(device_info.get("target", "")).strip():
+                result.fail(f"{run_id}: run_metadata missing training_device.target")
+            if "id" not in device_info:
+                result.fail(f"{run_id}: run_metadata missing training_device.id")
 
     return result
 
 
-def _check_param_coverage(args: argparse.Namespace, *, screen_summary: dict, longrun_summary: dict) -> CheckResult:
+def _check_param_coverage(
+    args: argparse.Namespace,
+    *,
+    screen_summary: dict[str, Any],
+    longrun_summary: dict[str, Any],
+    neighbor_summary: dict[str, Any],
+) -> CheckResult:
     result = CheckResult(name="param_coverage")
     screen_rows = list(screen_summary.get("rows") or [])
     if not screen_rows:
@@ -270,23 +347,297 @@ def _check_param_coverage(args: argparse.Namespace, *, screen_summary: dict, lon
     if not longrun_rows:
         result.fail("longrun summary has no rows")
         return result
+
     expected_seeds = _parse_int_tokens(args.longrun_seeds)
     candidate_ranks = sorted({int(row.get("candidate_rank")) for row in longrun_rows})
     result.details["longrun_candidate_ranks"] = candidate_ranks
     result.details["longrun_expected_seeds"] = expected_seeds
-
     for rank in candidate_ranks:
         rows = [row for row in longrun_rows if int(row.get("candidate_rank")) == rank]
         seeds = sorted(int(row.get("split_seed")) for row in rows)
         if seeds != sorted(expected_seeds):
             result.fail(f"candidate_rank={rank} seed coverage mismatch: expected={sorted(expected_seeds)}, got={seeds}")
 
-    best_run_id = str(longrun_summary.get("best_run_id", "") or "")
-    if best_run_id and best_run_id not in {str(row.get("run_id")) for row in longrun_rows}:
-        result.fail(f"best_run_id not found in longrun rows: {best_run_id}")
+    if not neighbor_summary:
+        result.fail("missing neighbor summary")
+        return result
+
+    neighbor_rows = list(neighbor_summary.get("rows") or [])
+    result.details["neighbor_row_count"] = int(len(neighbor_rows))
+    if not neighbor_rows:
+        result.fail("neighbor summary has no rows")
+        return result
+
+    significant = bool(neighbor_summary.get("significant_improvement_found", False))
+    result.details["neighbor_significant_improvement"] = significant
+    result.details["neighbor_event_gain"] = float(neighbor_summary.get("event_action_accuracy_gain", 0.0) or 0.0)
+    result.details["neighbor_command_gain"] = float(neighbor_summary.get("command_success_rate_gain", 0.0) or 0.0)
+    if significant:
+        result.fail("neighbor tuning found significant improvement; parameter space is not exhausted")
 
     return result
 
+def _choose_stability_run_id(
+    *,
+    args: argparse.Namespace,
+    screen_summary: dict[str, Any],
+    longrun_summary: dict[str, Any],
+) -> str:
+    explicit = str(args.stability_run_id or "").strip()
+    if explicit:
+        return explicit
+    best_longrun = str(longrun_summary.get("best_run_id", "")).strip()
+    if best_longrun:
+        return best_longrun
+    screen_rows = list(screen_summary.get("rows") or [])
+    if not screen_rows:
+        return ""
+    return str(sorted(screen_rows, key=_rank_row, reverse=True)[0].get("run_id", "")).strip()
+
+
+def _run_control_eval_once(
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    split_manifest: str,
+    recordings_manifest: str,
+    output_json: Path,
+) -> tuple[dict[str, Any], str]:
+    cmd = [
+        sys.executable,
+        "scripts/evaluate_event_demo_control.py",
+        "--run_root",
+        str(args.run_root),
+        "--run_id",
+        str(run_id),
+        "--training_config",
+        str(args.training_config),
+        "--runtime_config",
+        str(args.runtime_config),
+        "--data_dir",
+        str(args.data_dir),
+        "--split_manifest",
+        str(split_manifest),
+        "--target_db5_keys",
+        str(args.target_db5_keys),
+        "--backend",
+        str(args.control_backend),
+        "--device_target",
+        str(args.device_target),
+        "--output_json",
+        str(output_json),
+    ]
+    if str(recordings_manifest).strip():
+        cmd.extend(["--recordings_manifest", str(recordings_manifest)])
+
+    completed = subprocess.run(
+        cmd,
+        cwd=str(CODE_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr[-1500:] if completed.stderr else ""
+        raise RuntimeError(
+            f"control eval rerun failed (run_id={run_id}, rc={completed.returncode}): {stderr}"
+        )
+
+    payload = _load_json(output_json)
+    return payload, _format_cmd(cmd)
+
+
+def _check_eval_stability(
+    args: argparse.Namespace,
+    *,
+    run_root: Path,
+    screen_summary: dict[str, Any],
+    longrun_summary: dict[str, Any],
+) -> CheckResult:
+    result = CheckResult(name="evaluation_stability")
+    repeats = max(1, int(args.stability_repeats))
+    tolerance = float(args.stability_tolerance)
+
+    if bool(args.skip_stability_check):
+        result.details["skipped"] = True
+        result.details["reason"] = "--skip_stability_check"
+        return result
+
+    if repeats <= 1:
+        result.details["skipped"] = True
+        result.details["reason"] = "stability_repeats<=1"
+        return result
+
+    run_id = _choose_stability_run_id(args=args, screen_summary=screen_summary, longrun_summary=longrun_summary)
+    if not run_id:
+        result.fail("cannot determine stability run_id")
+        return result
+
+    run_dir = run_root / run_id
+    if not run_dir.exists():
+        result.fail(f"stability run dir missing: {run_dir}")
+        return result
+
+    control_eval_path = run_dir / "evaluation" / "control_eval_summary.json"
+    offline_summary_path = run_dir / "offline_summary.json"
+    control_eval = _load_optional_json(control_eval_path)
+    offline_summary = _load_optional_json(offline_summary_path)
+
+    split_manifest = str(control_eval.get("split_manifest", "")).strip()
+    if not split_manifest:
+        split_manifest = str(offline_summary.get("manifest_path", "")).strip()
+    if not split_manifest:
+        result.fail(f"{run_id}: missing split manifest for stability rerun")
+        return result
+
+    recordings_manifest = str(control_eval.get("recordings_manifest", "")).strip()
+    if not recordings_manifest:
+        recordings_manifest = str(args.recordings_manifest or "").strip()
+
+    stability_dir = run_dir / "evaluation" / "stability_reruns"
+    stability_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics_by_repeat: list[dict[str, float]] = []
+    command_text = ""
+    for idx in range(1, repeats + 1):
+        output_json = stability_dir / f"control_eval_repeat_{idx:02d}.json"
+        payload, command_text = _run_control_eval_once(
+            args=args,
+            run_id=run_id,
+            split_manifest=split_manifest,
+            recordings_manifest=recordings_manifest,
+            output_json=output_json,
+        )
+        metrics_by_repeat.append(
+            {
+                "command_success_rate": float(payload.get("command_success_rate", 0.0) or 0.0),
+                "false_trigger_rate": float(payload.get("false_trigger_rate", 0.0) or 0.0),
+                "false_release_rate": float(payload.get("false_release_rate", 0.0) or 0.0),
+            }
+        )
+
+    spans: dict[str, float] = {}
+    for key in ["command_success_rate", "false_trigger_rate", "false_release_rate"]:
+        values = [row[key] for row in metrics_by_repeat]
+        span = max(values) - min(values)
+        spans[key] = float(span)
+        if span > tolerance:
+            result.fail(
+                f"{run_id}: stability drift on {key} exceeds tolerance {tolerance} (span={span:.6f})"
+            )
+
+    result.details.update(
+        {
+            "run_id": run_id,
+            "repeats": repeats,
+            "tolerance": tolerance,
+            "metrics_by_repeat": metrics_by_repeat,
+            "metric_spans": spans,
+            "command": command_text,
+        }
+    )
+    return result
+
+
+def _choose_best_reference_row(*summaries: dict[str, Any]) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for summary in summaries:
+        rows.extend(list(summary.get("rows") or []))
+    if not rows:
+        return {}
+    return dict(sorted(rows, key=_rank_row, reverse=True)[0])
+
+
+def _load_runtime_tuned_command_metrics(args: argparse.Namespace) -> dict[str, Any]:
+    runtime_path = _resolve_code_path(args.runtime_tuning_summary)
+    tune_summary_path = _resolve_code_path(args.tune_summary)
+    runtime_summary = _load_optional_json(runtime_path)
+    if not runtime_summary:
+        return {}
+
+    best_row = dict(runtime_summary.get("best") or {})
+    if not best_row:
+        return {}
+
+    best_run_id = ""
+    tune_summary = _load_optional_json(tune_summary_path)
+    if tune_summary:
+        best_run_id = str(tune_summary.get("best_run_id", "")).strip()
+
+    return {
+        "run_id": best_run_id,
+        "command_success_rate": float(best_row.get("command_success_rate", 0.0) or 0.0),
+        "false_trigger_rate": float(best_row.get("false_trigger_rate", 1.0) or 1.0),
+        "false_release_rate": float(best_row.get("false_release_rate", 1.0) or 1.0),
+        "source": str(runtime_path),
+    }
+
+
+def _assess_goal_and_conclusion(
+    args: argparse.Namespace,
+    *,
+    data_only_ready: bool,
+    blocking_issues: list[str],
+    screen_summary: dict[str, Any],
+    longrun_summary: dict[str, Any],
+    neighbor_summary: dict[str, Any],
+) -> dict[str, Any]:
+    reference = _choose_best_reference_row(longrun_summary, neighbor_summary, screen_summary)
+    runtime_tuned = _load_runtime_tuned_command_metrics(args)
+
+    event_action_accuracy = float(reference.get("event_action_accuracy", 0.0) or 0.0)
+    event_action_macro_f1 = float(reference.get("event_action_macro_f1", 0.0) or 0.0)
+
+    command_success_rate = float(reference.get("command_success_rate", 0.0) or 0.0)
+    false_trigger_rate = float(reference.get("false_trigger_rate", 1.0) or 1.0)
+    false_release_rate = float(reference.get("false_release_rate", 1.0) or 1.0)
+    command_metric_source = f"run:{reference.get('run_id', '')}"
+
+    if runtime_tuned:
+        command_success_rate = float(runtime_tuned["command_success_rate"])
+        false_trigger_rate = float(runtime_tuned["false_trigger_rate"])
+        false_release_rate = float(runtime_tuned["false_release_rate"])
+        command_metric_source = f"runtime_tuned:{runtime_tuned.get('source', '')}"
+
+    dev_pass = bool(
+        event_action_accuracy >= float(args.target_event_action_accuracy)
+        and event_action_macro_f1 >= float(args.target_event_action_macro_f1)
+    )
+    demo_pass = bool(
+        command_success_rate >= float(args.target_command_success_rate)
+        and false_trigger_rate <= float(args.max_false_trigger_rate)
+        and false_release_rate <= float(args.max_false_release_rate)
+    )
+
+    if blocking_issues:
+        conclusion = "engineering_gates_not_cleared"
+    elif dev_pass and demo_pass:
+        conclusion = "target_metrics_achieved"
+    else:
+        conclusion = "data_bottleneck_only"
+
+    return {
+        "conclusion": conclusion,
+        "data_only_bottleneck": bool(data_only_ready and not (dev_pass and demo_pass)),
+        "development_gate": {
+            "event_action_accuracy": event_action_accuracy,
+            "event_action_macro_f1": event_action_macro_f1,
+            "target_event_action_accuracy": float(args.target_event_action_accuracy),
+            "target_event_action_macro_f1": float(args.target_event_action_macro_f1),
+            "passed": dev_pass,
+            "source_run_id": str(reference.get("run_id", "")),
+        },
+        "demo_gate": {
+            "command_success_rate": command_success_rate,
+            "false_trigger_rate": false_trigger_rate,
+            "false_release_rate": false_release_rate,
+            "target_command_success_rate": float(args.target_command_success_rate),
+            "max_false_trigger_rate": float(args.max_false_trigger_rate),
+            "max_false_release_rate": float(args.max_false_release_rate),
+            "passed": demo_pass,
+            "source": command_metric_source,
+        },
+    }
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit model-line sprint pipeline")
@@ -296,12 +647,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
     parser.add_argument("--split_manifest", default=None)
 
+    parser.add_argument("--data_dir", default="../data")
+    parser.add_argument("--recordings_manifest", default="")
+    parser.add_argument("--target_db5_keys", default="TENSE_OPEN,THUMB_UP,WRIST_CW,WRIST_CCW")
+    parser.add_argument("--control_backend", default="ckpt", choices=["ckpt", "lite"])
+    parser.add_argument("--device_target", default="GPU", choices=["CPU", "GPU", "Ascend"])
+
     parser.add_argument("--screen_loss_types", default="cross_entropy,cb_focal")
     parser.add_argument("--screen_base_channels", default="16,24")
     parser.add_argument("--screen_freeze_emg_epochs", default="5,8")
     parser.add_argument("--screen_encoder_lr_ratios", default="0.3,0.2")
     parser.add_argument("--screen_pretrained_modes", default="off,on")
     parser.add_argument("--longrun_seeds", default="42,52,62")
+
+    parser.add_argument("--neighbor_summary", default=None)
+    parser.add_argument("--runtime_tuning_summary", default=None)
+    parser.add_argument("--tune_summary", default=None)
+
+    parser.add_argument("--metric_tolerance", type=float, default=1e-6)
+    parser.add_argument("--stability_repeats", type=int, default=2)
+    parser.add_argument("--stability_tolerance", type=float, default=1e-6)
+    parser.add_argument("--stability_run_id", default="")
+    parser.add_argument("--skip_stability_check", action="store_true")
+
+    parser.add_argument("--target_event_action_accuracy", type=float, default=0.90)
+    parser.add_argument("--target_event_action_macro_f1", type=float, default=0.88)
+    parser.add_argument("--target_command_success_rate", type=float, default=0.90)
+    parser.add_argument("--max_false_trigger_rate", type=float, default=0.05)
+    parser.add_argument("--max_false_release_rate", type=float, default=0.05)
 
     parser.add_argument("--output_json", default=None)
     return parser
@@ -314,6 +687,16 @@ def main() -> None:
 
     screen_path = run_root / f"{args.run_prefix}_screen_summary.json"
     longrun_path = run_root / f"{args.run_prefix}_longrun_summary.json"
+    neighbor_path = (
+        _resolve_code_path(args.neighbor_summary)
+        if str(args.neighbor_summary or "").strip()
+        else (run_root / f"{args.run_prefix}_neighbor_summary.json")
+    )
+
+    if not str(args.runtime_tuning_summary or "").strip():
+        args.runtime_tuning_summary = str(run_root / f"{args.run_prefix}_runtime_threshold_tuning_summary.json")
+    if not str(args.tune_summary or "").strip():
+        args.tune_summary = str(run_root / f"{args.run_prefix}_tune_summary.json")
 
     report: dict[str, Any] = {
         "status": "ok",
@@ -322,24 +705,20 @@ def main() -> None:
         "checks": {},
     }
 
+    screen_summary = _load_optional_json(screen_path)
+    longrun_summary = _load_optional_json(longrun_path)
+    neighbor_summary = _load_optional_json(neighbor_path)
+
     design_result = _check_design_contract(args)
     report["checks"]["design"] = asdict(design_result)
 
     expected_num_classes = len(design_result.details.get("expected_class_names") or [])
-    screen_summary = _load_json(screen_path) if screen_path.exists() else {}
-    longrun_summary = _load_json(longrun_path) if longrun_path.exists() else {}
-
-    run_ids = sorted(
-        {
-            str(row.get("run_id"))
-            for row in (screen_summary.get("rows") or []) + (longrun_summary.get("rows") or [])
-            if str(row.get("run_id", "")).strip()
-        }
-    )
+    run_ids = _extract_run_ids(screen_summary, longrun_summary, neighbor_summary)
     implementation_result = _check_run_artifacts(
         run_root=run_root,
         run_ids=run_ids,
         expected_num_classes=int(expected_num_classes) if expected_num_classes else 0,
+        metric_tolerance=float(args.metric_tolerance),
     )
     report["checks"]["implementation"] = asdict(implementation_result)
 
@@ -347,12 +726,27 @@ def main() -> None:
         param_result = CheckResult(name="param_coverage", passed=False, issues=[f"missing {screen_path}"])
     elif not longrun_summary:
         param_result = CheckResult(name="param_coverage", passed=False, issues=[f"missing {longrun_path}"])
+    elif not neighbor_summary:
+        param_result = CheckResult(name="param_coverage", passed=False, issues=[f"missing {neighbor_path}"])
     else:
-        param_result = _check_param_coverage(args, screen_summary=screen_summary, longrun_summary=longrun_summary)
+        param_result = _check_param_coverage(
+            args,
+            screen_summary=screen_summary,
+            longrun_summary=longrun_summary,
+            neighbor_summary=neighbor_summary,
+        )
     report["checks"]["params"] = asdict(param_result)
 
+    stability_result = _check_eval_stability(
+        args,
+        run_root=run_root,
+        screen_summary=screen_summary,
+        longrun_summary=longrun_summary,
+    )
+    report["checks"]["stability"] = asdict(stability_result)
+
     blocking_issues: list[str] = []
-    for check_name in ["design", "implementation", "params"]:
+    for check_name in ["design", "implementation", "params", "stability"]:
         payload = report["checks"][check_name]
         if not bool(payload.get("passed", False)):
             for issue in payload.get("issues", []):
@@ -361,6 +755,19 @@ def main() -> None:
     report["blocking_issue_count"] = len(blocking_issues)
     report["blocking_issues"] = blocking_issues
     report["data_only_ready"] = len(blocking_issues) == 0
+
+    goal_assessment = _assess_goal_and_conclusion(
+        args,
+        data_only_ready=bool(report["data_only_ready"]),
+        blocking_issues=blocking_issues,
+        screen_summary=screen_summary,
+        longrun_summary=longrun_summary,
+        neighbor_summary=neighbor_summary,
+    )
+    report["goal_assessment"] = goal_assessment
+    report["data_only_bottleneck"] = bool(goal_assessment.get("data_only_bottleneck", False))
+    report["conclusion"] = str(goal_assessment.get("conclusion", "engineering_gates_not_cleared"))
+
     if blocking_issues:
         report["status"] = "failed"
 
@@ -376,4 +783,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
