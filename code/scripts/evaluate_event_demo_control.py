@@ -397,6 +397,7 @@ def _run(args: argparse.Namespace) -> Path:
         "total_clip_count": int(control["total_clip_count"]),
         "action_clip_count": int(control["action_clip_count"]),
         "relax_clip_count": int(control["relax_clip_count"]),
+        "release_command_clip_count": int(control["release_command_clip_count"]),
         "target_db5_keys": list(target_keys),
         "mapping": mapping_by_name,
         "split_manifest": str(split_manifest),
