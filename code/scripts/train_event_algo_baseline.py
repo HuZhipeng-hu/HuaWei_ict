@@ -19,10 +19,9 @@ from event_onset.algo import (
     ALGO_MODE_V1,
     ALGO_MODE_V2,
     EventAlgoModel,
+    EventAlgoPredictor,
     build_event_algo_feature_vector,
-    compute_algo_stage_metrics,
     fit_event_algo_model,
-    predict_algo_proba_with_meta_from_vector,
     save_event_algo_model,
     suggest_rule_thresholds_from_features,
 )
@@ -54,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--release_emg_min_delta", type=float, default=0.0)
     parser.add_argument("--release_imu_max_delta", type=float, default=0.0)
     parser.add_argument("--rule_auto_calibrate", default="true")
+    parser.add_argument("--rules_enabled", default="true")
     parser.add_argument("--rule_confidence", type=float, default=0.94)
     parser.add_argument("--actuation_mapping", default=None)
     parser.add_argument("--run_root", default="artifacts/runs")
@@ -114,21 +114,14 @@ def _mask_by_sources(source_ids: np.ndarray, allowed_sources: set[str]) -> np.nd
     return np.asarray([str(source) in allowed_sources for source in source_ids], dtype=bool)
 
 
-def _predict_labels(model: EventAlgoModel, features: np.ndarray) -> np.ndarray:
-    predictions = np.zeros((features.shape[0],), dtype=np.int32)
-    for idx in range(features.shape[0]):
-        probs, _ = predict_algo_proba_with_meta_from_vector(model, features[idx])
-        predictions[idx] = int(np.argmax(probs))
-    return predictions
-
-
 def _evaluate_split(
     *,
-    model: EventAlgoModel,
-    features: np.ndarray,
+    emg_samples: np.ndarray,
+    imu_samples: np.ndarray,
     labels: np.ndarray,
     mask: np.ndarray,
     class_names: list[str],
+    predict_proba_with_meta,
 ) -> dict:
     if int(np.sum(mask)) == 0:
         return {
@@ -146,17 +139,44 @@ def _evaluate_split(
             "stage2_action_acc": 0.0,
             "rule_hit_rate": 0.0,
         }
-    subset_features = features[mask]
+    subset_emg = emg_samples[mask]
+    subset_imu = imu_samples[mask]
     subset_labels = labels[mask]
-    preds = _predict_labels(model, subset_features)
+    preds = np.zeros((subset_labels.shape[0],), dtype=np.int32)
+    relax_idx = next((idx for idx, name in enumerate(class_names) if str(name).strip().upper() == "RELAX"), None)
+    gate_accept_count = 0
+    action_total = 0
+    action_accept_count = 0
+    stage2_total = 0
+    stage2_correct = 0
+    rule_hit_count = 0
+    for idx in range(subset_labels.shape[0]):
+        probs, meta = predict_proba_with_meta(subset_emg[idx], subset_imu[idx])
+        preds[idx] = int(np.argmax(np.asarray(probs, dtype=np.float32)))
+        gate_accepted = bool(meta.get("gate_accepted", False))
+        stage2_used = bool(meta.get("stage2_used", False))
+        rule_hit = bool(meta.get("rule_hit", False))
+        if gate_accepted:
+            gate_accept_count += 1
+        if rule_hit:
+            rule_hit_count += 1
+        is_action_true = bool(relax_idx is not None and int(subset_labels[idx]) != int(relax_idx))
+        if is_action_true:
+            action_total += 1
+            if gate_accepted:
+                action_accept_count += 1
+            if stage2_used:
+                stage2_total += 1
+                if int(preds[idx]) == int(subset_labels[idx]):
+                    stage2_correct += 1
     report = compute_classification_report(subset_labels, preds, class_names=class_names)
     report.update(
-        compute_algo_stage_metrics(
-            model,
-            subset_features,
-            subset_labels,
-            class_names=class_names,
-        )
+        {
+            "gate_accept_rate": float(gate_accept_count / subset_labels.shape[0]) if subset_labels.shape[0] else 0.0,
+            "gate_action_recall": float(action_accept_count / action_total) if action_total else 0.0,
+            "stage2_action_acc": float(stage2_correct / stage2_total) if stage2_total else 0.0,
+            "rule_hit_rate": float(rule_hit_count / subset_labels.shape[0]) if subset_labels.shape[0] else 0.0,
+        }
     )
     return report
 
@@ -324,6 +344,7 @@ def main() -> None:
         gate_margin_threshold=float(args.gate_margin_threshold),
     )
     auto_calibration_enabled = _parse_bool(args.rule_auto_calibrate, default=True)
+    rules_enabled = _parse_bool(args.rules_enabled, default=True)
     base_rule_thresholds = {
         "wrist_rule_min": float(args.wrist_rule_min),
         "wrist_rule_margin": float(args.wrist_rule_margin),
@@ -378,7 +399,7 @@ def main() -> None:
         centroids=model.centroids,
         temperature=model.temperature,
         rule_config={
-            "enabled": True,
+            "enabled": bool(rules_enabled),
             "wrist_rule_min": float(final_rule_thresholds["wrist_rule_min"]),
             "wrist_rule_margin": float(final_rule_thresholds["wrist_rule_margin"]),
             "release_emg_min": float(final_rule_thresholds["release_emg_min"]),
@@ -403,20 +424,33 @@ def main() -> None:
         else (run_dir / "models" / "algo_model.json")
     )
     model_out = save_event_algo_model(model, model_out)
+    predictor = EventAlgoPredictor(model_path=model_out)
+    predictor_classes = [str(item).strip().upper() for item in predictor.class_names]
+    expected_classes = [str(item).strip().upper() for item in class_names]
+    if predictor_classes != expected_classes:
+        raise ValueError(
+            f"Algo predictor class order mismatch: expected={expected_classes}, got={predictor_classes}"
+        )
+
+    def _predict_proba_with_meta(emg_feature: np.ndarray, imu_feature: np.ndarray) -> tuple[np.ndarray, dict]:
+        probs, meta = predictor.predict_proba_with_meta(emg_feature, imu_feature)
+        return np.asarray(probs, dtype=np.float32), dict(meta)
 
     val_report = _evaluate_split(
-        model=model,
-        features=features,
+        emg_samples=emg_samples,
+        imu_samples=imu_samples,
         labels=labels,
         mask=val_mask,
         class_names=class_names,
+        predict_proba_with_meta=_predict_proba_with_meta,
     )
     test_report = _evaluate_split(
-        model=model,
-        features=features,
+        emg_samples=emg_samples,
+        imu_samples=imu_samples,
         labels=labels,
         mask=test_mask,
         class_names=class_names,
+        predict_proba_with_meta=_predict_proba_with_meta,
     )
 
     label_to_state, _ = load_and_validate_actuation_map(
@@ -425,8 +459,7 @@ def main() -> None:
     )
 
     def _predict_proba(emg_feature: np.ndarray, imu_feature: np.ndarray) -> np.ndarray:
-        vector = build_event_algo_feature_vector(emg_feature, imu_feature)
-        probs, _ = predict_algo_proba_with_meta_from_vector(model, vector)
+        probs, _ = _predict_proba_with_meta(emg_feature, imu_feature)
         return probs.astype(np.float32)
 
     val_control = _evaluate_control_metrics(
@@ -472,12 +505,15 @@ def main() -> None:
             "release_emg_min_delta": float(args.release_emg_min_delta),
             "release_imu_max_delta": float(args.release_imu_max_delta),
         },
+        "rules_enabled": bool(rules_enabled),
         "rule_config": dict(model.rule_config or {}),
         "train_window_count": int(np.sum(train_mask)),
         "val_window_count": int(np.sum(val_mask)),
         "test_window_count": int(np.sum(test_mask)),
         "val_accuracy": float(val_report.get("accuracy", 0.0)),
         "val_macro_f1": float(val_report.get("macro_f1", 0.0)),
+        "val_event_action_accuracy": float(val_report.get("event_action_accuracy", 0.0)),
+        "val_event_action_macro_f1": float(val_report.get("event_action_macro_f1", 0.0)),
         "val_gate_accept_rate": float(val_report.get("gate_accept_rate", 0.0)),
         "val_gate_action_recall": float(val_report.get("gate_action_recall", 0.0)),
         "val_stage2_action_acc": float(val_report.get("stage2_action_acc", 0.0)),
@@ -487,6 +523,8 @@ def main() -> None:
         "val_false_release_rate": float(val_control.get("false_release_rate", 0.0)),
         "test_accuracy": float(test_report.get("accuracy", 0.0)),
         "test_macro_f1": float(test_report.get("macro_f1", 0.0)),
+        "test_event_action_accuracy": float(test_report.get("event_action_accuracy", 0.0)),
+        "test_event_action_macro_f1": float(test_report.get("event_action_macro_f1", 0.0)),
         "test_gate_accept_rate": float(test_report.get("gate_accept_rate", 0.0)),
         "test_gate_action_recall": float(test_report.get("gate_action_recall", 0.0)),
         "test_stage2_action_acc": float(test_report.get("stage2_action_acc", 0.0)),
@@ -494,6 +532,8 @@ def main() -> None:
         "test_command_success_rate": float(test_control.get("command_success_rate", 0.0)),
         "test_false_trigger_rate": float(test_control.get("false_trigger_rate", 0.0)),
         "test_false_release_rate": float(test_control.get("false_release_rate", 0.0)),
+        "event_action_accuracy": float(test_report.get("event_action_accuracy", 0.0)),
+        "event_action_macro_f1": float(test_report.get("event_action_macro_f1", 0.0)),
     }
     summary_path = run_dir / "offline_summary.json"
     summary_path.write_text(json.dumps(offline_summary, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -168,6 +168,17 @@ def _load_control_metrics(run_root: Path, run_id: str) -> dict:
     return _load_json(run_dir / "evaluation" / "control_eval_summary.json")
 
 
+def _pick_metric(*values, default: float = 0.0) -> float:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return float(default)
+
+
 def _write_summary_csv(path: Path, rows: list[dict]) -> None:
     fields = [
         "run_id",
@@ -251,9 +262,21 @@ def main() -> None:
 
                 offline, metrics = _load_run_metrics(run_root, run_id)
                 control = {
-                    "command_success_rate": 0.0,
-                    "false_release_rate": 1.0,
-                    "false_trigger_rate": 1.0,
+                    "command_success_rate": _pick_metric(
+                        offline.get("test_command_success_rate"),
+                        offline.get("command_success_rate"),
+                        default=0.0,
+                    ),
+                    "false_release_rate": _pick_metric(
+                        offline.get("test_false_release_rate"),
+                        offline.get("false_release_rate"),
+                        default=1.0,
+                    ),
+                    "false_trigger_rate": _pick_metric(
+                        offline.get("test_false_trigger_rate"),
+                        offline.get("false_trigger_rate"),
+                        default=1.0,
+                    ),
                 }
                 if not bool(args.skip_control_eval):
                     control_output = run_root / run_id / "evaluation" / "control_eval_summary.json"
@@ -383,6 +406,7 @@ def main() -> None:
         "seeds": [int(seed) for seed in seeds],
         "rows": rows,
         "best_run": best,
+        "best_run_id": str(best.get("run_id", "")),
         "rank_rule": (
             "safety_ok desc, event_action_accuracy desc, event_action_macro_f1 desc, "
             "command_success_rate desc, false_trigger_rate asc, false_release_rate asc, "

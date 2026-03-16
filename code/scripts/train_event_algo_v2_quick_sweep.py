@@ -28,6 +28,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _pick_metric(*values, default: float = 0.0) -> float:
+    for value in values:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except Exception:
+            continue
+    return float(default)
+
+
 def _load_json(path: Path) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"missing file: {path}")
@@ -39,11 +50,11 @@ def _load_json(path: Path) -> dict:
 
 def _rank_key(row: dict) -> tuple[float, float, float, float, float]:
     return (
-        float(row.get("test_command_success_rate", 0.0)),
-        -float(row.get("test_false_trigger_rate", 1.0)),
-        -float(row.get("test_false_release_rate", 1.0)),
-        float(row.get("event_action_accuracy", 0.0)),
-        float(row.get("event_action_macro_f1", 0.0)),
+        _pick_metric(row.get("test_command_success_rate"), row.get("command_success_rate"), default=0.0),
+        -_pick_metric(row.get("test_false_trigger_rate"), row.get("false_trigger_rate"), default=1.0),
+        -_pick_metric(row.get("test_false_release_rate"), row.get("false_release_rate"), default=1.0),
+        _pick_metric(row.get("event_action_accuracy"), row.get("test_event_action_accuracy"), default=0.0),
+        _pick_metric(row.get("event_action_macro_f1"), row.get("test_event_action_macro_f1"), default=0.0),
     )
 
 
@@ -52,6 +63,7 @@ def _build_presets() -> list[dict]:
         {
             "preset": "baseline_v1",
             "algo_mode": "v1_single",
+            "rules_enabled": False,
             "gate_action_threshold": 0.55,
             "gate_margin_threshold": 0.05,
             "wrist_rule_min_delta": 0.00,
@@ -62,6 +74,7 @@ def _build_presets() -> list[dict]:
         {
             "preset": "v2_default",
             "algo_mode": "v2_two_stage",
+            "rules_enabled": False,
             "gate_action_threshold": 0.55,
             "gate_margin_threshold": 0.05,
             "wrist_rule_min_delta": 0.00,
@@ -72,6 +85,7 @@ def _build_presets() -> list[dict]:
         {
             "preset": "v2_loose_gate",
             "algo_mode": "v2_two_stage",
+            "rules_enabled": False,
             "gate_action_threshold": 0.50,
             "gate_margin_threshold": 0.02,
             "wrist_rule_min_delta": 0.00,
@@ -82,6 +96,7 @@ def _build_presets() -> list[dict]:
         {
             "preset": "v2_strict_gate",
             "algo_mode": "v2_two_stage",
+            "rules_enabled": False,
             "gate_action_threshold": 0.62,
             "gate_margin_threshold": 0.10,
             "wrist_rule_min_delta": 0.00,
@@ -92,6 +107,7 @@ def _build_presets() -> list[dict]:
         {
             "preset": "v2_strong_wrist_rule",
             "algo_mode": "v2_two_stage",
+            "rules_enabled": True,
             "gate_action_threshold": 0.55,
             "gate_margin_threshold": 0.05,
             "wrist_rule_min_delta": 0.08,
@@ -102,6 +118,7 @@ def _build_presets() -> list[dict]:
         {
             "preset": "v2_strong_release_rule",
             "algo_mode": "v2_two_stage",
+            "rules_enabled": True,
             "gate_action_threshold": 0.55,
             "gate_margin_threshold": 0.05,
             "wrist_rule_min_delta": 0.00,
@@ -143,6 +160,8 @@ def main() -> None:
             str(float(args.rule_confidence)),
             "--algo_mode",
             str(preset["algo_mode"]),
+            "--rules_enabled",
+            "true" if bool(preset.get("rules_enabled", True)) else "false",
             "--gate_action_threshold",
             str(float(preset["gate_action_threshold"])),
             "--gate_margin_threshold",
@@ -188,23 +207,77 @@ def main() -> None:
 
         offline = _load_json(offline_path)
         metrics = _load_json(metrics_path) if metrics_path.exists() else {}
+        command_success_rate = _pick_metric(
+            offline.get("test_command_success_rate"),
+            offline.get("command_success_rate"),
+            default=0.0,
+        )
+        false_trigger_rate = _pick_metric(
+            offline.get("test_false_trigger_rate"),
+            offline.get("false_trigger_rate"),
+            default=0.0,
+        )
+        false_release_rate = _pick_metric(
+            offline.get("test_false_release_rate"),
+            offline.get("false_release_rate"),
+            default=0.0,
+        )
+        gate_accept_rate = _pick_metric(
+            offline.get("test_gate_accept_rate"),
+            offline.get("gate_accept_rate"),
+            default=0.0,
+        )
+        gate_action_recall = _pick_metric(
+            offline.get("test_gate_action_recall"),
+            offline.get("gate_action_recall"),
+            default=0.0,
+        )
+        stage2_action_acc = _pick_metric(
+            offline.get("test_stage2_action_acc"),
+            offline.get("stage2_action_acc"),
+            default=0.0,
+        )
+        rule_hit_rate = _pick_metric(
+            offline.get("test_rule_hit_rate"),
+            offline.get("rule_hit_rate"),
+            default=0.0,
+        )
+        event_action_accuracy = _pick_metric(
+            metrics.get("event_action_accuracy"),
+            offline.get("test_event_action_accuracy"),
+            offline.get("event_action_accuracy"),
+            default=0.0,
+        )
+        event_action_macro_f1 = _pick_metric(
+            metrics.get("event_action_macro_f1"),
+            offline.get("test_event_action_macro_f1"),
+            offline.get("event_action_macro_f1"),
+            default=0.0,
+        )
         row = {
             "run_id": run_id,
             "preset": str(preset["preset"]),
             "status": "ok",
             "rc": int(proc.returncode),
             "algo_mode": str(offline.get("algo_mode", preset["algo_mode"])),
-            "test_accuracy": float(offline.get("test_accuracy", 0.0)),
-            "test_macro_f1": float(offline.get("test_macro_f1", 0.0)),
-            "event_action_accuracy": float(metrics.get("event_action_accuracy", 0.0)),
-            "event_action_macro_f1": float(metrics.get("event_action_macro_f1", 0.0)),
-            "test_command_success_rate": float(offline.get("test_command_success_rate", 0.0)),
-            "test_false_trigger_rate": float(offline.get("test_false_trigger_rate", 0.0)),
-            "test_false_release_rate": float(offline.get("test_false_release_rate", 0.0)),
-            "test_gate_accept_rate": float(offline.get("test_gate_accept_rate", 0.0)),
-            "test_gate_action_recall": float(offline.get("test_gate_action_recall", 0.0)),
-            "test_stage2_action_acc": float(offline.get("test_stage2_action_acc", 0.0)),
-            "test_rule_hit_rate": float(offline.get("test_rule_hit_rate", 0.0)),
+            "test_accuracy": _pick_metric(offline.get("test_accuracy"), default=0.0),
+            "test_macro_f1": _pick_metric(offline.get("test_macro_f1"), default=0.0),
+            "event_action_accuracy": event_action_accuracy,
+            "event_action_macro_f1": event_action_macro_f1,
+            "command_success_rate": command_success_rate,
+            "false_trigger_rate": false_trigger_rate,
+            "false_release_rate": false_release_rate,
+            "gate_accept_rate": gate_accept_rate,
+            "gate_action_recall": gate_action_recall,
+            "stage2_action_acc": stage2_action_acc,
+            "rule_hit_rate": rule_hit_rate,
+            "test_command_success_rate": command_success_rate,
+            "test_false_trigger_rate": false_trigger_rate,
+            "test_false_release_rate": false_release_rate,
+            "test_gate_accept_rate": gate_accept_rate,
+            "test_gate_action_recall": gate_action_recall,
+            "test_stage2_action_acc": stage2_action_acc,
+            "test_rule_hit_rate": rule_hit_rate,
             "rule_calibration_status": str((offline.get("rule_calibration", {}) or {}).get("status", "")),
             "rule_thresholds_final": dict(offline.get("rule_thresholds_final", {}) or {}),
             "summary_path": str(offline_path),
@@ -224,6 +297,8 @@ def main() -> None:
         ),
         "rows": rows,
         "best_run": best,
+        "best_run_id": str(best.get("run_id", "")) if best is not None else "",
+        "recommended_backend": "algo" if best is not None else "",
     }
 
     summary_json = summary_dir / "algo_v2_quick_sweep_summary.json"

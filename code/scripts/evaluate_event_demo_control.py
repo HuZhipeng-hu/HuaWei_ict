@@ -318,6 +318,8 @@ def main() -> None:
         "checkpoint_path": str(runtime_cfg.checkpoint_path),
         "window_test_accuracy": float(window_metrics["window_test_accuracy"]),
         "window_macro_f1": float(window_metrics["window_macro_f1"]),
+        "test_accuracy": float(window_metrics["window_test_accuracy"]),
+        "test_macro_f1": float(window_metrics["window_macro_f1"]),
         "event_action_accuracy": float(window_metrics["event_action_accuracy"]),
         "event_action_macro_f1": float(window_metrics["event_action_macro_f1"]),
         "command_success_rate": float(control["command_success_rate"]),
