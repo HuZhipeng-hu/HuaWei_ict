@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["model", "algo"],
         help="Choose recognizer backend once at startup.",
     )
-    parser.add_argument("--config", default="configs/runtime_event_onset.yaml")
+    parser.add_argument("--config", default="configs/runtime_event_onset_demo3_latch.yaml")
     parser.add_argument("--backend", default="lite", choices=["lite", "ckpt"])
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--model_path", default=None, help="MindIR model path for --backend lite")
@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Comma-separated action keys to override runtime config, "
-            "e.g. TENSE_OPEN,V_SIGN,OK_SIGN,THUMB_UP,WRIST_CW,WRIST_CCW."
+            "e.g. TENSE_OPEN,THUMB_UP,WRIST_CW."
         ),
     )
     parser.add_argument("--port", default=None)
@@ -264,8 +264,10 @@ def main() -> None:
             model_metadata_path=runtime_cfg.model_metadata_path,
         )
         predict_proba = predictor.predict_proba
-        if predictor.metadata is not None and predictor.metadata.class_names:
-            metadata_class_names = [str(name).strip().upper() for name in predictor.metadata.class_names]
+        if predictor.metadata is not None:
+            metadata_names = predictor.metadata.public_class_names or predictor.metadata.class_names
+            if metadata_names:
+                metadata_class_names = [str(name).strip().upper() for name in metadata_names]
     else:
         algo_predictor = EventAlgoPredictor(model_path=str(startup_artifacts["algo_model_path"]))
         predict_proba = algo_predictor.predict_proba
@@ -319,6 +321,7 @@ def main() -> None:
         class_names=label_spec.class_names,
         label_to_state=label_to_state,
         predict_proba=predict_proba,
+        predict_detail=predictor.predict_detail if predictor is not None else None,
         actuator=actuator,
     )
 

@@ -16,7 +16,12 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.config import load_event_training_config
-from event_onset.model import build_event_model
+from event_onset.model import (
+    TWO_STAGE_COMMAND_CLASSES,
+    TWO_STAGE_GATE_CLASSES,
+    build_event_model,
+    is_two_stage_demo3_model,
+)
 from shared.event_labels import public_event_labels
 from shared.label_modes import get_label_mode_spec
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, ensure_run_dir
@@ -63,9 +68,11 @@ def _build_model_metadata(
     emg_shape: tuple[int, ...],
     imu_shape: tuple[int, ...],
     class_names: list[str],
+    model_variant: str,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "model_type": "event_onset",
+        "model_variant": model_variant,
         "training_config": training_config_path,
         "checkpoint_path": checkpoint_path,
         "model_path": model_path,
@@ -73,9 +80,19 @@ def _build_model_metadata(
             {"name": "emg", "shape": list(emg_shape), "dtype": "float32"},
             {"name": "imu", "shape": list(imu_shape), "dtype": "float32"},
         ],
-        "output": {"name": "logits", "dtype": "float32"},
         "class_names": public_event_labels(class_names),
+        "public_class_names": public_event_labels(class_names),
     }
+    if is_two_stage_demo3_model(model_variant):
+        payload["outputs"] = [
+            {"name": "gate_logits", "dtype": "float32"},
+            {"name": "command_logits", "dtype": "float32"},
+        ]
+        payload["gate_classes"] = list(TWO_STAGE_GATE_CLASSES)
+        payload["command_classes"] = list(TWO_STAGE_COMMAND_CLASSES)
+    else:
+        payload["output"] = {"name": "logits", "dtype": "float32"}
+    return payload
 
 
 def _ensure_checkpoint_readable(path: str | Path) -> Path:
@@ -198,6 +215,7 @@ def main() -> None:
         emg_shape=emg_shape,
         imu_shape=imu_shape,
         class_names=label_spec.class_names,
+        model_variant=str(model_cfg.model_type),
     )
     metadata_path = Path(metadata_output)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)

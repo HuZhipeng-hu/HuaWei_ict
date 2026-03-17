@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 import numpy as np
 
 from event_onset.config import EventModelConfig
 from event_onset.evaluate import load_event_model_from_checkpoint
+from event_onset.model import (
+    combine_two_stage_public_probabilities,
+    is_two_stage_demo3_model,
+)
 
 try:
     import mindspore as ms
@@ -30,9 +34,11 @@ except Exception:
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
     logits = np.asarray(logits, dtype=np.float32)
-    shifted = logits - np.max(logits)
+    shifted = logits - np.max(logits, axis=-1, keepdims=True)
     exp_logits = np.exp(shifted)
-    return (exp_logits / np.sum(exp_logits)).astype(np.float32)
+    denom = np.sum(exp_logits, axis=-1, keepdims=True)
+    denom = np.where(denom <= 0.0, 1.0, denom)
+    return (exp_logits / denom).astype(np.float32)
 
 
 def _shape_matches(actual: Sequence[int], expected: Sequence[int]) -> bool:
@@ -51,6 +57,11 @@ class EventModelMetadata:
     inputs: dict[str, tuple[int, ...]]
     output_dtype: str | None = None
     class_names: tuple[str, ...] = ()
+    public_class_names: tuple[str, ...] = ()
+    gate_classes: tuple[str, ...] = ()
+    command_classes: tuple[str, ...] = ()
+    model_variant: str | None = None
+    output_names: tuple[str, ...] = ()
 
     @staticmethod
     def load(path: str | Path | None) -> "EventModelMetadata | None":
@@ -68,8 +79,48 @@ class EventModelMetadata:
             shape = tuple(int(x) for x in item.get("shape", []))
             inputs[name] = shape
         class_names = tuple(str(x) for x in payload.get("class_names", []))
-        output_dtype = payload.get("output", {}).get("dtype")
-        return EventModelMetadata(inputs=inputs, output_dtype=output_dtype, class_names=class_names)
+        public_class_names = tuple(str(x) for x in payload.get("public_class_names", [])) or class_names
+        gate_classes = tuple(str(x) for x in payload.get("gate_classes", []))
+        command_classes = tuple(str(x) for x in payload.get("command_classes", []))
+
+        output_names: tuple[str, ...] = ()
+        output_dtype = None
+        outputs = payload.get("outputs", [])
+        if isinstance(outputs, list) and outputs:
+            output_names = tuple(
+                str(item.get("name", "")).strip()
+                for item in outputs
+                if isinstance(item, dict)
+            )
+            first_output = next((item for item in outputs if isinstance(item, dict)), {})
+            if first_output.get("dtype") is not None:
+                output_dtype = str(first_output.get("dtype"))
+        else:
+            output = payload.get("output", {})
+            if isinstance(output, dict):
+                name = str(output.get("name", "")).strip()
+                output_names = (name,) if name else ()
+                if output.get("dtype") is not None:
+                    output_dtype = str(output.get("dtype"))
+
+        model_variant = str(payload.get("model_variant", "") or "").strip() or None
+        return EventModelMetadata(
+            inputs=inputs,
+            output_dtype=output_dtype,
+            class_names=class_names,
+            public_class_names=public_class_names,
+            gate_classes=gate_classes,
+            command_classes=command_classes,
+            model_variant=model_variant,
+            output_names=output_names,
+        )
+
+
+@dataclass(frozen=True)
+class EventPredictionDetail:
+    public_probs: np.ndarray
+    gate_probs: np.ndarray | None = None
+    command_probs: np.ndarray | None = None
 
 
 class EventPredictor:
@@ -91,8 +142,12 @@ class EventPredictor:
         self.backend = normalized
         self.model_config = model_config
         self.device_target = device_target
-        # CKPT backend does not need model metadata; keep it optional to avoid false file-not-found failures.
         self.metadata = EventModelMetadata.load(model_metadata_path) if self.backend == "lite" else None
+        self.model_variant = (
+            self.metadata.model_variant
+            if self.metadata is not None and self.metadata.model_variant
+            else str(self.model_config.model_type)
+        )
         self._ckpt_model = None
         self._lite_model = None
         self._emg_input_index = 0
@@ -108,6 +163,9 @@ class EventPredictor:
             if model_path is None:
                 raise ValueError("model_path is required when backend='lite'.")
             self._load_lite(model_path)
+
+    def _is_two_stage_demo3(self) -> bool:
+        return is_two_stage_demo3_model(self.model_variant)
 
     def _load_ckpt(self, checkpoint_path: str | Path) -> None:
         if ms is None or Tensor is None or context is None:
@@ -187,20 +245,66 @@ class EventPredictor:
             raise ValueError(f"IMU shape mismatch: got {tuple(imu.shape)}, expected {self._expected_imu_shape}.")
         return emg, imu
 
-    def predict_proba(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> np.ndarray:
+    def _build_detail_from_logits(
+        self,
+        *,
+        logits: np.ndarray | None = None,
+        gate_logits: np.ndarray | None = None,
+        command_logits: np.ndarray | None = None,
+    ) -> EventPredictionDetail:
+        if self._is_two_stage_demo3():
+            if gate_logits is None or command_logits is None:
+                raise ValueError("two-stage demo3 predictor requires gate and command logits")
+            gate_probs = _softmax(gate_logits)
+            command_probs = _softmax(command_logits)
+            public_probs = combine_two_stage_public_probabilities(gate_probs, command_probs)
+            return EventPredictionDetail(
+                public_probs=np.asarray(public_probs, dtype=np.float32),
+                gate_probs=np.asarray(gate_probs, dtype=np.float32),
+                command_probs=np.asarray(command_probs, dtype=np.float32),
+            )
+        if logits is None:
+            raise ValueError("single-stage predictor requires logits")
+        return EventPredictionDetail(public_probs=_softmax(logits))
+
+    def predict_detail(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> EventPredictionDetail:
         emg, imu = self._validate_inputs(emg_feature, imu_feature)
 
         if self.backend == "ckpt":
             assert self._ckpt_model is not None
-            logits = self._ckpt_model(Tensor(emg, ms.float32), Tensor(imu, ms.float32)).asnumpy()[0]
-            return _softmax(logits)
+            outputs = self._ckpt_model(Tensor(emg, ms.float32), Tensor(imu, ms.float32))
+            if self._is_two_stage_demo3():
+                gate_logits, command_logits = outputs
+                return self._build_detail_from_logits(
+                    gate_logits=gate_logits.asnumpy()[0],
+                    command_logits=command_logits.asnumpy()[0],
+                )
+            return self._build_detail_from_logits(logits=outputs.asnumpy()[0])
 
         assert self._lite_model is not None
         inputs = self._lite_model.get_inputs()
         inputs[self._emg_input_index].set_data_from_numpy(emg)
         inputs[self._imu_input_index].set_data_from_numpy(imu)
         outputs = self._lite_model.predict(inputs)
+        if self._is_two_stage_demo3():
+            if len(outputs) != 2:
+                raise ValueError(f"two-stage demo3 MindIR must expose 2 outputs, got {len(outputs)}")
+            gate_logits = outputs[0].get_data_to_numpy()
+            command_logits = outputs[1].get_data_to_numpy()
+            if gate_logits.ndim == 2:
+                gate_logits = gate_logits[0]
+            if command_logits.ndim == 2:
+                command_logits = command_logits[0]
+            return self._build_detail_from_logits(
+                gate_logits=gate_logits,
+                command_logits=command_logits,
+            )
+
         logits = outputs[0].get_data_to_numpy()
         if logits.ndim == 2:
             logits = logits[0]
-        return _softmax(logits)
+        return self._build_detail_from_logits(logits=logits)
+
+    def predict_proba(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> np.ndarray:
+        detail = self.predict_detail(emg_feature, imu_feature)
+        return np.asarray(detail.public_probs, dtype=np.float32)

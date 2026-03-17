@@ -55,7 +55,7 @@ def test_model90_split_manifest_path_uses_explicit_screen_manifest_only_for_scre
     longrun_path = _model90_split_manifest_path(args, 52).as_posix()
 
     assert screen_path.endswith("/artifacts/splits/custom_screen_seed42.json")
-    assert longrun_path.endswith("/artifacts/splits/s2_model90_4class_seed52_v2.json")
+    assert longrun_path.endswith("/artifacts/splits/s2_model90_demo3_seed52_v2.json")
 
 
 def test_prepare_split_seeds_unions_screen_longrun_and_neighbor() -> None:

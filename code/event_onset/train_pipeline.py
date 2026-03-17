@@ -20,7 +20,7 @@ from event_onset.head_expansion import (
     normalize_action_keys,
 )
 from event_onset.evaluate import load_and_evaluate_event
-from event_onset.model import build_event_model
+from event_onset.model import TWO_STAGE_COMMAND_CLASSES, TWO_STAGE_GATE_CLASSES, build_event_model, is_two_stage_demo3_model
 from event_onset.trainer import EventTrainer
 from ninapro_db5.model import load_emg_encoder_from_db5_checkpoint
 from shared.event_labels import public_event_labels
@@ -725,6 +725,10 @@ def run_event_training(args) -> None:
             "training_history": str(history_path),
             "evaluation_outputs": report_paths,
             "class_names": public_event_labels(label_spec.class_names),
+            "public_class_names": public_event_labels(label_spec.class_names),
+            "model_variant": str(model_cfg.model_type),
+            "gate_classes": list(TWO_STAGE_GATE_CLASSES) if is_two_stage_demo3_model(model_cfg.model_type) else [],
+            "command_classes": list(TWO_STAGE_COMMAND_CLASSES) if is_two_stage_demo3_model(model_cfg.model_type) else [],
             "incremental_transfer": incremental_transfer,
             "incremental_command_template": incremental_template,
             "elapsed_minutes": (time.time() - start) / 60.0,

@@ -9,9 +9,9 @@ def _base_args() -> SimpleNamespace:
     return SimpleNamespace(
         screen_loss_types="cross_entropy,cb_focal",
         screen_base_channels="16,24",
-        screen_freeze_emg_epochs="5,8",
-        screen_encoder_lr_ratios="0.3,0.2",
-        screen_pretrained_modes="off,on",
+        screen_freeze_emg_epochs="6,8,10",
+        screen_encoder_lr_ratios="0.24,0.3,0.36",
+        screen_pretrained_modes="off",
         longrun_seeds="42,52,62",
         runtime_tuning_summary="missing_runtime_tuning_summary.json",
         tune_summary="missing_tune_summary.json",
@@ -26,6 +26,8 @@ def _base_args() -> SimpleNamespace:
 def test_param_coverage_blocks_when_neighbor_has_significant_gain() -> None:
     args = _base_args()
     args.screen_loss_types = "cross_entropy"
+    args.screen_freeze_emg_epochs = "5,8"
+    args.screen_encoder_lr_ratios = "0.3,0.2"
     screen_summary = {
         "rows": [
             {

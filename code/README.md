@@ -12,7 +12,8 @@ This project targets event-driven latched control, not continuous motion mirrori
 
 - `CONTINUE`: no new command, keep the current prosthesis state latched
 - `TENSE_OPEN`: explicit open/release command
-- `THUMB_UP`, `WRIST_CW`, `WRIST_CCW`, and other enabled action labels: switch the prosthesis to that target state and hold it
+- Default demo actions are `THUMB_UP` and `WRIST_CW`
+- Other labels such as `WRIST_CCW`, `V_SIGN`, and `OK_SIGN` are extension paths, not the default release-candidate demo
 
 The intended user experience is:
 
@@ -187,7 +188,7 @@ Recommended demo runtime:
 
 ```bash
 python scripts/run_event_runtime.py \
-  --config configs/runtime_event_onset_demo_latch.yaml \
+  --config configs/runtime_event_onset_demo3_latch.yaml \
   --recognizer_backend model \
   --backend lite
 ```
@@ -196,7 +197,7 @@ Standalone smoke:
 
 ```bash
 python scripts/run_event_runtime.py \
-  --config configs/runtime_event_onset_demo_latch.yaml \
+  --config configs/runtime_event_onset_demo3_latch.yaml \
   --recognizer_backend model \
   --backend lite \
   --standalone \
@@ -225,7 +226,7 @@ python scripts/evaluate_event_dualtrack.py \
   --model_run_id s2_stable4_relax12_seed77 \
   --algo_model_path artifacts/runs/s2_algo_baseline_seed77/models/algo_model.json \
   --training_config configs/training_event_onset_demo_p0.yaml \
-  --runtime_config configs/runtime_event_onset_demo_latch.yaml \
+  --runtime_config configs/runtime_event_onset_demo3_latch.yaml \
   --data_dir ../data \
   --recordings_manifest s2_train_manifest_relax12.csv \
   --split_manifest artifacts/splits/s2_stable4_relax12_seed77.json

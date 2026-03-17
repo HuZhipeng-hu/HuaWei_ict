@@ -2,19 +2,19 @@
 
 ## Goal
 
-This runbook is for the 4-action demo release candidate:
+This runbook is for the demo3 two-stage release candidate:
 
 - `CONTINUE`
 - `TENSE_OPEN`
 - `THUMB_UP`
 - `WRIST_CW`
-- `WRIST_CCW`
 
 Recommended semantics:
 
 - `CONTINUE`: no new command, keep the current prosthesis state
 - `TENSE_OPEN`: explicit open/release command
-- other enabled classes: switch to target state and latch
+- `THUMB_UP` and `WRIST_CW`: switch to target state and latch
+- `WRIST_CCW`, `V_SIGN`, and `OK_SIGN` remain extension classes outside the default demo3 path
 
 This is an event-driven latch protocol. It is not continuous motion mirroring.
 
@@ -25,7 +25,7 @@ Main entry:
 Default workflow:
 
 1. collection audit
-2. filtered 4-action manifest build
+2. filtered demo3 manifest build
 3. deterministic grouped-file split build
 4. bounded screen
 5. longrun stability check
@@ -86,7 +86,7 @@ Useful optional flags:
 - `--prepare_action_min_selected_windows 2`
 - `--prepare_relax_min_selected_windows 1`
 - `--prepare_relax_allow_retake_quality true`
-- `--prepare_output_manifest ../data/s2_model90_4class_train_manifest.csv`
+- `--prepare_output_manifest ../data/s2_model90_demo3_train_manifest.csv`
 
 The `prepare_relax_*` flag names are kept for backward compatibility. They control the public `CONTINUE` background class.
 

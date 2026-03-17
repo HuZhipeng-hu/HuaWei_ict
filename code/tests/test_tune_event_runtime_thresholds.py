@@ -79,6 +79,8 @@ def test_evaluate_combo_excludes_release_command_from_action_denominator(
         runtime_cfg=SimpleNamespace(
             inference=SimpleNamespace(
                 confidence_threshold=0.8,
+                gate_confidence_threshold=0.85,
+                command_confidence_threshold=0.8,
                 activation_margin_threshold=0.1,
                 vote_window=3,
                 vote_min_count=2,
@@ -87,8 +89,11 @@ def test_evaluate_combo_excludes_release_command_from_action_denominator(
             runtime=SimpleNamespace(),
         ),
         predict_proba=lambda *_args, **_kwargs: np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
+        predict_detail=None,
         params={
             "confidence_threshold": 0.9,
+            "gate_confidence_threshold": 0.88,
+            "command_confidence_threshold": 0.84,
             "activation_margin_threshold": 0.2,
             "vote_window": 5,
             "vote_min_count": 3,
@@ -97,6 +102,7 @@ def test_evaluate_combo_excludes_release_command_from_action_denominator(
     )
     assert metrics["total_clip_count"] == 2
     assert metrics["action_clip_count"] == 1
+    assert metrics["continue_clip_count"] == 0
     assert metrics["release_command_clip_count"] == 1
     assert metrics["command_success_rate"] == 1.0
     assert metrics["false_release_rate"] == 0.0

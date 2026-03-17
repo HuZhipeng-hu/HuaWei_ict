@@ -166,3 +166,88 @@ def test_event_runtime_latch_and_tense_open_release_without_idle_auto_fallback()
     assert released.changed is True
     assert released.state == GestureType.RELAX
     assert released.emitted_class_name == "TENSE_OPEN"
+
+
+def test_event_runtime_two_stage_gate_and_command_thresholds():
+    machine = EventRuntimeStateMachine(
+        inference_config=EventInferenceConfig(
+            confidence_threshold=0.75,
+            gate_confidence_threshold=0.85,
+            command_confidence_threshold=0.80,
+            per_class_confidence_thresholds={"THUMB_UP": 0.78},
+            vote_window=2,
+            vote_min_count=2,
+            activation_margin_threshold=0.08,
+            switch_confidence_boost=0.06,
+            switch_margin_threshold=0.12,
+        ),
+        runtime_config=EventRuntimeBehaviorConfig(
+            idle_release_hold_ms=10_000_000,
+            min_transition_gap_ms=120,
+            post_transition_lock_ms=220,
+            low_energy_release_threshold=2.5,
+            release_mode="command_only",
+        ),
+        low_energy_threshold=2.5,
+        class_names=["RELAX", "TENSE_OPEN", "THUMB_UP", "WRIST_CW"],
+        label_to_state={
+            0: GestureType.RELAX,
+            1: GestureType.RELAX,
+            2: GestureType.THUMB_UP,
+            3: GestureType.WRIST_CW,
+        },
+    )
+
+    blocked = machine.update(
+        2,
+        0.92,
+        8.0,
+        0.0,
+        gate_confidence=0.82,
+        command_confidence=0.92,
+        top2_confidence=0.10,
+    )
+    assert blocked.changed is False
+    assert machine.current_state == GestureType.RELAX
+
+    machine.update(
+        2,
+        0.91,
+        8.1,
+        40.0,
+        gate_confidence=0.90,
+        command_confidence=0.79,
+        top2_confidence=0.10,
+    )
+    weak_command = machine.update(
+        2,
+        0.91,
+        8.1,
+        80.0,
+        gate_confidence=0.90,
+        command_confidence=0.79,
+        top2_confidence=0.10,
+    )
+    assert weak_command.changed is False
+    assert machine.current_state == GestureType.RELAX
+
+    machine.update(
+        2,
+        0.93,
+        8.2,
+        240.0,
+        gate_confidence=0.91,
+        command_confidence=0.93,
+        top2_confidence=0.20,
+    )
+    accepted = machine.update(
+        2,
+        0.94,
+        8.3,
+        280.0,
+        gate_confidence=0.92,
+        command_confidence=0.94,
+        top2_confidence=0.20,
+    )
+    assert accepted.changed is True
+    assert accepted.state == GestureType.THUMB_UP

@@ -24,7 +24,7 @@ from shared.event_labels import normalize_event_label_input, public_event_labels
 from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
-TARGET_CLASS_ORDER = ["CONTINUE", "TENSE_OPEN", "THUMB_UP", "WRIST_CW", "WRIST_CCW"]
+TARGET_CLASS_ORDER = ["CONTINUE", "TENSE_OPEN", "THUMB_UP", "WRIST_CW"]
 
 
 def _parse_tokens(raw: str) -> list[str]:
@@ -361,6 +361,20 @@ def _check_run_artifacts(
                 )
             elif len({str(item) for item in class_names}) != len(class_names):
                 result.fail(f"{run_id}: class_names contains duplicates -> {class_names}")
+
+            model_variant = str(run_metadata.get("model_variant", "")).strip()
+            if model_variant == "event_onset_two_stage_demo3":
+                public_class_names = list(run_metadata.get("public_class_names") or [])
+                gate_classes = list(run_metadata.get("gate_classes") or [])
+                command_classes = list(run_metadata.get("command_classes") or [])
+                if public_class_names != TARGET_CLASS_ORDER:
+                    result.fail(
+                        f"{run_id}: public_class_names mismatch -> {public_class_names} vs {TARGET_CLASS_ORDER}"
+                    )
+                if gate_classes != ["CONTINUE", "COMMAND"]:
+                    result.fail(f"{run_id}: gate_classes mismatch -> {gate_classes}")
+                if command_classes != ["TENSE_OPEN", "THUMB_UP", "WRIST_CW"]:
+                    result.fail(f"{run_id}: command_classes mismatch -> {command_classes}")
 
     return result
 
@@ -787,21 +801,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit model-line sprint pipeline")
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_prefix", default="s2_model90")
-    parser.add_argument("--training_config", default="configs/training_event_onset_demo_p0.yaml")
-    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
+    parser.add_argument("--training_config", default="configs/training_event_onset_demo3_two_stage.yaml")
+    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo3_latch.yaml")
     parser.add_argument("--split_manifest", default=None)
 
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default="")
-    parser.add_argument("--target_db5_keys", default="TENSE_OPEN,THUMB_UP,WRIST_CW,WRIST_CCW")
+    parser.add_argument("--target_db5_keys", default="TENSE_OPEN,THUMB_UP,WRIST_CW")
     parser.add_argument("--control_backend", default="ckpt", choices=["ckpt", "lite"])
     parser.add_argument("--device_target", default="GPU", choices=["CPU", "GPU", "Ascend"])
 
     parser.add_argument("--screen_loss_types", default="cross_entropy,cb_focal")
     parser.add_argument("--screen_base_channels", default="16,24")
-    parser.add_argument("--screen_freeze_emg_epochs", default="5,8")
-    parser.add_argument("--screen_encoder_lr_ratios", default="0.3,0.2")
-    parser.add_argument("--screen_pretrained_modes", default="off,on")
+    parser.add_argument("--screen_freeze_emg_epochs", default="6,8,10")
+    parser.add_argument("--screen_encoder_lr_ratios", default="0.24,0.3,0.36")
+    parser.add_argument("--screen_pretrained_modes", default="off")
     parser.add_argument("--longrun_seeds", default="42,52,62")
 
     parser.add_argument("--neighbor_summary", default=None)

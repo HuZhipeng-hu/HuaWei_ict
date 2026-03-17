@@ -29,15 +29,15 @@ from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
 
-DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW,WRIST_CCW"
+DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Tune runtime thresholds for event demo control")
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_id", required=True)
-    parser.add_argument("--training_config", default="configs/training_event_onset_demo_p0.yaml")
-    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
+    parser.add_argument("--training_config", default="configs/training_event_onset_demo3_two_stage.yaml")
+    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo3_latch.yaml")
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default=None)
     parser.add_argument("--split_manifest", default=None)
@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_path", default=None)
     parser.add_argument("--model_metadata", default=None)
     parser.add_argument("--confidence_thresholds", default="0.82,0.86,0.90")
+    parser.add_argument("--gate_confidence_thresholds", default="0.82,0.86,0.90")
+    parser.add_argument("--command_confidence_thresholds", default="0.78,0.82,0.86")
     parser.add_argument("--activation_margins", default="0.10,0.14,0.18")
     parser.add_argument("--vote_windows", default="3,5")
     parser.add_argument("--vote_min_counts", default="2,3")
@@ -158,7 +160,8 @@ def _validate_runtime_class_contract(
             raise ValueError("Lite backend requires model metadata with class_names for strict runtime validation.")
         return
 
-    metadata_class_names = [normalize_event_label_input(name) for name in metadata.class_names]
+    metadata_names = metadata.public_class_names or metadata.class_names
+    metadata_class_names = [normalize_event_label_input(name) for name in metadata_names]
     if not metadata_class_names:
         if backend == "lite":
             raise ValueError("Lite backend metadata must include non-empty class_names.")
@@ -205,10 +208,13 @@ def _evaluate_combo(
     data_cfg,
     runtime_cfg,
     predict_proba,
+    predict_detail,
     params: dict[str, float | int],
 ) -> dict[str, float]:
     inference_cfg = copy.deepcopy(runtime_cfg.inference)
     inference_cfg.confidence_threshold = float(params["confidence_threshold"])
+    inference_cfg.gate_confidence_threshold = float(params["gate_confidence_threshold"])
+    inference_cfg.command_confidence_threshold = float(params["command_confidence_threshold"])
     inference_cfg.activation_margin_threshold = float(params["activation_margin_threshold"])
     inference_cfg.vote_window = int(params["vote_window"])
     inference_cfg.vote_min_count = int(params["vote_min_count"])
@@ -227,6 +233,7 @@ def _evaluate_combo(
     }
     total = 0
     action_total = 0
+    continue_total = 0
     release_command_total = 0
     command_success = 0
     false_release = 0
@@ -240,6 +247,7 @@ def _evaluate_combo(
             class_names=class_names,
             label_to_state=label_to_state,
             predict_proba=predict_proba,
+            predict_detail=predict_detail,
             actuator=None,
         )
         expected_state = label_to_state[int(target_label)]
@@ -250,6 +258,7 @@ def _evaluate_combo(
         total += 1
 
         if int(target_label) == 0:
+            continue_total += 1
             triggered_action = any(step.decision.state in action_states for step in transitions)
             success = (not triggered_action) and (controller.current_state == relax_state)
             if triggered_action:
@@ -297,6 +306,7 @@ def _evaluate_combo(
         "false_trigger_rate": float(false_trigger / total) if total else 0.0,
         "total_clip_count": int(total),
         "action_clip_count": int(action_total),
+        "continue_clip_count": int(continue_total),
         "release_command_clip_count": int(release_command_total),
     }
 
@@ -312,6 +322,8 @@ def _rank_key(row: dict) -> tuple[float, float, float]:
 def _write_csv(path: Path, rows: list[dict]) -> None:
     fields = [
         "confidence_threshold",
+        "gate_confidence_threshold",
+        "command_confidence_threshold",
         "activation_margin_threshold",
         "vote_window",
         "vote_min_count",
@@ -321,6 +333,7 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "false_release_rate",
         "total_clip_count",
         "action_clip_count",
+        "continue_clip_count",
         "release_command_clip_count",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -341,6 +354,8 @@ def _write_runtime_config(
     if "inference" not in payload or not isinstance(payload["inference"], dict):
         payload["inference"] = {}
     payload["inference"]["confidence_threshold"] = float(best_row["confidence_threshold"])
+    payload["inference"]["gate_confidence_threshold"] = float(best_row["gate_confidence_threshold"])
+    payload["inference"]["command_confidence_threshold"] = float(best_row["command_confidence_threshold"])
     payload["inference"]["activation_margin_threshold"] = float(best_row["activation_margin_threshold"])
     payload["inference"]["vote_window"] = int(best_row["vote_window"])
     payload["inference"]["vote_min_count"] = int(best_row["vote_min_count"])
@@ -422,15 +437,27 @@ def main() -> None:
     clips = _collect_test_clips(loader=loader, test_sources=test_sources, class_to_idx=class_to_idx)
 
     confs = _parse_float_tokens(args.confidence_thresholds, name="--confidence_thresholds")
+    gate_confs = _parse_float_tokens(args.gate_confidence_thresholds, name="--gate_confidence_thresholds")
+    command_confs = _parse_float_tokens(args.command_confidence_thresholds, name="--command_confidence_thresholds")
     margins = _parse_float_tokens(args.activation_margins, name="--activation_margins")
     vote_windows = _parse_int_tokens(args.vote_windows, name="--vote_windows")
     vote_mins = _parse_int_tokens(args.vote_min_counts, name="--vote_min_counts")
     boosts = _parse_float_tokens(args.switch_confidence_boosts, name="--switch_confidence_boosts")
 
     rows: list[dict] = []
-    for conf, margin, vw, vm, boost in itertools.product(confs, margins, vote_windows, vote_mins, boosts):
+    for conf, gate_conf, command_conf, margin, vw, vm, boost in itertools.product(
+        confs,
+        gate_confs,
+        command_confs,
+        margins,
+        vote_windows,
+        vote_mins,
+        boosts,
+    ):
         params = {
             "confidence_threshold": float(conf),
+            "gate_confidence_threshold": float(gate_conf),
+            "command_confidence_threshold": float(command_conf),
             "activation_margin_threshold": float(margin),
             "vote_window": int(vw),
             "vote_min_count": int(vm),
@@ -443,6 +470,7 @@ def main() -> None:
             data_cfg=runtime_cfg.data,
             runtime_cfg=runtime_cfg,
             predict_proba=predictor.predict_proba,
+            predict_detail=predictor.predict_detail,
             params=params,
         )
         row = dict(params)
@@ -469,7 +497,7 @@ def main() -> None:
     output_runtime_config = (
         Path(str(args.output_runtime_config)).resolve()
         if str(args.output_runtime_config or "").strip()
-        else (run_dir / "evaluation" / "runtime_event_onset_demo_latch_tuned.yaml")
+        else (run_dir / "evaluation" / "runtime_event_onset_demo3_latch_tuned.yaml")
     )
 
     _write_csv(output_csv, ranked)
@@ -490,6 +518,8 @@ def main() -> None:
         "rank_rule": "command_success_rate desc, false_trigger_rate asc, false_release_rate asc",
         "search_space": {
             "confidence_thresholds": confs,
+            "gate_confidence_thresholds": gate_confs,
+            "command_confidence_thresholds": command_confs,
             "activation_margins": margins,
             "vote_windows": vote_windows,
             "vote_min_counts": vote_mins,

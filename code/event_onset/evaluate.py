@@ -9,7 +9,11 @@ from typing import Any, Dict, Sequence
 import numpy as np
 
 from event_onset.config import EventModelConfig
-from event_onset.model import build_event_model
+from event_onset.model import (
+    build_event_model,
+    combine_two_stage_public_probabilities_from_logits,
+    is_two_stage_demo3_model,
+)
 
 try:
     import mindspore as ms
@@ -58,8 +62,17 @@ def evaluate_event_model(
 ) -> Dict[str, Any]:
     if ms is None:
         raise RuntimeError("MindSpore is not available")
-    logits = model(Tensor(emg_samples, ms.float32), Tensor(imu_samples, ms.float32)).asnumpy()
-    preds = np.argmax(logits, axis=1).astype(np.int32)
+    outputs = model(Tensor(emg_samples, ms.float32), Tensor(imu_samples, ms.float32))
+    if is_two_stage_demo3_model(getattr(model, "config", None).model_type if getattr(model, "config", None) else ""):
+        gate_logits, command_logits = outputs
+        probs = combine_two_stage_public_probabilities_from_logits(
+            gate_logits.asnumpy(),
+            command_logits.asnumpy(),
+        )
+        preds = np.argmax(probs, axis=1).astype(np.int32)
+    else:
+        logits = outputs.asnumpy()
+        preds = np.argmax(logits, axis=1).astype(np.int32)
     return compute_classification_report(labels.astype(np.int32), preds, class_names=class_names)
 
 

@@ -26,15 +26,15 @@ from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
 
-DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW,WRIST_CCW"
+DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate event demo control metrics")
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_id", required=True)
-    parser.add_argument("--training_config", default="configs/training_event_onset_demo_p0.yaml")
-    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
+    parser.add_argument("--training_config", default="configs/training_event_onset_demo3_two_stage.yaml")
+    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo3_latch.yaml")
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default=None)
     parser.add_argument("--split_manifest", default=None)
@@ -116,7 +116,8 @@ def _validate_runtime_class_contract(
             raise ValueError("Lite backend requires model metadata with class_names for strict runtime validation.")
         return
 
-    metadata_class_names = [normalize_event_label_input(name) for name in metadata.class_names]
+    metadata_names = metadata.public_class_names or metadata.class_names
+    metadata_class_names = [normalize_event_label_input(name) for name in metadata_names]
     if not metadata_class_names:
         if backend == "lite":
             raise ValueError("Lite backend metadata must include non-empty class_names.")
@@ -361,6 +362,7 @@ def _run(args: argparse.Namespace) -> Path:
             class_names=label_spec.class_names,
             label_to_state=label_to_state,
             predict_proba=predictor.predict_proba,
+            predict_detail=predictor.predict_detail,
             actuator=None,
         )
 

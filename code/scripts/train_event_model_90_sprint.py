@@ -24,7 +24,7 @@ from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import build_manifest, save_manifest
 
 
-DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW,WRIST_CCW"
+DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW"
 DEFAULT_SOURCE_RECORDINGS_MANIFEST = "recordings_manifest.csv"
 DEFAULT_PREPARE_SESSION_ID = "s2"
 DEFAULT_PREPARE_TARGET_PER_CLASS = 12
@@ -143,14 +143,14 @@ def _prepare_output_manifest_path(args: argparse.Namespace) -> Path:
     raw = str(getattr(args, "prepare_output_manifest", "") or "").strip()
     if raw:
         return _resolve_path(raw, prefer_data_dir=args.data_dir)
-    return _resolve_path(f"{args.run_prefix}_4class_train_manifest.csv", prefer_data_dir=args.data_dir)
+    return _resolve_path(f"{args.run_prefix}_demo3_train_manifest.csv", prefer_data_dir=args.data_dir)
 
 
 def _model90_split_manifest_path(args: argparse.Namespace, seed: int) -> Path:
     explicit = str(getattr(args, "screen_split_manifest", "") or "").strip()
     if explicit and int(seed) == int(args.screen_split_seed):
         return _resolve_path(explicit)
-    return _resolve_path(f"artifacts/splits/{args.run_prefix}_4class_seed{int(seed)}_v2.json")
+    return _resolve_path(f"artifacts/splits/{args.run_prefix}_demo3_seed{int(seed)}_v2.json")
 
 
 def _prepare_split_seeds(args: argparse.Namespace) -> list[int]:
@@ -1096,7 +1096,7 @@ def _stage_tune(
 
     output_json = run_root / f"{args.run_prefix}_runtime_threshold_tuning_summary.json"
     output_csv = run_root / f"{args.run_prefix}_runtime_threshold_tuning_summary.csv"
-    output_runtime_config = run_root / f"{args.run_prefix}_runtime_event_onset_demo_latch_tuned.yaml"
+    output_runtime_config = run_root / f"{args.run_prefix}_runtime_event_onset_demo3_latch_tuned.yaml"
     cmd = [
         sys.executable,
         "scripts/tune_event_runtime_thresholds.py",
@@ -1222,8 +1222,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage", default="all", choices=["prepare", "baseline", "screen", "longrun", "neighbor", "tune", "audit", "all"])
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_prefix", default="s2_model90")
-    parser.add_argument("--training_config", default="configs/training_event_onset_demo_p0.yaml")
-    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
+    parser.add_argument("--training_config", default="configs/training_event_onset_demo3_two_stage.yaml")
+    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo3_latch.yaml")
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default=DEFAULT_SOURCE_RECORDINGS_MANIFEST)
     parser.add_argument("--target_db5_keys", default=DEFAULT_TARGET_KEYS)

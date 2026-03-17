@@ -88,11 +88,14 @@ class EventModelConfig:
     dropout_rate: float = 0.3
     use_se: bool = True
     pretrained_emg_checkpoint: str | None = None
+    command_loss_weight: float = 1.0
 
 
 @dataclass
 class EventInferenceConfig:
     confidence_threshold: float = 0.75
+    gate_confidence_threshold: float | None = None
+    command_confidence_threshold: float | None = None
     per_class_confidence_thresholds: dict[str, float] = field(default_factory=dict)
     vote_window: int = 3
     vote_min_count: int = 2

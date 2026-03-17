@@ -10,6 +10,7 @@ from typing import Dict, List, Sequence
 import numpy as np
 
 from event_onset.config import EventModelConfig
+from event_onset.model import combine_two_stage_public_probabilities_from_logits, is_two_stage_demo3_model
 from training.reporting import compute_classification_report
 from training.trainer import (
     FocalLoss,
@@ -44,6 +45,21 @@ def _argmax(logits):
     return ops.argmax(logits, 1)
 
 
+def _to_numpy_output(output):
+    if isinstance(output, tuple):
+        return tuple(item.asnumpy() for item in output)
+    return output.asnumpy()
+
+
+def _predict_labels_from_output(output, *, model_type: str) -> np.ndarray:
+    if is_two_stage_demo3_model(model_type):
+        gate_logits, command_logits = _to_numpy_output(output)
+        probs = combine_two_stage_public_probabilities_from_logits(gate_logits, command_logits)
+        return np.argmax(probs, axis=1).astype(np.int32)
+    logits = _to_numpy_output(output)
+    return np.argmax(logits, axis=1).astype(np.int32)
+
+
 def _np_loader(emg_samples: np.ndarray, imu_samples: np.ndarray, labels: np.ndarray):
     for emg, imu, label in zip(emg_samples, imu_samples, labels):
         yield emg, imu, label
@@ -68,6 +84,91 @@ def create_event_dataset(
 
 
 if nn is not None:
+
+    class PerSampleCrossEntropyLoss(nn.Cell):
+        def __init__(self, num_classes: int, smoothing: float = 0.0):
+            super().__init__()
+            self.num_classes = int(num_classes)
+            self.smoothing = float(max(0.0, smoothing))
+            self.log_softmax = nn.LogSoftmax(axis=1)
+            self.on_value = Tensor(1.0 - self.smoothing, ms.float32)
+            off_value = self.smoothing / max(1, self.num_classes - 1)
+            self.off_value = Tensor(off_value, ms.float32)
+            self.reduce_sum = ops.ReduceSum(keep_dims=False)
+
+        def construct(self, logits, labels):
+            if self.smoothing > 0.0:
+                one_hot = ops.one_hot(labels, self.num_classes, self.on_value, self.off_value)
+            else:
+                one_hot = ops.one_hot(labels, self.num_classes, Tensor(1.0, ms.float32), Tensor(0.0, ms.float32))
+            log_probs = self.log_softmax(logits)
+            return -self.reduce_sum(one_hot * log_probs, 1)
+
+
+    class PerSampleFocalLoss(nn.Cell):
+        def __init__(self, num_classes: int, gamma: float = 1.5, class_weights: Tensor | None = None):
+            super().__init__()
+            self.num_classes = int(num_classes)
+            self.gamma = Tensor(float(gamma), ms.float32)
+            self.class_weights = class_weights
+            self.one = Tensor(1.0, ms.float32)
+            self.zero = Tensor(0.0, ms.float32)
+            self.eps = Tensor(1e-6, ms.float32)
+            self.reduce_sum = ops.ReduceSum(keep_dims=False)
+
+        def construct(self, logits, labels):
+            probs = ops.softmax(logits, axis=1)
+            one_hot = ops.one_hot(labels, self.num_classes, self.one, self.zero)
+            pt = self.reduce_sum(probs * one_hot, 1)
+            pt = ops.clip_by_value(pt, self.eps, self.one)
+            focal = ops.pow(self.one - pt, self.gamma) * (-ops.log(pt))
+            if self.class_weights is not None:
+                weights = ops.Gather()(self.class_weights, labels, 0)
+                focal = focal * weights
+            return focal
+
+
+    class MeanLossWrapper(nn.Cell):
+        def __init__(self, per_sample_loss):
+            super().__init__()
+            self.per_sample_loss = per_sample_loss
+            self.reduce_mean = ops.ReduceMean(keep_dims=False)
+
+        def construct(self, logits, labels):
+            return self.reduce_mean(self.per_sample_loss(logits, labels))
+
+
+    class TwoStageEventLoss(nn.Cell):
+        def __init__(
+            self,
+            *,
+            gate_loss_fn,
+            command_loss_fn,
+            command_loss_weight: float,
+        ):
+            super().__init__()
+            self.gate_loss_fn = gate_loss_fn
+            self.command_loss_fn = command_loss_fn
+            self.command_loss_weight = Tensor(float(command_loss_weight), ms.float32)
+            self.reduce_mean = ops.ReduceMean(keep_dims=False)
+            self.reduce_sum = ops.ReduceSum(keep_dims=False)
+            self.cast = ops.Cast()
+            self.maximum = ops.Maximum()
+            self.zeros_like = ops.ZerosLike()
+            self.float_one = Tensor(1.0, ms.float32)
+            self.int_zero = Tensor(0, ms.int32)
+
+        def construct(self, outputs, labels):
+            gate_logits, command_logits = outputs
+            gate_labels = self.cast(labels > self.int_zero, ms.int32)
+            gate_loss = self.reduce_mean(self.gate_loss_fn(gate_logits, gate_labels))
+
+            command_labels = ops.maximum(labels - 1, self.zeros_like(labels))
+            command_losses = self.command_loss_fn(command_logits, command_labels)
+            command_mask = self.cast(labels > self.int_zero, ms.float32)
+            denom = self.maximum(self.reduce_sum(command_mask), self.float_one)
+            command_loss = self.reduce_sum(command_losses * command_mask) / denom
+            return gate_loss + self.command_loss_weight * command_loss
 
     class EventWithLossCell(nn.Cell):
         def __init__(self, backbone, loss_fn):
@@ -112,7 +213,12 @@ def is_encoder_param_name(name: str) -> bool:
 
 
 def is_head_param_name(name: str) -> bool:
-    return str(name).startswith("fusion.")
+    lowered = str(name)
+    return (
+        lowered.startswith("fusion.")
+        or lowered.startswith("gate_head.")
+        or lowered.startswith("command_head.")
+    )
 
 
 def phase_trainable(name: str, phase_name: str, *, unfreeze_last_blocks: bool) -> bool:
@@ -154,6 +260,25 @@ class EventTrainer:
 
     def _build_loss(self, train_labels: np.ndarray):
         loss_type = self.config.loss.type.lower()
+        if is_two_stage_demo3_model(self.model_config.model_type):
+            gate_labels = (np.asarray(train_labels).astype(np.int32) > 0).astype(np.int32)
+            command_labels = np.asarray(train_labels).astype(np.int32)
+            command_labels = command_labels[command_labels > 0] - 1
+            gate_loss_fn = self._build_per_sample_loss(
+                loss_type=loss_type,
+                labels=gate_labels,
+                num_classes=2,
+            )
+            command_loss_fn = self._build_per_sample_loss(
+                loss_type=loss_type,
+                labels=command_labels,
+                num_classes=3,
+            )
+            return TwoStageEventLoss(
+                gate_loss_fn=gate_loss_fn,
+                command_loss_fn=command_loss_fn,
+                command_loss_weight=float(self.model_config.command_loss_weight),
+            )
         if loss_type in {"ce", "cross_entropy"}:
             if self.config.label_smoothing > 0:
                 return LabelSmoothingCrossEntropy(self.num_classes, self.config.label_smoothing)
@@ -165,6 +290,27 @@ class EventTrainer:
                 train_labels, self.num_classes, beta=self.config.loss.class_balance_beta
             )
             return FocalLoss(self.num_classes, gamma=self.config.loss.focal_gamma, class_weights=Tensor(weights, ms.float32))
+        raise ValueError(f"Unsupported loss type: {self.config.loss.type}")
+
+    def _build_per_sample_loss(self, *, loss_type: str, labels: np.ndarray, num_classes: int):
+        if loss_type in {"ce", "cross_entropy"}:
+            return PerSampleCrossEntropyLoss(num_classes, smoothing=self.config.label_smoothing)
+        if loss_type == "focal":
+            return PerSampleFocalLoss(num_classes, gamma=self.config.loss.focal_gamma, class_weights=None)
+        if loss_type in {"cb_focal", "class_balanced_focal"}:
+            if labels.size == 0:
+                weights = np.ones(num_classes, dtype=np.float32)
+            else:
+                weights = compute_class_balanced_weights(
+                    labels,
+                    num_classes,
+                    beta=self.config.loss.class_balance_beta,
+                )
+            return PerSampleFocalLoss(
+                num_classes,
+                gamma=self.config.loss.focal_gamma,
+                class_weights=Tensor(weights, ms.float32),
+            )
         raise ValueError(f"Unsupported loss type: {self.config.loss.type}")
 
     def _build_lr(self, steps_per_epoch: int, *, epochs: int, lr_scale: float = 1.0) -> List[float]:
@@ -288,11 +434,11 @@ class EventTrainer:
         gts: List[np.ndarray] = []
         try:
             for emg, imu, label in dataset.create_tuple_iterator():
-                logits = self.model(emg, imu)
-                loss = self.loss_fn_ce(logits, label)
+                output = self.model(emg, imu)
+                loss = self.loss_fn(output, label)
                 losses.append(float(loss.asnumpy()))
-                pred = _argmax(logits).asnumpy()
-                preds.append(pred.astype(np.int32))
+                pred = _predict_labels_from_output(output, model_type=self.model_config.model_type)
+                preds.append(pred)
                 gts.append(label.asnumpy().astype(np.int32))
         finally:
             self.model.set_train(prev_training)
@@ -370,8 +516,8 @@ class EventTrainer:
                 for emg, imu, label in dataset.create_tuple_iterator():
                     loss = self.train_step(emg, imu, label)
                     train_losses.append(float(loss.asnumpy()))
-                    logits = self.model(emg, imu)
-                    train_preds.append(_argmax(logits).asnumpy().astype(np.int32))
+                    output = self.model(emg, imu)
+                    train_preds.append(_predict_labels_from_output(output, model_type=self.model_config.model_type))
                     train_gts.append(label.asnumpy().astype(np.int32))
                     if self._ema is not None:
                         self._ema.update(self.model)

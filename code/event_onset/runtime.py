@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, deque
 from dataclasses import dataclass
-from typing import Callable, Deque, Optional, Sequence
+from typing import Any, Callable, Deque, Optional, Sequence
 
 import numpy as np
 
@@ -97,25 +97,37 @@ class EventRuntimeStateMachine:
         current_state_confidence: float,
         top2_confidence: float,
         now_ms: float,
+        gate_confidence: float | None = None,
+        command_confidence: float | None = None,
     ) -> bool:
         if predicted_label not in self.action_labels:
             return False
 
+        if gate_confidence is not None:
+            gate_threshold = self.inference_config.gate_confidence_threshold
+            if gate_threshold is None:
+                gate_threshold = float(self.inference_config.confidence_threshold)
+            if float(gate_confidence) < float(gate_threshold):
+                return False
+
         switching = self.current_label in self.action_labels and predicted_label != self.current_label
         threshold = self._class_threshold(predicted_label)
+        if self.inference_config.command_confidence_threshold is not None:
+            threshold = max(float(threshold), float(self.inference_config.command_confidence_threshold))
         if switching:
             threshold += float(self.inference_config.switch_confidence_boost)
-        if confidence < threshold:
+        decision_confidence = float(command_confidence) if command_confidence is not None else float(confidence)
+        if decision_confidence < threshold:
             return False
 
-        margin_to_top2 = float(confidence) - float(top2_confidence)
+        margin_to_top2 = float(decision_confidence) - float(top2_confidence)
         if margin_to_top2 < float(self.inference_config.activation_margin_threshold):
             return False
 
         if switching:
             if (now_ms - self._last_transition_ms) < float(self.runtime_config.post_transition_lock_ms):
                 return False
-            margin_to_current = float(confidence) - float(current_state_confidence)
+            margin_to_current = float(decision_confidence) - float(current_state_confidence)
             if margin_to_current < float(self.inference_config.switch_margin_threshold):
                 return False
         return True
@@ -129,6 +141,8 @@ class EventRuntimeStateMachine:
         *,
         current_state_confidence: float = 0.0,
         top2_confidence: float = 0.0,
+        gate_confidence: float | None = None,
+        command_confidence: float | None = None,
     ) -> RuntimeDecision:
         now_ms = float(now_ms)
         active_event = self._accept_action_event(
@@ -137,6 +151,8 @@ class EventRuntimeStateMachine:
             current_state_confidence=float(current_state_confidence),
             top2_confidence=float(top2_confidence),
             now_ms=now_ms,
+            gate_confidence=gate_confidence,
+            command_confidence=command_confidence,
         )
         if active_event:
             last_active = next(
@@ -269,10 +285,12 @@ class EventOnsetController:
         class_names: Sequence[str],
         label_to_state: dict[int, GestureType],
         predict_proba: Callable[[np.ndarray, np.ndarray], np.ndarray],
+        predict_detail: Callable[[np.ndarray, np.ndarray], Any] | None = None,
         actuator=None,
     ):
         self.data_config = data_config
         self.predict_proba = predict_proba
+        self.predict_detail = predict_detail
         self.actuator = actuator
         self.extractor = EventFeatureExtractor(data_config)
         self.state_machine = EventRuntimeStateMachine(
@@ -312,13 +330,48 @@ class EventOnsetController:
             return None
         matrix = np.asarray(self._buffer, dtype=np.float32)[-context:]
         emg_feature, imu_feature, energy = self.extractor.build_inputs(matrix)
-        probs = np.asarray(self.predict_proba(emg_feature, imu_feature), dtype=np.float32)
-        predicted_label = int(np.argmax(probs))
-        confidence = float(np.max(probs))
-        sorted_probs = np.sort(probs)[::-1]
-        top2_confidence = float(sorted_probs[1]) if sorted_probs.size > 1 else 0.0
+        detail = self.predict_detail(emg_feature, imu_feature) if self.predict_detail is not None else None
+        probs = (
+            np.asarray(detail.public_probs, dtype=np.float32)
+            if detail is not None
+            else np.asarray(self.predict_proba(emg_feature, imu_feature), dtype=np.float32)
+        )
+        gate_confidence = None
+        command_confidence = None
+        if detail is not None and getattr(detail, "gate_probs", None) is not None and getattr(detail, "command_probs", None) is not None:
+            gate_probs = np.asarray(detail.gate_probs, dtype=np.float32)
+            command_probs = np.asarray(detail.command_probs, dtype=np.float32)
+            gate_confidence = float(gate_probs[1]) if gate_probs.shape[0] > 1 else None
+            if gate_confidence is None:
+                predicted_label = 0
+                confidence = float(probs[0]) if probs.size else 0.0
+                top2_confidence = 0.0
+            else:
+                gate_threshold = self.state_machine.inference_config.gate_confidence_threshold
+                if gate_threshold is None:
+                    gate_threshold = float(self.state_machine.inference_config.confidence_threshold)
+                if float(gate_confidence) < float(gate_threshold):
+                    predicted_label = 0
+                    confidence = float(probs[0]) if probs.size else 0.0
+                    top2_confidence = 0.0
+                else:
+                    predicted_label = 1 + int(np.argmax(command_probs))
+                    command_confidence = float(np.max(command_probs))
+                    confidence = float(command_confidence)
+                    sorted_command = np.sort(command_probs)[::-1]
+                    top2_confidence = float(sorted_command[1]) if sorted_command.size > 1 else 0.0
+        else:
+            predicted_label = int(np.argmax(probs))
+            confidence = float(np.max(probs))
+            sorted_probs = np.sort(probs)[::-1]
+            top2_confidence = float(sorted_probs[1]) if sorted_probs.size > 1 else 0.0
         current_label = int(self.state_machine.current_label)
-        current_state_confidence = float(probs[current_label]) if current_label < probs.shape[0] else 0.0
+        if command_confidence is not None and detail is not None and getattr(detail, "command_probs", None) is not None:
+            command_probs = np.asarray(detail.command_probs, dtype=np.float32)
+            command_index = current_label - 1
+            current_state_confidence = float(command_probs[command_index]) if command_index >= 0 and command_index < command_probs.shape[0] else 0.0
+        else:
+            current_state_confidence = float(probs[current_label]) if current_label < probs.shape[0] else 0.0
         now_ms = float(self._processed_samples) * 1000.0 / float(self.data_config.device_sampling_rate_hz)
         decision = self.state_machine.update(
             predicted_label,
@@ -327,6 +380,8 @@ class EventOnsetController:
             now_ms,
             current_state_confidence=current_state_confidence,
             top2_confidence=top2_confidence,
+            gate_confidence=gate_confidence,
+            command_confidence=command_confidence,
         )
         if decision.changed and self.actuator is not None:
             self.actuator.execute_gesture(decision.state)

@@ -1,0 +1,77 @@
+training_config: configs/training_event_onset_demo3_two_stage.yaml
+checkpoint_path: checkpoints/event_onset_best.ckpt
+model_path: models/event_onset.mindir
+model_metadata_path: models/event_onset.model_metadata.json
+actuation_mapping_path: configs/event_actuation_mapping_demo3_latch.yaml
+
+data:
+  label_mode: event_onset
+  capture_mode_filter: event_onset
+  split_mode: grouped_file
+  split_manifest_path: artifacts/splits/s2_relax12_demo3_seed42_v2.json
+  recordings_manifest_path: s2_train_manifest_relax12_demo3.csv
+  target_db5_keys: [TENSE_OPEN, THUMB_UP, WRIST_CW]
+  device_sampling_rate_hz: 500
+  imu_sampling_rate_hz: 50
+  clip_duration_ms: 1200
+  pre_roll_ms: 400
+  top_k_windows_per_clip: 2
+  idle_top_k_windows_per_clip: 4
+  use_imu: true
+  feature:
+    context_window_ms: 240
+    window_step_ms: 20
+    emg_stft_window: 64
+    emg_stft_hop: 24
+    emg_n_fft: 96
+    emg_freq_bins: 24
+    imu_resample_steps: 16
+    imu_input_dim: 6
+    imu_motion_std_max: 2.5
+  quality_filter:
+    enabled: true
+    energy_min: 2.5
+    clip_ratio_max: 0.08
+    saturation_abs: 126.0
+    static_std_max: 0.5
+
+inference:
+  confidence_threshold: 0.82
+  gate_confidence_threshold: 0.86
+  command_confidence_threshold: 0.80
+  per_class_confidence_thresholds:
+    TENSE_OPEN: 0.78
+    THUMB_UP: 0.82
+    WRIST_CW: 0.84
+  vote_window: 3
+  vote_min_count: 2
+  activation_margin_threshold: 0.08
+  switch_confidence_boost: 0.06
+  switch_margin_threshold: 0.12
+
+runtime:
+  idle_release_hold_ms: 86400000
+  min_transition_gap_ms: 120
+  post_transition_lock_ms: 220
+  poll_interval_ms: 10
+  low_energy_release_threshold: 2.5
+  release_mode: command_only
+
+device:
+  target: CPU
+  id: 0
+  sampling_rate: 500
+
+hardware:
+  sensor_mode: armband
+  actuator_mode: pca9685
+  sensor_port: COM4
+  sensor_baudrate: 115200
+  sensor_buffer_size: 2000
+  actuator_i2c_bus: 1
+  actuator_i2c_address: 64
+  actuator_frequency: 50
+  actuator_channels: [0, 1, 2, 3, 4]
+  servo_angle_open: 0.0
+  servo_angle_half: 90.0
+  servo_angle_closed: 180.0
