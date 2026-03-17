@@ -6,6 +6,7 @@ from pathlib import Path
 
 from scripts.train_event_model_90_sprint import (
     _build_neighbor_candidates,
+    _metric_or,
     _model90_split_manifest_path,
     _prepare_split_seeds,
     _reuse_trial_outputs_if_compatible,
@@ -67,6 +68,12 @@ def test_prepare_split_seeds_unions_screen_longrun_and_neighbor() -> None:
     )
 
     assert _prepare_split_seeds(args) == [42, 52, 62]
+
+
+def test_metric_or_preserves_explicit_zero_values() -> None:
+    assert _metric_or({"false_trigger_rate": 0.0}, "false_trigger_rate", default=1.0) == 0.0
+    assert _metric_or({"false_release_rate": "0.0"}, "false_release_rate", default=1.0) == 0.0
+    assert _metric_or({}, "false_release_rate", default=1.0) == 1.0
 
 
 def test_reuse_trial_outputs_requires_matching_context(tmp_path: Path) -> None:

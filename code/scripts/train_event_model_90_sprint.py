@@ -99,8 +99,13 @@ def _write_csv(path: Path, rows: list[dict], fields: list[str]) -> None:
 
 
 def _metric_or(payload: dict, key: str, default: float = 0.0) -> float:
+    value = payload.get(key, None)
+    if value is None:
+        value = default
+    elif isinstance(value, str) and not value.strip():
+        value = default
     try:
-        return float(payload.get(key, default) or default)
+        return float(value)
     except Exception:
         return float(default)
 
