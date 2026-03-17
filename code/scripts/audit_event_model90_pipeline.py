@@ -296,6 +296,59 @@ def _check_run_artifacts(
                 result.fail(f"{run_id}: run_metadata missing training_device.target")
             if "id" not in device_info:
                 result.fail(f"{run_id}: run_metadata missing training_device.id")
+            recordings_manifest_path = str(run_metadata.get("recordings_manifest_path", "")).strip()
+            if not recordings_manifest_path:
+                result.fail(f"{run_id}: run_metadata missing recordings_manifest_path")
+            else:
+                resolved_recordings_manifest = _resolve_code_path(recordings_manifest_path)
+                if not resolved_recordings_manifest.exists():
+                    result.fail(
+                        f"{run_id}: recordings_manifest_path missing -> {resolved_recordings_manifest}"
+                    )
+
+            split_manifest_path = str(run_metadata.get("split_manifest_path", "")).strip()
+            offline_manifest_path = str(offline.get("manifest_path", "")).strip()
+            if not split_manifest_path:
+                result.fail(f"{run_id}: run_metadata missing split_manifest_path")
+            else:
+                resolved_split_manifest = _resolve_code_path(split_manifest_path)
+                if not resolved_split_manifest.exists():
+                    result.fail(f"{run_id}: split_manifest_path missing -> {resolved_split_manifest}")
+                if offline_manifest_path:
+                    resolved_offline_manifest = _resolve_code_path(offline_manifest_path)
+                    if resolved_split_manifest != resolved_offline_manifest:
+                        result.fail(
+                            f"{run_id}: split manifest mismatch "
+                            f"run_metadata={resolved_split_manifest} vs offline={resolved_offline_manifest}"
+                        )
+
+            quality_report_path = str(run_metadata.get("quality_report", "")).strip()
+            if not quality_report_path:
+                result.fail(f"{run_id}: run_metadata missing quality_report")
+            else:
+                resolved_quality_report = _resolve_code_path(quality_report_path)
+                if not resolved_quality_report.exists():
+                    result.fail(f"{run_id}: quality_report missing -> {resolved_quality_report}")
+
+            evaluation_outputs = dict(run_metadata.get("evaluation_outputs") or {})
+            if not evaluation_outputs:
+                result.fail(f"{run_id}: run_metadata missing evaluation_outputs")
+            else:
+                for name, raw_path in evaluation_outputs.items():
+                    resolved_output = _resolve_code_path(str(raw_path))
+                    if not resolved_output.exists():
+                        result.fail(f"{run_id}: evaluation output missing {name} -> {resolved_output}")
+
+            class_names = list(run_metadata.get("class_names") or [])
+            if not class_names:
+                result.fail(f"{run_id}: run_metadata missing class_names")
+            elif expected_num_classes > 0 and len(class_names) != int(expected_num_classes):
+                result.fail(
+                    f"{run_id}: class_names count mismatch "
+                    f"(expected={expected_num_classes}, actual={len(class_names)})"
+                )
+            elif len({str(item) for item in class_names}) != len(class_names):
+                result.fail(f"{run_id}: class_names contains duplicates -> {class_names}")
 
     return result
 
@@ -639,6 +692,85 @@ def _assess_goal_and_conclusion(
         },
     }
 
+
+def _categorize_param_failure(param_result: CheckResult) -> tuple[str, str]:
+    issues = [str(item).strip() for item in param_result.issues if str(item).strip()]
+    lowered = [item.lower() for item in issues]
+    if any("missing " in item or "no rows" in item for item in lowered):
+        return (
+            "implementation_bug",
+            "parameter coverage evidence is incomplete, so the pipeline cannot prove the search ran correctly",
+        )
+    return (
+        "hyperparameter_underfit",
+        "the constrained search space is not exhausted, so model quality cannot yet be blamed on data alone",
+    )
+
+
+def _categorize_root_cause(
+    *,
+    design_result: CheckResult,
+    implementation_result: CheckResult,
+    param_result: CheckResult,
+    stability_result: CheckResult,
+    goal_assessment: dict[str, Any],
+) -> dict[str, Any]:
+    if not design_result.passed:
+        return {
+            "root_cause_category": "artifact_contract_bug",
+            "root_cause_summary": "design contract failed before model quality could be evaluated",
+            "root_cause_check": design_result.name,
+            "root_cause_evidence": list(design_result.issues),
+        }
+
+    if not implementation_result.passed:
+        return {
+            "root_cause_category": "implementation_bug",
+            "root_cause_summary": "run artifacts are incomplete or internally inconsistent",
+            "root_cause_check": implementation_result.name,
+            "root_cause_evidence": list(implementation_result.issues),
+        }
+
+    if not stability_result.passed:
+        return {
+            "root_cause_category": "implementation_bug",
+            "root_cause_summary": "evaluation reruns are not stable enough to trust the reported metrics",
+            "root_cause_check": stability_result.name,
+            "root_cause_evidence": list(stability_result.issues),
+        }
+
+    if not param_result.passed:
+        category, summary = _categorize_param_failure(param_result)
+        return {
+            "root_cause_category": category,
+            "root_cause_summary": summary,
+            "root_cause_check": param_result.name,
+            "root_cause_evidence": list(param_result.issues),
+        }
+
+    conclusion = str(goal_assessment.get("conclusion", "")).strip().lower()
+    if conclusion == "target_metrics_achieved":
+        return {
+            "root_cause_category": "none",
+            "root_cause_summary": "target metrics achieved; no blocking root cause remains",
+            "root_cause_check": "",
+            "root_cause_evidence": [],
+        }
+
+    return {
+        "root_cause_category": "data_bottleneck",
+        "root_cause_summary": (
+            "engineering gates are clear and the remaining gap is primarily data quality, "
+            "coverage, or label separability"
+        ),
+        "root_cause_check": "goal_assessment",
+        "root_cause_evidence": [
+            f"development_gate.passed={bool(goal_assessment.get('development_gate', {}).get('passed', False))}",
+            f"demo_gate.passed={bool(goal_assessment.get('demo_gate', {}).get('passed', False))}",
+            f"conclusion={goal_assessment.get('conclusion', '')}",
+        ],
+    }
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit model-line sprint pipeline")
     parser.add_argument("--run_root", default="artifacts/runs")
@@ -767,6 +899,15 @@ def main() -> None:
     report["goal_assessment"] = goal_assessment
     report["data_only_bottleneck"] = bool(goal_assessment.get("data_only_bottleneck", False))
     report["conclusion"] = str(goal_assessment.get("conclusion", "engineering_gates_not_cleared"))
+    report.update(
+        _categorize_root_cause(
+            design_result=design_result,
+            implementation_result=implementation_result,
+            param_result=param_result,
+            stability_result=stability_result,
+            goal_assessment=goal_assessment,
+        )
+    )
 
     if blocking_issues:
         report["status"] = "failed"

@@ -16,9 +16,20 @@ CODE_ROOT = Path(__file__).resolve().parent.parent
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
+from event_onset.config import load_event_training_config
+from event_onset.dataset import EventClipDatasetLoader
+from shared.config import load_config
+from shared.label_modes import get_label_mode_spec
+from training.data.split_strategy import build_manifest, save_manifest
+
 
 DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW,WRIST_CCW"
-DEFAULT_SCREEN_MANIFEST = "artifacts/splits/s2_relax12_4class_seed42_v2.json"
+DEFAULT_SOURCE_RECORDINGS_MANIFEST = "recordings_manifest.csv"
+DEFAULT_PREPARE_SESSION_ID = "s2"
+DEFAULT_PREPARE_TARGET_PER_CLASS = 12
+DEFAULT_PREPARE_RELAX_TARGET_COUNT = 24
+DEFAULT_PREPARE_ACTION_MIN_WINDOWS = 2
+DEFAULT_PREPARE_RELAX_MIN_WINDOWS = 1
 
 
 def _format_cmd(cmd: list[str]) -> str:
@@ -49,8 +60,24 @@ def _parse_float_tokens(raw: str, *, name: str) -> list[float]:
     return [float(token) for token in _parse_tokens(raw, name=name)]
 
 
+def _parse_bool_arg(raw: str | bool) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    lowered = str(raw).strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {raw!r}")
+
+
 def _safe_float_token(value: float) -> str:
     return f"{float(value):.3f}".rstrip("0").rstrip(".").replace("-", "m").replace(".", "p")
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _load_json(path: Path) -> dict:
@@ -78,6 +105,261 @@ def _metric_or(payload: dict, key: str, default: float = 0.0) -> float:
         return float(default)
 
 
+def _resolve_path(raw: str | Path, *, prefer_data_dir: str | Path | None = None) -> Path:
+    path = Path(str(raw).strip())
+    candidates = [path]
+    if not path.is_absolute():
+        if prefer_data_dir is not None:
+            candidates.insert(0, Path(prefer_data_dir) / path)
+        candidates.insert(0, CODE_ROOT / path)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve()
+
+
+def _parse_target_action_keys(raw: str) -> list[str]:
+    keys = [item.strip().upper() for item in str(raw).split(",") if item.strip()]
+    if not keys:
+        raise ValueError("target_db5_keys must contain at least one action key")
+    return keys
+
+
+def _prepare_target_states(args: argparse.Namespace) -> list[str]:
+    return ["RELAX", *_parse_target_action_keys(args.target_db5_keys)]
+
+
+def _training_manifest_for_args(args: argparse.Namespace) -> str:
+    return str(getattr(args, "_prepared_recordings_manifest", "") or args.recordings_manifest)
+
+
+def _prepare_output_manifest_path(args: argparse.Namespace) -> Path:
+    raw = str(getattr(args, "prepare_output_manifest", "") or "").strip()
+    if raw:
+        return _resolve_path(raw, prefer_data_dir=args.data_dir)
+    return _resolve_path(f"{args.run_prefix}_4class_train_manifest.csv", prefer_data_dir=args.data_dir)
+
+
+def _model90_split_manifest_path(args: argparse.Namespace, seed: int) -> Path:
+    explicit = str(getattr(args, "screen_split_manifest", "") or "").strip()
+    if explicit and int(seed) == int(args.screen_split_seed):
+        return _resolve_path(explicit)
+    return _resolve_path(f"artifacts/splits/{args.run_prefix}_4class_seed{int(seed)}_v2.json")
+
+
+def _prepare_split_seeds(args: argparse.Namespace) -> list[int]:
+    seeds = {int(args.screen_split_seed)}
+    for seed in _parse_int_tokens(args.longrun_seeds, name="--longrun_seeds"):
+        seeds.add(int(seed))
+    if int(args.neighbor_split_seed) >= 0:
+        seeds.add(int(args.neighbor_split_seed))
+    return sorted(seeds)
+
+
+def _build_split_manifest_from_recordings(
+    *,
+    training_config: str,
+    data_dir: str,
+    recordings_manifest: str | Path,
+    target_db5_keys: str,
+    split_seed: int,
+    output_path: str | Path,
+) -> dict:
+    _, data_cfg, train_cfg, _ = load_event_training_config(training_config)
+    data_cfg.target_db5_keys = _parse_target_action_keys(target_db5_keys)
+    label_spec = get_label_mode_spec(data_cfg.label_mode, data_cfg.target_db5_keys)
+    loader = EventClipDatasetLoader(data_dir, data_cfg, recordings_manifest_path=recordings_manifest)
+    _, _, labels, source_ids, source_meta = loader.load_all_with_sources(return_metadata=True)
+    manifest = build_manifest(
+        labels,
+        source_ids,
+        seed=int(split_seed),
+        split_mode=data_cfg.split_mode,
+        val_ratio=train_cfg.val_ratio,
+        test_ratio=train_cfg.test_ratio,
+        num_classes=len(label_spec.class_names),
+        class_names=label_spec.class_names,
+        manifest_strategy="v2",
+        source_metadata=source_meta,
+    )
+    saved = save_manifest(manifest, str(output_path))
+    return {
+        "seed": int(split_seed),
+        "path": str(saved),
+        "num_samples": int(manifest.num_samples),
+        "train_indices": int(len(manifest.train_indices)),
+        "val_indices": int(len(manifest.val_indices)),
+        "test_indices": int(len(manifest.test_indices)),
+        "class_distribution": dict(manifest.class_distribution),
+    }
+
+
+def _reuse_trial_outputs_if_compatible(
+    args: argparse.Namespace,
+    *,
+    run_dir: Path,
+    recordings_manifest_path: str,
+    split_manifest_path: str,
+    loss_type: str,
+    base_channels: int,
+    freeze_emg_epochs: int,
+    encoder_lr_ratio: float,
+    pretrained_mode: str,
+) -> bool:
+    offline_summary_path = run_dir / "offline_summary.json"
+    test_metrics_path = run_dir / "evaluation" / "test_metrics.json"
+    control_eval_path = run_dir / "evaluation" / "control_eval_summary.json"
+    overrides_path = run_dir / "config_snapshots" / "effective_overrides.yaml"
+    run_metadata_path = run_dir / "run_metadata.json"
+
+    required = [offline_summary_path, test_metrics_path, overrides_path, run_metadata_path]
+    if not all(path.exists() for path in required):
+        return False
+    if not bool(args.skip_control_eval) and not control_eval_path.exists():
+        return False
+
+    try:
+        offline = _load_json(offline_summary_path)
+        run_metadata = _load_json(run_metadata_path)
+        overrides = load_config(overrides_path)
+    except Exception:
+        return False
+
+    expected_manifest = _resolve_path(recordings_manifest_path, prefer_data_dir=args.data_dir)
+    expected_split = _resolve_path(split_manifest_path)
+    actual_manifest = _resolve_path(str(run_metadata.get("recordings_manifest_path", "")), prefer_data_dir=args.data_dir)
+    actual_split = _resolve_path(str(offline.get("manifest_path", "")))
+    if actual_manifest != expected_manifest:
+        return False
+    if actual_split != expected_split:
+        return False
+
+    model_section = dict(overrides.get("model", {}) or {})
+    train_section = dict(overrides.get("training", {}) or {})
+    device_section = dict(overrides.get("device", {}) or {})
+    if str(train_section.get("loss_type", "")).strip() != str(loss_type):
+        return False
+    if int(model_section.get("base_channels", -1)) != int(base_channels):
+        return False
+    if int(train_section.get("freeze_emg_epochs", -1)) != int(freeze_emg_epochs):
+        return False
+    if abs(float(train_section.get("encoder_lr_ratio", -1.0)) - float(encoder_lr_ratio)) > 1e-9:
+        return False
+    if str(device_section.get("device_target", "")).strip() != str(args.device_target):
+        return False
+    if int(device_section.get("device_id", -1)) != int(args.device_id):
+        return False
+
+    expected_pretrained = str(args.pretrained_emg_checkpoint or "").strip() if str(pretrained_mode).strip().lower() == "on" else ""
+    actual_pretrained = str(model_section.get("pretrained_emg_checkpoint", "") or "").strip()
+    if expected_pretrained:
+        if not actual_pretrained:
+            return False
+        if _resolve_path(actual_pretrained) != _resolve_path(expected_pretrained):
+            return False
+    elif actual_pretrained:
+        return False
+    return True
+
+
+def _stage_prepare(args: argparse.Namespace) -> dict:
+    source_manifest = _resolve_path(args.recordings_manifest, prefer_data_dir=args.data_dir)
+    prepare_dir = _resolve_path(f"artifacts/runs/{args.run_prefix}_prepare")
+    audit_run_id = f"{args.run_prefix}_prepare_audit"
+    prepared_manifest_path = _prepare_output_manifest_path(args)
+    drop_report_path = prepare_dir / "prepare_drop_report.json"
+
+    audit_cmd = [
+        sys.executable,
+        "scripts/audit_event_collection.py",
+        "--config",
+        str(args.training_config),
+        "--data_dir",
+        str(args.data_dir),
+        "--recordings_manifest",
+        str(source_manifest),
+        "--run_root",
+        str(args.run_root),
+        "--run_id",
+        str(audit_run_id),
+    ]
+    _run_checked("prepare:audit_collection", audit_cmd)
+
+    audit_dir = _resolve_path(Path(args.run_root) / audit_run_id)
+    audit_summary_path = audit_dir / "collection_audit_summary.json"
+    audit_details_path = audit_dir / "collection_audit_details.json"
+    audit_summary = _load_json(audit_summary_path)
+    audit_details = _load_json(audit_details_path)
+
+    build_cmd = [
+        sys.executable,
+        "scripts/build_s2_train_manifest.py",
+        "--recordings_manifest",
+        str(source_manifest),
+        "--audit_details_json",
+        str(audit_details_path),
+        "--session_id",
+        str(args.prepare_session_id),
+        "--target_states",
+        ",".join(_prepare_target_states(args)),
+        "--target_per_class",
+        str(int(args.prepare_target_per_class)),
+        "--relax_target_count",
+        str(int(args.prepare_relax_target_count)),
+        "--action_min_selected_windows",
+        str(int(args.prepare_action_min_selected_windows)),
+        "--relax_min_selected_windows",
+        str(int(args.prepare_relax_min_selected_windows)),
+        "--relax_allow_retake_quality",
+        str(bool(args.prepare_relax_allow_retake_quality)).lower(),
+        "--output_manifest",
+        str(prepared_manifest_path),
+        "--output_drop_report",
+        str(drop_report_path),
+    ]
+    _run_checked("prepare:build_manifest", build_cmd)
+
+    drop_report = _load_json(drop_report_path)
+    split_summaries: list[dict] = []
+    for seed in _prepare_split_seeds(args):
+        split_summaries.append(
+            _build_split_manifest_from_recordings(
+                training_config=str(args.training_config),
+                data_dir=str(args.data_dir),
+                recordings_manifest=str(prepared_manifest_path),
+                target_db5_keys=str(args.target_db5_keys),
+                split_seed=int(seed),
+                output_path=_model90_split_manifest_path(args, int(seed)),
+            )
+        )
+
+    summary = {
+        "status": "ok",
+        "stage": "prepare",
+        "run_prefix": str(args.run_prefix),
+        "source_recordings_manifest": str(source_manifest),
+        "prepared_recordings_manifest": str(prepared_manifest_path),
+        "audit_summary_json": str(audit_summary_path),
+        "audit_details_json": str(audit_details_path),
+        "drop_report_json": str(drop_report_path),
+        "target_states": _prepare_target_states(args),
+        "session_id": str(args.prepare_session_id),
+        "target_per_class": int(args.prepare_target_per_class),
+        "relax_target_count": int(args.prepare_relax_target_count),
+        "coverage": dict(drop_report.get("coverage", {})),
+        "counts": dict(drop_report.get("counts", {})),
+        "kept_by_class": dict(drop_report.get("kept_by_class_after_cap", {})),
+        "dropped_by_class": dict(drop_report.get("by_target_dropped", {})),
+        "zero_selected_window_clips": int(audit_summary.get("zero_selected_window_clips", 0) or 0),
+        "split_manifests": split_summaries,
+    }
+    output_path = _resolve_path(f"artifacts/runs/{args.run_prefix}_prepare_summary.json")
+    _write_json(output_path, summary)
+    setattr(args, "_prepared_recordings_manifest", str(prepared_manifest_path))
+    setattr(args, "_prepared_summary_path", str(output_path))
+    return summary
+
+
 def _strict_online_pass(row: dict, *, target_command_success_rate: float, max_false_trigger_rate: float, max_false_release_rate: float) -> bool:
     return bool(
         float(row.get("command_success_rate", 0.0)) >= float(target_command_success_rate)
@@ -101,6 +383,7 @@ def _build_finetune_cmd(
     args: argparse.Namespace,
     *,
     run_id: str,
+    recordings_manifest_path: str,
     split_seed: int,
     split_manifest_path: str,
     loss_type: str | None,
@@ -140,7 +423,7 @@ def _build_finetune_cmd(
         "--data_dir",
         str(args.data_dir),
         "--recordings_manifest",
-        str(args.recordings_manifest),
+        str(recordings_manifest_path),
         "--target_db5_keys",
         str(args.target_db5_keys),
         "--device_target",
@@ -182,6 +465,7 @@ def _build_control_eval_cmd(
     args: argparse.Namespace,
     *,
     run_id: str,
+    recordings_manifest_path: str,
     split_manifest_path: str,
 ) -> list[str]:
     return [
@@ -198,7 +482,7 @@ def _build_control_eval_cmd(
         "--data_dir",
         str(args.data_dir),
         "--recordings_manifest",
-        str(args.recordings_manifest),
+        str(recordings_manifest_path),
         "--split_manifest",
         str(split_manifest_path),
         "--target_db5_keys",
@@ -232,6 +516,7 @@ def _collect_metrics_row(
     row = {
         "stage": str(stage),
         "run_id": str(run_id),
+        "recordings_manifest_path": _training_manifest_for_args(args),
         "split_seed": int(split_seed),
         "split_manifest_path": str(split_manifest_path),
         "loss_type": str(loss_type),
@@ -290,12 +575,24 @@ def _run_single_trial(
     offline_summary_path = run_dir / "offline_summary.json"
     test_metrics_path = run_dir / "evaluation" / "test_metrics.json"
     control_eval_path = run_dir / "evaluation" / "control_eval_summary.json"
+    recordings_manifest_path = _training_manifest_for_args(args)
 
-    has_finetune_outputs = bool(offline_summary_path.exists() and test_metrics_path.exists())
+    has_finetune_outputs = _reuse_trial_outputs_if_compatible(
+        args,
+        run_dir=run_dir,
+        recordings_manifest_path=recordings_manifest_path,
+        split_manifest_path=split_manifest_path,
+        loss_type=loss_type,
+        base_channels=base_channels,
+        freeze_emg_epochs=freeze_emg_epochs,
+        encoder_lr_ratio=encoder_lr_ratio,
+        pretrained_mode=pretrained_mode,
+    )
     if not has_finetune_outputs:
         finetune_cmd = _build_finetune_cmd(
             args,
             run_id=run_id,
+            recordings_manifest_path=recordings_manifest_path,
             split_seed=split_seed,
             split_manifest_path=split_manifest_path,
             loss_type=loss_type,
@@ -319,6 +616,7 @@ def _run_single_trial(
             control_cmd = _build_control_eval_cmd(
                 args,
                 run_id=run_id,
+                recordings_manifest_path=recordings_manifest_path,
                 split_manifest_path=split_manifest_path,
             )
             _run_checked(f"{stage}:control_eval:{run_id}", control_cmd)
@@ -367,12 +665,13 @@ def _screen_candidates(args: argparse.Namespace) -> list[dict]:
 
 def _stage_baseline(args: argparse.Namespace) -> dict:
     run_id = f"{args.run_prefix}_baseline_s{int(args.screen_split_seed)}"
+    split_manifest = str(_model90_split_manifest_path(args, int(args.screen_split_seed)))
     row = _run_single_trial(
         args,
         stage="baseline",
         run_id=run_id,
         split_seed=int(args.screen_split_seed),
-        split_manifest_path=str(args.screen_split_manifest),
+        split_manifest_path=split_manifest,
         loss_type=str(args.baseline_loss_type),
         base_channels=int(args.baseline_base_channels),
         freeze_emg_epochs=int(args.baseline_freeze_emg_epochs),
@@ -399,7 +698,7 @@ def _stage_baseline(args: argparse.Namespace) -> dict:
 def _stage_screen(args: argparse.Namespace) -> dict:
     candidates = _screen_candidates(args)
     rows: list[dict] = []
-    split_manifest = str(args.screen_split_manifest)
+    split_manifest = str(_model90_split_manifest_path(args, int(args.screen_split_seed)))
     for idx, candidate in enumerate(candidates, start=1):
         run_id = (
             f"{args.run_prefix}_scr_{idx:02d}_"
@@ -630,7 +929,7 @@ def _stage_neighbor(args: argparse.Namespace, *, longrun_summary: dict | None = 
     split_seed = int(reference.get("split_seed", args.screen_split_seed))
     if int(args.neighbor_split_seed) >= 0:
         split_seed = int(args.neighbor_split_seed)
-    split_manifest = f"artifacts/splits/s2_relax12_4class_seed{int(split_seed)}_v2.json"
+    split_manifest = str(_model90_split_manifest_path(args, int(split_seed)))
 
     candidates = _build_neighbor_candidates(args, reference=reference)
     rows: list[dict] = []
@@ -722,7 +1021,7 @@ def _stage_longrun(args: argparse.Namespace, *, screen_summary: dict | None = No
     rows: list[dict] = []
     for candidate_rank, candidate in enumerate(top_candidates, start=1):
         for seed in seeds:
-            split_manifest = f"artifacts/splits/s2_relax12_4class_seed{int(seed)}_v2.json"
+            split_manifest = str(_model90_split_manifest_path(args, int(seed)))
             run_id = f"{args.run_prefix}_long_c{candidate_rank}_s{int(seed)}"
             row = _run_single_trial(
                 args,
@@ -881,10 +1180,12 @@ def _stage_audit(args: argparse.Namespace) -> dict:
         str(args.training_config),
         "--runtime_config",
         str(args.runtime_config),
+        "--split_manifest",
+        str(_model90_split_manifest_path(args, int(args.screen_split_seed))),
         "--data_dir",
         str(args.data_dir),
         "--recordings_manifest",
-        str(args.recordings_manifest),
+        str(_training_manifest_for_args(args)),
         "--target_db5_keys",
         str(args.target_db5_keys),
         "--control_backend",
@@ -943,17 +1244,25 @@ def _stage_audit(args: argparse.Namespace) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Model 0.9 sprint orchestration")
-    parser.add_argument("--stage", default="all", choices=["baseline", "screen", "longrun", "neighbor", "tune", "audit", "all"])
+    parser.add_argument("--stage", default="all", choices=["prepare", "baseline", "screen", "longrun", "neighbor", "tune", "audit", "all"])
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_prefix", default="s2_model90")
     parser.add_argument("--training_config", default="configs/training_event_onset_demo_p0.yaml")
     parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
     parser.add_argument("--data_dir", default="../data")
-    parser.add_argument("--recordings_manifest", default="s2_train_manifest_relax12.csv")
+    parser.add_argument("--recordings_manifest", default=DEFAULT_SOURCE_RECORDINGS_MANIFEST)
     parser.add_argument("--target_db5_keys", default=DEFAULT_TARGET_KEYS)
     parser.add_argument("--device_target", default="GPU", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)
     parser.add_argument("--control_backend", default="ckpt", choices=["ckpt", "lite"])
+    parser.add_argument("--skip_prepare", action="store_true")
+    parser.add_argument("--prepare_session_id", default=DEFAULT_PREPARE_SESSION_ID)
+    parser.add_argument("--prepare_target_per_class", type=int, default=DEFAULT_PREPARE_TARGET_PER_CLASS)
+    parser.add_argument("--prepare_relax_target_count", type=int, default=DEFAULT_PREPARE_RELAX_TARGET_COUNT)
+    parser.add_argument("--prepare_action_min_selected_windows", type=int, default=DEFAULT_PREPARE_ACTION_MIN_WINDOWS)
+    parser.add_argument("--prepare_relax_min_selected_windows", type=int, default=DEFAULT_PREPARE_RELAX_MIN_WINDOWS)
+    parser.add_argument("--prepare_relax_allow_retake_quality", type=_parse_bool_arg, default=True)
+    parser.add_argument("--prepare_output_manifest", default="")
     parser.add_argument("--skip_control_eval", action="store_true")
     parser.add_argument("--budget_per_class", type=int, default=0)
     parser.add_argument("--budget_seed", type=int, default=42)
@@ -966,7 +1275,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline_pretrained_mode", default="off", choices=["off", "on"])
 
     parser.add_argument("--screen_split_seed", type=int, default=42)
-    parser.add_argument("--screen_split_manifest", default=DEFAULT_SCREEN_MANIFEST)
+    parser.add_argument("--screen_split_manifest", default="")
     parser.add_argument("--screen_loss_types", default="cross_entropy,cb_focal")
     parser.add_argument("--screen_base_channels", default="16,24")
     parser.add_argument("--screen_freeze_emg_epochs", default="5,8")
@@ -1000,12 +1309,38 @@ def main() -> None:
     last_stage = "init"
     last_cmd = ""
     try:
+        prepare_summary = None
         baseline_summary = None
         screen_summary = None
         longrun_summary = None
         neighbor_summary = None
         tune_summary = None
         audit_summary = None
+
+        if not bool(args.skip_prepare):
+            last_stage = "prepare"
+            prepare_summary = _stage_prepare(args)
+        else:
+            setattr(
+                args,
+                "_prepared_recordings_manifest",
+                str(_resolve_path(args.recordings_manifest, prefer_data_dir=args.data_dir)),
+            )
+
+        if args.stage == "prepare":
+            report = {
+                "status": "ok",
+                "stage": "prepare",
+                "run_prefix": str(args.run_prefix),
+                "artifacts": {
+                    "prepare_summary": str(Path(args.run_root) / f"{args.run_prefix}_prepare_summary.json"),
+                },
+                "prepare_done": bool(prepare_summary),
+            }
+            out = Path(args.run_root) / f"{args.run_prefix}_pipeline_report.json"
+            out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"[MODEL90] pipeline_report={out}", flush=True)
+            return
 
         if args.stage in {"baseline", "all"}:
             last_stage = "baseline"
@@ -1041,6 +1376,7 @@ def main() -> None:
             "stage": str(args.stage),
             "run_prefix": str(args.run_prefix),
             "artifacts": {
+                "prepare_summary": str(Path(args.run_root) / f"{args.run_prefix}_prepare_summary.json"),
                 "baseline_summary": str(Path(args.run_root) / f"{args.run_prefix}_baseline_summary.json"),
                 "screen_summary": str(Path(args.run_root) / f"{args.run_prefix}_screen_summary.json"),
                 "longrun_summary": str(Path(args.run_root) / f"{args.run_prefix}_longrun_summary.json"),
@@ -1048,6 +1384,7 @@ def main() -> None:
                 "tune_summary": str(Path(args.run_root) / f"{args.run_prefix}_tune_summary.json"),
                 "audit_summary": str(Path(args.run_root) / f"{args.run_prefix}_audit_summary.json"),
             },
+            "prepare_done": bool(prepare_summary),
             "baseline_done": bool(baseline_summary),
             "screen_done": bool(screen_summary),
             "longrun_done": bool(longrun_summary),

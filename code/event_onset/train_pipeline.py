@@ -714,6 +714,7 @@ def run_event_training(args) -> None:
             "run_id": run_id,
             "run_dir": str(run_dir),
             "config_path": args.config,
+            "split_manifest_path": str(manifest_path or ""),
             "training_device": {
                 "target": str(getattr(args, "device_target", "CPU")),
                 "id": int(getattr(args, "device_id", 0)),
@@ -722,6 +723,7 @@ def run_event_training(args) -> None:
             "quality_report": str(q_path),
             "training_history": str(history_path),
             "evaluation_outputs": report_paths,
+            "class_names": list(label_spec.class_names),
             "incremental_transfer": incremental_transfer,
             "incremental_command_template": incremental_template,
             "elapsed_minutes": (time.time() - start) / 60.0,

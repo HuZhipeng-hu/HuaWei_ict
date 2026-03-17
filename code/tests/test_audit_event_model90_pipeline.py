@@ -160,3 +160,67 @@ def test_assess_goal_returns_engineering_not_cleared_when_blocked() -> None:
     )
     assert assessment["conclusion"] == "engineering_gates_not_cleared"
     assert assessment["data_only_bottleneck"] is False
+
+
+def test_root_cause_prefers_artifact_contract_bug() -> None:
+    result = audit._categorize_root_cause(
+        design_result=audit.CheckResult(
+            name="design_contract",
+            passed=False,
+            issues=["split manifest missing"],
+        ),
+        implementation_result=audit.CheckResult(name="implementation_artifacts"),
+        param_result=audit.CheckResult(name="param_coverage"),
+        stability_result=audit.CheckResult(name="evaluation_stability"),
+        goal_assessment={"conclusion": "engineering_gates_not_cleared"},
+    )
+    assert result["root_cause_category"] == "artifact_contract_bug"
+    assert result["root_cause_check"] == "design_contract"
+
+
+def test_root_cause_uses_implementation_bug_for_missing_artifacts() -> None:
+    result = audit._categorize_root_cause(
+        design_result=audit.CheckResult(name="design_contract"),
+        implementation_result=audit.CheckResult(
+            name="implementation_artifacts",
+            passed=False,
+            issues=["run_x: missing run_metadata.json"],
+        ),
+        param_result=audit.CheckResult(name="param_coverage"),
+        stability_result=audit.CheckResult(name="evaluation_stability"),
+        goal_assessment={"conclusion": "engineering_gates_not_cleared"},
+    )
+    assert result["root_cause_category"] == "implementation_bug"
+    assert result["root_cause_check"] == "implementation_artifacts"
+
+
+def test_root_cause_uses_hyperparameter_underfit_for_search_gap() -> None:
+    result = audit._categorize_root_cause(
+        design_result=audit.CheckResult(name="design_contract"),
+        implementation_result=audit.CheckResult(name="implementation_artifacts"),
+        param_result=audit.CheckResult(
+            name="param_coverage",
+            passed=False,
+            issues=["neighbor tuning found significant improvement; parameter space is not exhausted"],
+        ),
+        stability_result=audit.CheckResult(name="evaluation_stability"),
+        goal_assessment={"conclusion": "engineering_gates_not_cleared"},
+    )
+    assert result["root_cause_category"] == "hyperparameter_underfit"
+    assert result["root_cause_check"] == "param_coverage"
+
+
+def test_root_cause_uses_data_bottleneck_when_gates_are_clear() -> None:
+    result = audit._categorize_root_cause(
+        design_result=audit.CheckResult(name="design_contract"),
+        implementation_result=audit.CheckResult(name="implementation_artifacts"),
+        param_result=audit.CheckResult(name="param_coverage"),
+        stability_result=audit.CheckResult(name="evaluation_stability"),
+        goal_assessment={
+            "conclusion": "data_bottleneck_only",
+            "development_gate": {"passed": False},
+            "demo_gate": {"passed": False},
+        },
+    )
+    assert result["root_cause_category"] == "data_bottleneck"
+    assert result["root_cause_check"] == "goal_assessment"
