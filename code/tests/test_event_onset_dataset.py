@@ -137,7 +137,7 @@ def test_event_loader_relax_clip_only_produces_idle_samples(tmp_path: Path):
     assert emg.shape[0] == 4
     assert imu.shape[0] == emg.shape[0]
     assert set(labels.tolist()) == {0}
-    assert all(item["target_state"] == "RELAX" for item in metadata)
+    assert all(item["target_state"] == "CONTINUE" for item in metadata)
 
 
 def test_event_loader_filters_low_energy_action_clip(tmp_path: Path):

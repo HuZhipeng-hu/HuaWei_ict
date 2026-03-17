@@ -19,6 +19,7 @@ if str(CODE_ROOT) not in sys.path:
 from event_onset.config import load_event_training_config
 from event_onset.dataset import EventClipDatasetLoader
 from shared.config import load_config
+from shared.event_labels import public_event_labels
 from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import build_manifest, save_manifest
 
@@ -347,7 +348,7 @@ def _stage_prepare(args: argparse.Namespace) -> dict:
         "audit_summary_json": str(audit_summary_path),
         "audit_details_json": str(audit_details_path),
         "drop_report_json": str(drop_report_path),
-        "target_states": _prepare_target_states(args),
+        "target_states": public_event_labels(_prepare_target_states(args)),
         "session_id": str(args.prepare_session_id),
         "target_per_class": int(args.prepare_target_per_class),
         "relax_target_count": int(args.prepare_relax_target_count),
@@ -746,6 +747,8 @@ def _stage_screen(args: argparse.Namespace) -> dict:
         ),
         "rows": rows,
         "top_candidates": top_rows,
+        "best_run_id": str(top_rows[0]["run_id"]) if top_rows else "",
+        "best_rank": 1 if top_rows else 0,
         "targets": {
             "target_command_success_rate": float(args.target_command_success_rate),
             "max_false_trigger_rate": float(args.max_false_trigger_rate),
@@ -824,9 +827,6 @@ def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> 
 
     lr_delta_ratio = max(0.01, float(args.neighbor_lr_delta_ratio))
     freeze_delta = max(1, int(args.neighbor_freeze_delta))
-    loss_types = _parse_tokens(args.screen_loss_types, name="--screen_loss_types")
-    base_channel_space = _parse_int_tokens(args.screen_base_channels, name="--screen_base_channels")
-
     raw_candidates = [
         {
             "variant": "ref",
@@ -869,36 +869,6 @@ def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> 
             "pretrained_mode": pretrained_mode,
         },
     ]
-
-    for candidate_base in base_channel_space:
-        if int(candidate_base) == base_ch:
-            continue
-        raw_candidates.append(
-            {
-                "variant": f"base{int(candidate_base)}",
-                "loss_type": loss_type,
-                "base_channels": int(candidate_base),
-                "freeze_emg_epochs": freeze_ep,
-                "encoder_lr_ratio": enc_lr,
-                "pretrained_mode": pretrained_mode,
-            }
-        )
-        break
-
-    for alt_loss in loss_types:
-        if str(alt_loss) == loss_type:
-            continue
-        raw_candidates.append(
-            {
-                "variant": f"loss_{str(alt_loss)}",
-                "loss_type": str(alt_loss),
-                "base_channels": base_ch,
-                "freeze_emg_epochs": freeze_ep,
-                "encoder_lr_ratio": enc_lr,
-                "pretrained_mode": pretrained_mode,
-            }
-        )
-        break
 
     deduped: list[dict] = []
     seen = set()
@@ -1275,7 +1245,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--baseline_loss_type", default="cross_entropy")
     parser.add_argument("--baseline_base_channels", type=int, default=16)
-    parser.add_argument("--baseline_freeze_emg_epochs", type=int, default=5)
+    parser.add_argument("--baseline_freeze_emg_epochs", type=int, default=6)
     parser.add_argument("--baseline_encoder_lr_ratio", type=float, default=0.3)
     parser.add_argument("--baseline_pretrained_mode", default="off", choices=["off", "on"])
 
@@ -1283,9 +1253,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screen_split_manifest", default="")
     parser.add_argument("--screen_loss_types", default="cross_entropy,cb_focal")
     parser.add_argument("--screen_base_channels", default="16,24")
-    parser.add_argument("--screen_freeze_emg_epochs", default="5,8")
-    parser.add_argument("--screen_encoder_lr_ratios", default="0.3,0.2")
-    parser.add_argument("--screen_pretrained_modes", default="off,on")
+    parser.add_argument("--screen_freeze_emg_epochs", default="6,8,10")
+    parser.add_argument("--screen_encoder_lr_ratios", default="0.24,0.3,0.36")
+    parser.add_argument("--screen_pretrained_modes", default="off")
     parser.add_argument("--topk_for_longrun", type=int, default=2)
     parser.add_argument("--longrun_seeds", default="42,52,62")
     parser.add_argument("--neighbor_lr_delta_ratio", type=float, default=0.2)

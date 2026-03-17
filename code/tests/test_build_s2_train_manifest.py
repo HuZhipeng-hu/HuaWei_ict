@@ -9,7 +9,7 @@ from scripts.build_s2_train_manifest import (
 
 def test_parse_target_states_defaults_when_empty() -> None:
     states = _parse_target_states("")
-    assert "RELAX" in states
+    assert "CONTINUE" in states
     assert "TENSE_OPEN" in states
 
 

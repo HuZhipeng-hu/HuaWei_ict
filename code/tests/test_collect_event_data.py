@@ -59,12 +59,14 @@ def test_resolve_output_paths_accepts_manual_relpath(tmp_path: Path):
 
 def test_state_and_token_normalization():
     assert _normalize_state(" wrist_ccw ") == "WRIST_CCW"
+    assert _normalize_state(" continue ") == "CONTINUE"
     assert _sanitize_token(" demo user ") == "demo-user"
 
 
 def test_resolve_duration_sec_defaults_action_and_relax():
     assert _resolve_duration_sec("V_SIGN", None) == 3.0
     assert _resolve_duration_sec("RELAX", None) == 4.0
+    assert _resolve_duration_sec("CONTINUE", None) == 4.0
     assert _resolve_duration_sec("V_SIGN", 2.5) == 2.5
 
 

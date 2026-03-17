@@ -9,6 +9,8 @@ from typing import Dict, List, Sequence
 
 import numpy as np
 
+from shared.event_labels import is_continue_label, public_event_label
+
 
 def confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int) -> np.ndarray:
     cm = np.zeros((num_classes, num_classes), dtype=int)
@@ -24,6 +26,7 @@ def _safe_div(a: float, b: float) -> float:
 def per_class_metrics(cm: np.ndarray, class_names: Sequence[str]) -> List[Dict]:
     metrics = []
     for i, name in enumerate(class_names):
+        display_name = public_event_label(name)
         tp = float(cm[i, i])
         fn = float(cm[i, :].sum() - tp)
         fp = float(cm[:, i].sum() - tp)
@@ -34,7 +37,7 @@ def per_class_metrics(cm: np.ndarray, class_names: Sequence[str]) -> List[Dict]:
         metrics.append(
             {
                 "class_id": i,
-                "class_name": name,
+                "class_name": display_name,
                 "precision": precision,
                 "recall": recall,
                 "f1": f1,
@@ -54,7 +57,7 @@ def _top_confusion_pairs(cm: np.ndarray, class_names: Sequence[str], top_k: int 
                 continue
             pairs.append(
                 {
-                    "pair": [class_names[i], class_names[j]],
+                    "pair": [public_event_label(class_names[i]), public_event_label(class_names[j])],
                     "count": count,
                     "a_to_b": int(cm[i, j]),
                     "b_to_a": int(cm[j, i]),
@@ -90,7 +93,7 @@ def compute_classification_report(
     macro_f1 = float(np.mean([m["f1"] for m in per_class_rows])) if per_class_rows else 0.0
 
     relax_idx = next(
-        (idx for idx, name in enumerate(class_names) if str(name).strip().upper() == "RELAX"),
+        (idx for idx, name in enumerate(class_names) if is_continue_label(name)),
         None,
     )
     if relax_idx is None:

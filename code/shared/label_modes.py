@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+from shared.event_labels import is_continue_label
 from shared.gestures import GESTURE_DEFINITIONS
 
 
@@ -28,7 +29,7 @@ def _normalize_action_keys(action_keys: Sequence[str] | None) -> list[str]:
         key = str(raw or "").strip().upper()
         if not key:
             continue
-        if key == "RELAX":
+        if is_continue_label(key):
             continue
         if key in seen:
             continue

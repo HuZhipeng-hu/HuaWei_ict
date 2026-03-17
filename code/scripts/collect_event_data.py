@@ -17,6 +17,7 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.manifest import upsert_event_manifest
+from shared.event_labels import normalize_event_label_input, public_event_label
 
 STANDARD_CSV_HEADERS = [
     "emg1",
@@ -45,7 +46,7 @@ def _resolve_duration_sec(target_state: str, duration_sec: float | None) -> floa
         if value <= 0:
             raise ValueError("duration_sec must be > 0.")
         return value
-    return 4.0 if target_state == "RELAX" else 3.0
+    return 4.0 if normalize_event_label_input(target_state) == "RELAX" else 3.0
 
 
 def _mean_abs_emg(rows: list[list[float]], start: int, end: int) -> float:
@@ -84,7 +85,7 @@ def _estimate_activation_quality(
     baseline_mean_abs = None
     action_mean_abs = None
 
-    if target_state != "RELAX":
+    if normalize_event_label_input(target_state) != "RELAX":
         pre_roll_sec = max(0.0, float(pre_roll_ms) / 1000.0)
         pre_end = min(len(rows), max(1, int(round(estimated_rate_hz * pre_roll_sec))))
         action_start = pre_end
@@ -133,7 +134,7 @@ def _normalize_state(value: str) -> str:
     state = str(value or "").strip().upper()
     if not state:
         raise ValueError("State cannot be empty.")
-    return state
+    return public_event_label(state)
 
 
 def _frame_to_rows(parsed: dict[str, Any]) -> list[list[float]]:
@@ -228,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data_dir", default="../data", help="Output data root.")
     parser.add_argument("--recordings_manifest", default="recordings_manifest.csv")
     parser.add_argument("--target_state", required=True, help="Target action label, e.g. V_SIGN / WRIST_CW.")
-    parser.add_argument("--start_state", default="RELAX", help="Start state label.")
+    parser.add_argument("--start_state", default="CONTINUE", help="Start state label.")
     parser.add_argument("--capture_mode", default="event_onset")
     parser.add_argument("--user_id", default="demo_user")
     parser.add_argument("--session_id", default="s1")
@@ -238,7 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--duration_sec",
         type=float,
         default=None,
-        help="Total clip length. Default: action=3s, RELAX=4s.",
+        help="Total clip length. Default: action=3s, CONTINUE/RELAX=4s.",
     )
     parser.add_argument("--pre_roll_ms", type=int, default=400)
     parser.add_argument(
@@ -303,28 +304,28 @@ def main() -> None:
         f"[COLLECT] start port={args.port} baudrate={int(args.baudrate)} "
         f"duration_sec={float(duration_sec):.2f} target_state={target_state}"
     )
-    if target_state == "RELAX":
-        print("[COLLECT] protocol: keep RELAX for the full clip.")
+    if normalize_event_label_input(target_state) == "RELAX":
+        print("[COLLECT] protocol: keep CONTINUE for the full clip.")
     else:
         print(
-            f"[COLLECT] protocol: keep RELAX for {pre_roll_sec:.2f}s, "
+            f"[COLLECT] protocol: keep CONTINUE for {pre_roll_sec:.2f}s, "
             f"then activate {target_state} strongly for ~{action_window_sec:.2f}s, "
-            "then relax naturally until clip end."
+            "then keep CONTINUE naturally until clip end."
         )
     device.connect()
     try:
         while (time.perf_counter() - started) < float(duration_sec):
             elapsed = time.perf_counter() - started
-            if target_state != "RELAX" and (not action_cue_sent) and elapsed >= pre_roll_sec:
+            if normalize_event_label_input(target_state) != "RELAX" and (not action_cue_sent) and elapsed >= pre_roll_sec:
                 print(f"[COLLECT] cue: ACTION NOW -> {target_state}")
                 action_cue_sent = True
             if (
-                target_state != "RELAX"
+                normalize_event_label_input(target_state) != "RELAX"
                 and action_cue_sent
                 and (not release_cue_sent)
                 and elapsed >= (pre_roll_sec + action_window_sec)
             ):
-                print("[COLLECT] cue: RELEASE -> return to RELAX")
+                print("[COLLECT] cue: RELEASE -> return to CONTINUE")
                 release_cue_sent = True
             frames = device.read_frames()
             if not frames:
@@ -411,7 +412,7 @@ def main() -> None:
         f"[COLLECT] rows={report['rows']} frames={report['frames']} "
         f"emg_packs={report['emg_packs']} elapsed_sec={report['elapsed_sec']}"
     )
-    if target_state != "RELAX":
+    if normalize_event_label_input(target_state) != "RELAX":
         ratio = report.get("activation_ratio")
         status = report.get("quality_status")
         reasons = ",".join(report.get("quality_reasons") or []) or "none"

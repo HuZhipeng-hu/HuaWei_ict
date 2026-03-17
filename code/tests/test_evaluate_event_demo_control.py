@@ -73,7 +73,7 @@ def test_control_metrics_treats_release_command_as_non_action() -> None:
     assert metrics["total_clip_count"] == 3
     assert metrics["action_clip_count"] == 1
     assert metrics["release_command_clip_count"] == 1
-    assert metrics["relax_clip_count"] == 1
+    assert metrics["continue_clip_count"] == 1
     assert metrics["command_success_rate"] == 1.0
     assert metrics["false_release_rate"] == 0.0
     assert metrics["false_trigger_rate"] == 0.0

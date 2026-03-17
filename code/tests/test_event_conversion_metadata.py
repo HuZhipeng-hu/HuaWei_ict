@@ -25,7 +25,7 @@ def test_event_conversion_metadata_schema_roundtrip(tmp_path: Path):
     assert metadata is not None
     assert metadata.inputs["emg"] == (1, 8, 24, 3)
     assert metadata.inputs["imu"] == (1, 6, 16)
-    assert metadata.class_names == ("RELAX", "FIST", "PINCH")
+    assert metadata.class_names == ("CONTINUE", "FIST", "PINCH")
 
 
 def test_ensure_checkpoint_readable_checks_missing_and_empty(tmp_path: Path) -> None:

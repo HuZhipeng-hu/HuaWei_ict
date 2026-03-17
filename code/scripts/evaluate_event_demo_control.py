@@ -21,6 +21,7 @@ from event_onset.dataset import EventClipDatasetLoader
 from event_onset.inference import EventPredictor
 from event_onset.runtime import EventOnsetController
 from shared.config import load_config
+from shared.event_labels import normalize_event_label_input, public_event_labels
 from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
@@ -96,18 +97,18 @@ def _validate_runtime_class_contract(
     mapping_by_name: dict[str, str],
     metadata,
 ) -> None:
-    normalized_expected = [str(name).strip().upper() for name in expected_class_names]
+    normalized_expected = [normalize_event_label_input(name) for name in expected_class_names]
     if int(model_num_classes) != len(normalized_expected):
         raise ValueError(
             f"model.num_classes={model_num_classes} mismatches expected labels={len(normalized_expected)} "
-            f"({normalized_expected})"
+            f"({public_event_labels(normalized_expected)})"
         )
 
-    mapping_keys = sorted(str(key).strip().upper() for key in mapping_by_name.keys())
+    mapping_keys = sorted(normalize_event_label_input(key) for key in mapping_by_name.keys())
     if mapping_keys != sorted(normalized_expected):
         raise ValueError(
-            f"Actuation mapping keys mismatch expected classes. mapping_keys={mapping_keys}, "
-            f"expected={sorted(normalized_expected)}"
+            f"Actuation mapping keys mismatch expected classes. mapping_keys={public_event_labels(mapping_keys)}, "
+            f"expected={public_event_labels(sorted(normalized_expected))}"
         )
 
     if metadata is None:
@@ -115,7 +116,7 @@ def _validate_runtime_class_contract(
             raise ValueError("Lite backend requires model metadata with class_names for strict runtime validation.")
         return
 
-    metadata_class_names = [str(name).strip().upper() for name in metadata.class_names]
+    metadata_class_names = [normalize_event_label_input(name) for name in metadata.class_names]
     if not metadata_class_names:
         if backend == "lite":
             raise ValueError("Lite backend metadata must include non-empty class_names.")
@@ -123,7 +124,7 @@ def _validate_runtime_class_contract(
     if metadata_class_names != normalized_expected:
         raise ValueError(
             "Runtime class order mismatch between config and model metadata: "
-            f"config={normalized_expected}, metadata={metadata_class_names}"
+            f"config={public_event_labels(normalized_expected)}, metadata={public_event_labels(metadata_class_names)}"
         )
 
 
@@ -169,7 +170,7 @@ def _compute_sanity_flags(*, command_success_rate: float, false_trigger_rate: fl
 
 
 def _derive_release_command_labels(*, label_to_state: dict[int, object], relax_label: int = 0) -> set[int]:
-    """Return non-RELAX label ids that are mapped to RELAX actuator state."""
+    """Return non-CONTINUE label ids that map back to the CONTINUE/RELAX actuator state."""
     relax_state = label_to_state[int(relax_label)]
     return {
         int(label)
@@ -197,7 +198,7 @@ def _evaluate_control_metrics(
 
     total = 0
     action_total = 0
-    relax_total = 0
+    continue_total = 0
     release_command_total = 0
     command_success = 0
     false_release = 0
@@ -225,7 +226,7 @@ def _evaluate_control_metrics(
 
         total += 1
         if target_label == 0:
-            relax_total += 1
+            continue_total += 1
             triggered_action = any(step.decision.state in action_states for step in transitions)
             success = (not triggered_action) and (controller.current_state == relax_state)
             if triggered_action:
@@ -273,7 +274,7 @@ def _evaluate_control_metrics(
     return {
         "total_clip_count": int(total),
         "action_clip_count": int(action_total),
-        "relax_clip_count": int(relax_total),
+        "continue_clip_count": int(continue_total),
         "release_command_clip_count": int(release_command_total),
         "command_success_rate": float(command_success / total) if total else 0.0,
         "false_release_rate": float(false_release / action_total) if action_total else 0.0,
@@ -396,7 +397,7 @@ def _run(args: argparse.Namespace) -> Path:
         "sanity_flags": sanity_flags,
         "total_clip_count": int(control["total_clip_count"]),
         "action_clip_count": int(control["action_clip_count"]),
-        "relax_clip_count": int(control["relax_clip_count"]),
+        "continue_clip_count": int(control["continue_clip_count"]),
         "release_command_clip_count": int(control["release_command_clip_count"]),
         "target_db5_keys": list(target_keys),
         "mapping": mapping_by_name,

@@ -15,9 +15,10 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from scripts.collect_event_data_continuous import _evaluate_collection_gate
+from shared.event_labels import normalize_event_label_input, public_event_label
 
 DEFAULT_TARGET_STATES = [
-    "RELAX",
+    "CONTINUE",
     "TENSE_OPEN",
     "V_SIGN",
     "OK_SIGN",
@@ -30,8 +31,12 @@ DEFAULT_TARGET_STATES = [
 def _parse_target_states(raw: str | None) -> list[str]:
     if not str(raw or "").strip():
         return list(DEFAULT_TARGET_STATES)
-    parsed = [item.strip().upper() for item in str(raw).split(",") if item.strip()]
-    return parsed or list(DEFAULT_TARGET_STATES)
+    parsed = [normalize_event_label_input(item) for item in str(raw).split(",") if item.strip()]
+    return public_event_labels(parsed) if parsed else list(DEFAULT_TARGET_STATES)
+
+
+def public_event_labels(values: list[str]) -> list[str]:
+    return [public_event_label(value) for value in values]
 
 
 def _latest_slice_report_by_state(stream_root: Path) -> dict[str, Path]:
@@ -73,14 +78,15 @@ def main() -> None:
 
     target_states = _parse_target_states(args.target_states)
     session_id = str(args.session_id).strip()
+    target_state_set = {normalize_event_label_input(state) for state in target_states}
     rows = list(csv.DictReader(open(manifest_path, "r", encoding="utf-8-sig", newline="")))
     filtered = [
         row
         for row in rows
         if str(row.get("session_id", "")).strip() == session_id
-        and str(row.get("target_state", "")).strip().upper() in set(target_states)
+        and normalize_event_label_input(row.get("target_state", "")) in target_state_set
     ]
-    by_state = Counter(str(row.get("target_state", "")).strip().upper() for row in filtered)
+    by_state = Counter(public_event_label(row.get("target_state", "")) for row in filtered)
     coverage = {
         state: {
             "target": int(args.target_per_class),
@@ -93,7 +99,7 @@ def main() -> None:
     latest_reports = _latest_slice_report_by_state(streams_root)
     gate_by_state: dict[str, dict[str, Any]] = {}
     for state in target_states:
-        if state == "RELAX":
+        if normalize_event_label_input(state) == "RELAX":
             continue
         report_path = latest_reports.get(state)
         if report_path is None:

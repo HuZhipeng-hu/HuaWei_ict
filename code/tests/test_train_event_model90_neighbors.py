@@ -17,8 +17,6 @@ def test_build_neighbor_candidates_has_reference_and_unique_grid() -> None:
     args = SimpleNamespace(
         neighbor_lr_delta_ratio=0.2,
         neighbor_freeze_delta=2,
-        screen_loss_types="cross_entropy,cb_focal",
-        screen_base_channels="16,24",
     )
     reference = {
         "loss_type": "cross_entropy",
@@ -29,9 +27,9 @@ def test_build_neighbor_candidates_has_reference_and_unique_grid() -> None:
     }
 
     rows = _build_neighbor_candidates(args, reference=reference)
-    assert any(row["variant"] == "ref" for row in rows)
-    assert any(str(row["loss_type"]) == "cb_focal" for row in rows)
-    assert any(int(row["base_channels"]) == 24 for row in rows)
+    assert [row["variant"] for row in rows] == ["ref", "lr_down", "lr_up", "freeze_down", "freeze_up"]
+    assert all(str(row["loss_type"]) == "cross_entropy" for row in rows)
+    assert all(int(row["base_channels"]) == 16 for row in rows)
 
     keys = {
         (

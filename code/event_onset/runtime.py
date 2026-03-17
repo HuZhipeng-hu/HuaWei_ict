@@ -9,6 +9,7 @@ from typing import Callable, Deque, Optional, Sequence
 import numpy as np
 
 from event_onset.config import EventDataConfig, EventInferenceConfig, EventRuntimeBehaviorConfig
+from shared.event_labels import public_event_label
 from shared.gestures import GestureType
 from shared.preprocessing import PreprocessPipeline
 
@@ -47,7 +48,7 @@ class EventRuntimeStateMachine:
         if not class_names:
             raise ValueError("class_names must not be empty")
         if 0 not in label_to_state:
-            raise ValueError("label_to_state must contain label 0 (RELAX).")
+            raise ValueError("label_to_state must contain label 0 (CONTINUE/RELAX).")
 
         self.inference_config = inference_config
         self.runtime_config = runtime_config
@@ -70,7 +71,7 @@ class EventRuntimeStateMachine:
 
     def _class_name(self, label: int) -> str:
         if 0 <= int(label) < len(self.class_names):
-            return self.class_names[int(label)]
+            return public_event_label(self.class_names[int(label)])
         return f"CLASS_{int(label)}"
 
     def _class_threshold(self, label: int) -> float:

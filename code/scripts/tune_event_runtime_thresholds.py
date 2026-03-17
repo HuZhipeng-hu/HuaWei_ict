@@ -24,6 +24,7 @@ from event_onset.dataset import EventClipDatasetLoader
 from event_onset.inference import EventPredictor
 from event_onset.runtime import EventOnsetController
 from shared.config import load_config
+from shared.event_labels import normalize_event_label_input, public_event_labels
 from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
@@ -138,18 +139,18 @@ def _validate_runtime_class_contract(
     mapping_by_name: dict[str, str],
     metadata,
 ) -> None:
-    normalized_expected = [str(name).strip().upper() for name in expected_class_names]
+    normalized_expected = [normalize_event_label_input(name) for name in expected_class_names]
     if int(model_num_classes) != len(normalized_expected):
         raise ValueError(
             f"model.num_classes={model_num_classes} mismatches expected labels={len(normalized_expected)} "
-            f"({normalized_expected})"
+            f"({public_event_labels(normalized_expected)})"
         )
 
-    mapping_keys = sorted(str(key).strip().upper() for key in mapping_by_name.keys())
+    mapping_keys = sorted(normalize_event_label_input(key) for key in mapping_by_name.keys())
     if mapping_keys != sorted(normalized_expected):
         raise ValueError(
-            f"Actuation mapping keys mismatch expected classes. mapping_keys={mapping_keys}, "
-            f"expected={sorted(normalized_expected)}"
+            f"Actuation mapping keys mismatch expected classes. mapping_keys={public_event_labels(mapping_keys)}, "
+            f"expected={public_event_labels(sorted(normalized_expected))}"
         )
 
     if metadata is None:
@@ -157,7 +158,7 @@ def _validate_runtime_class_contract(
             raise ValueError("Lite backend requires model metadata with class_names for strict runtime validation.")
         return
 
-    metadata_class_names = [str(name).strip().upper() for name in metadata.class_names]
+    metadata_class_names = [normalize_event_label_input(name) for name in metadata.class_names]
     if not metadata_class_names:
         if backend == "lite":
             raise ValueError("Lite backend metadata must include non-empty class_names.")
@@ -165,7 +166,7 @@ def _validate_runtime_class_contract(
     if metadata_class_names != normalized_expected:
         raise ValueError(
             "Runtime class order mismatch between config and model metadata: "
-            f"config={normalized_expected}, metadata={metadata_class_names}"
+            f"config={public_event_labels(normalized_expected)}, metadata={public_event_labels(metadata_class_names)}"
         )
 
 

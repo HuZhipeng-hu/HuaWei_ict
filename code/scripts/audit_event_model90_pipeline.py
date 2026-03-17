@@ -20,10 +20,11 @@ if str(CODE_ROOT) not in sys.path:
 
 from event_onset.actuation_mapping import load_and_validate_actuation_map
 from event_onset.config import load_event_runtime_config, load_event_training_config
+from shared.event_labels import normalize_event_label_input, public_event_labels
 from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
-TARGET_CLASS_ORDER = ["RELAX", "TENSE_OPEN", "THUMB_UP", "WRIST_CW", "WRIST_CCW"]
+TARGET_CLASS_ORDER = ["CONTINUE", "TENSE_OPEN", "THUMB_UP", "WRIST_CW", "WRIST_CCW"]
 
 
 def _parse_tokens(raw: str) -> list[str]:
@@ -113,11 +114,11 @@ def _check_design_contract(args: argparse.Namespace) -> CheckResult:
         result.fail(f"target_db5_keys mismatch: training={train_keys}, runtime={runtime_keys}")
 
     label_spec = get_label_mode_spec(train_data_cfg.label_mode, train_data_cfg.target_db5_keys)
-    expected_class_names = [str(item).strip().upper() for item in label_spec.class_names]
+    expected_class_names = [normalize_event_label_input(item) for item in label_spec.class_names]
     model_cfg.num_classes = int(len(expected_class_names))
-    if expected_class_names != TARGET_CLASS_ORDER:
+    if public_event_labels(expected_class_names) != TARGET_CLASS_ORDER:
         result.fail(
-            f"label contract mismatch: expected={TARGET_CLASS_ORDER}, actual={expected_class_names}"
+            f"label contract mismatch: expected={TARGET_CLASS_ORDER}, actual={public_event_labels(expected_class_names)}"
         )
 
     label_to_state, mapping_by_name = load_and_validate_actuation_map(
@@ -139,11 +140,11 @@ def _check_design_contract(args: argparse.Namespace) -> CheckResult:
     )
     release_mode = str(runtime_cfg.runtime.release_mode).strip().lower()
     if release_mode == "command_only" and not release_labels:
-        result.fail("release_mode=command_only but no non-RELAX label maps to RELAX actuator state")
+        result.fail("release_mode=command_only but no non-CONTINUE label maps to CONTINUE/RELAX actuator state")
 
     tense_open_idx = expected_class_names.index("TENSE_OPEN") if "TENSE_OPEN" in expected_class_names else -1
     if release_mode == "command_only" and tense_open_idx >= 0 and tense_open_idx not in release_labels:
-        result.fail("release_mode=command_only expects TENSE_OPEN to map to RELAX state")
+        result.fail("release_mode=command_only expects TENSE_OPEN to map to CONTINUE/RELAX state")
 
     split_manifest_raw = str(args.split_manifest or "").strip() or str(train_data_cfg.split_manifest_path)
     split_manifest_path = _resolve_code_path(split_manifest_raw)
@@ -180,7 +181,7 @@ def _check_design_contract(args: argparse.Namespace) -> CheckResult:
             "training_config": str(args.training_config),
             "runtime_config": str(args.runtime_config),
             "split_manifest": str(split_manifest_path),
-            "expected_class_names": expected_class_names,
+            "expected_class_names": public_event_labels(expected_class_names),
             "release_mode": release_mode,
             "release_command_labels": release_labels,
         }
@@ -273,12 +274,12 @@ def _check_run_artifacts(
                     result.fail(f"{run_id}: invalid control metric {metric_name}={control.get(metric_name)!r}")
             total_count = int(control.get("total_clip_count", 0) or 0)
             action_count = int(control.get("action_clip_count", 0) or 0)
-            relax_count = int(control.get("relax_clip_count", 0) or 0)
+            continue_count = int(control.get("continue_clip_count", control.get("relax_clip_count", 0)) or 0)
             release_count = int(control.get("release_command_clip_count", 0) or 0)
-            if total_count > 0 and action_count + relax_count + release_count != total_count:
+            if total_count > 0 and action_count + continue_count + release_count != total_count:
                 result.fail(
                     f"{run_id}: clip counts inconsistent "
-                    f"(action={action_count}, relax={relax_count}, release={release_count}, total={total_count})"
+                    f"(action={action_count}, continue={continue_count}, release={release_count}, total={total_count})"
                 )
         else:
             result.fail(f"{run_id}: missing evaluation/control_eval_summary.json")

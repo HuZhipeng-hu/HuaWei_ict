@@ -17,6 +17,7 @@ if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.manifest import upsert_event_manifest
+from shared.event_labels import normalize_event_label_input, public_event_label
 from scripts.collection_utils import evaluate_recording_quality, load_collection_protocol, write_standard_csv
 
 
@@ -53,7 +54,7 @@ def _normalize_state(value: str) -> str:
     state = str(value or "").strip().upper()
     if not state:
         raise ValueError("State cannot be empty.")
-    return state
+    return public_event_label(state)
 
 
 def _frame_to_rows(parsed: dict[str, Any]) -> list[list[float]]:
@@ -240,7 +241,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default="recordings_manifest.csv")
     parser.add_argument("--target_state", required=True)
-    parser.add_argument("--start_state", default="RELAX")
+    parser.add_argument("--start_state", default="CONTINUE")
     parser.add_argument(
         "--capture_mode",
         default="event_onset",
@@ -292,8 +293,8 @@ def main() -> None:
 
     target_state = _normalize_state(args.target_state)
     start_state = _normalize_state(args.start_state)
-    if target_state == "RELAX":
-        raise ValueError("Continuous auto-slice mode is intended for action labels; use target_state != RELAX.")
+    if normalize_event_label_input(target_state) == "RELAX":
+        raise ValueError("Continuous auto-slice mode is intended for action labels; use target_state != CONTINUE.")
 
     keep_quality = _parse_keep_quality(args.keep_quality)
     preprocess_cfg, quality_filter = load_collection_protocol(args.config)
@@ -318,7 +319,7 @@ def main() -> None:
         f"duration_sec={float(args.duration_sec):.2f} target_state={target_state}"
     )
     print(
-        "[STREAM] protocol: repeat RELAX -> fast strong action burst -> RELAX. "
+        "[STREAM] protocol: repeat CONTINUE -> fast strong action burst -> CONTINUE. "
         "Do not switch to other action labels in this run."
     )
     device.connect()

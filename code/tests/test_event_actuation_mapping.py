@@ -122,3 +122,28 @@ def test_actuation_mapping_allows_tense_open_as_release_to_relax(tmp_path: Path)
     assert label_to_state[0] == GestureType.RELAX
     assert label_to_state[1] == GestureType.RELAX
     assert label_to_state[2] == GestureType.THUMB_UP
+
+
+def test_actuation_mapping_accepts_continue_alias_in_yaml(tmp_path: Path):
+    mapping = tmp_path / "map.yaml"
+    _write_yaml(
+        mapping,
+        "\n".join(
+            [
+                "actuation_map:",
+                "  CONTINUE: CONTINUE",
+                "  TENSE_OPEN: CONTINUE",
+                "  THUMB_UP: THUMB_UP",
+            ]
+        ),
+    )
+    label_to_state, by_name = load_and_validate_actuation_map(
+        mapping,
+        class_names=["RELAX", "TENSE_OPEN", "THUMB_UP"],
+    )
+
+    assert by_name["RELAX"] == "RELAX"
+    assert by_name["TENSE_OPEN"] == "RELAX"
+    assert by_name["THUMB_UP"] == "THUMB_UP"
+    assert label_to_state[0] == GestureType.RELAX
+    assert label_to_state[1] == GestureType.RELAX

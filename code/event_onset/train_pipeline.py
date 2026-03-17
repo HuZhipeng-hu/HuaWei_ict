@@ -23,6 +23,7 @@ from event_onset.evaluate import load_and_evaluate_event
 from event_onset.model import build_event_model
 from event_onset.trainer import EventTrainer
 from ninapro_db5.model import load_emg_encoder_from_db5_checkpoint
+from shared.event_labels import public_event_labels
 from shared.label_modes import get_label_mode_spec
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, dump_yaml, ensure_run_dir
 from training.reporting import save_classification_report
@@ -206,8 +207,8 @@ def _apply_incremental_checkpoint(
             head_bias.set_data(Tensor(expanded_bias, dtype=head_bias.dtype))
             loaded += 1
         expansion_summary = stats.to_dict()
-        expansion_summary["old_class_names"] = old_class_names
-        expansion_summary["new_class_names"] = list(new_class_names)
+        expansion_summary["old_class_names"] = public_event_labels(old_class_names)
+        expansion_summary["new_class_names"] = public_event_labels(new_class_names)
 
     return {
         "loaded": int(loaded),
@@ -723,7 +724,7 @@ def run_event_training(args) -> None:
             "quality_report": str(q_path),
             "training_history": str(history_path),
             "evaluation_outputs": report_paths,
-            "class_names": list(label_spec.class_names),
+            "class_names": public_event_labels(label_spec.class_names),
             "incremental_transfer": incremental_transfer,
             "incremental_command_template": incremental_template,
             "elapsed_minutes": (time.time() - start) / 60.0,

@@ -20,6 +20,7 @@ from event_onset.config import load_event_training_config
 from event_onset.dataset import EventClipDatasetLoader
 from scripts.collection_utils import STANDARD_CSV_HEADERS, evaluate_recording_quality
 from shared.config import PreprocessConfig
+from shared.event_labels import normalize_event_label_input, public_event_label
 
 
 def _read_standard_matrix(path: Path) -> np.ndarray:
@@ -104,7 +105,7 @@ def main() -> None:
         if not rel:
             continue
         csv_path = (data_dir / rel).resolve()
-        target_state = str(row.get("target_state", "")).strip().upper()
+        target_state = normalize_event_label_input(row.get("target_state", ""))
         if not csv_path.exists():
             missing_files.append(rel)
             continue
@@ -131,7 +132,7 @@ def main() -> None:
             anomaly = report.get("channel_anomaly") or {}
             item = {
                 "relative_path": rel,
-                "target_state": target_state,
+                "target_state": public_event_label(target_state),
                 "row_count": row_count,
                 "duration_sec_est": round(duration_sec_est, 3),
                 "quality_status": report.get("quality_status"),
@@ -171,7 +172,7 @@ def main() -> None:
         "config": str(Path(args.config).resolve()),
         "data_dir": str(data_dir),
         "recordings_manifest": str(manifest_path),
-        "label_set_required": ["RELAX", *list(data_cfg.target_db5_keys)],
+        "label_set_required": ["CONTINUE", *list(data_cfg.target_db5_keys)],
         "total_manifest_rows": len(manifest_rows),
         "checked_rows": len(details),
         "missing_files_count": len(missing_files),
@@ -181,10 +182,10 @@ def main() -> None:
         "retake_count": int(categories.get("retake", 0)),
         "zero_selected_window_clips": len(zero_selected),
         "loader_error": loader_error,
-        "by_class_total": dict(by_class_total),
-        "by_class_usable": dict(by_class_usable),
-        "by_class_suspicious": dict(by_class_susp),
-        "by_class_retake": dict(by_class_retake),
+        "by_class_total": {public_event_label(key): value for key, value in by_class_total.items()},
+        "by_class_usable": {public_event_label(key): value for key, value in by_class_usable.items()},
+        "by_class_suspicious": {public_event_label(key): value for key, value in by_class_susp.items()},
+        "by_class_retake": {public_event_label(key): value for key, value in by_class_retake.items()},
     }
 
     out_dir = Path(args.run_root) / args.run_id

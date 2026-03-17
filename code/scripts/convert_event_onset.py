@@ -17,6 +17,7 @@ if str(CODE_ROOT) not in sys.path:
 
 from event_onset.config import load_event_training_config
 from event_onset.model import build_event_model
+from shared.event_labels import public_event_labels
 from shared.label_modes import get_label_mode_spec
 from shared.run_utils import append_csv_row, copy_config_snapshot, dump_json, ensure_run_dir
 from shared.config import load_config
@@ -73,7 +74,7 @@ def _build_model_metadata(
             {"name": "imu", "shape": list(imu_shape), "dtype": "float32"},
         ],
         "output": {"name": "logits", "dtype": "float32"},
-        "class_names": class_names,
+        "class_names": public_event_labels(class_names),
     }
 
 
@@ -104,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Comma-separated action keys, "
-            "e.g. TENSE_OPEN,V_SIGN,OK_SIGN,THUMB_UP,WRIST_CW,WRIST_CCW. RELAX is implicit."
+            "e.g. TENSE_OPEN,V_SIGN,OK_SIGN,THUMB_UP,WRIST_CW,WRIST_CCW. CONTINUE/RELAX is implicit."
         ),
     )
     parser.add_argument("--run_id", default=None)
@@ -196,7 +197,7 @@ def main() -> None:
         model_path=model_path,
         emg_shape=emg_shape,
         imu_shape=imu_shape,
-        class_names=list(label_spec.class_names),
+        class_names=label_spec.class_names,
     )
     metadata_path = Path(metadata_output)
     metadata_path.parent.mkdir(parents=True, exist_ok=True)

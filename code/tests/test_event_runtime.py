@@ -53,7 +53,7 @@ def test_event_runtime_switches_and_holds_until_idle_timeout():
     released = machine.update(0, 0.10, 0.2, 950.0)
     assert released.state == GestureType.RELAX
     assert released.changed is True
-    assert released.emitted_class_name == "RELAX"
+    assert released.emitted_class_name == "CONTINUE"
 
 
 def test_event_runtime_supports_direct_action_to_action_switch():

@@ -20,6 +20,7 @@ from event_onset.config import load_event_runtime_config, load_event_training_co
 from event_onset.actuation_mapping import load_and_validate_actuation_map
 from event_onset.manifest import load_event_manifest_rows
 from shared.config import load_config
+from shared.event_labels import public_event_label
 from shared.label_modes import get_label_mode_spec
 
 @dataclass
@@ -327,7 +328,7 @@ def collect_budget_checks(
         checks.append(
             Check(
                 level,
-                f"budget.estimate.{class_name}",
+                f"budget.estimate.{public_event_label(class_name)}",
                 f"clips={clips}, est_windows={estimated_windows}, selected={selected}",
             )
         )

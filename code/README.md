@@ -1,85 +1,67 @@
-﻿# NeuroGrip Cloud-to-PI Pipeline (Core 4 Chain)
+# NeuroGrip Cloud-to-PI Pipeline (Core 4 Chain)
 
-This repository now uses a single production path:
+This repository now uses a single recommended production path:
 
-- Cloud (Huawei Cloud): pretrain, finetune, convert
-- PI device: runtime inference and actuation only
-- App side (out of scope here): upload wearer data to cloud and return converted model to PI
+- Cloud side: foundation pretrain, wearer finetune, CKPT -> MindIR conversion
+- PI side: runtime inference and actuation only
+- App side: out of scope in this repo
+
+## Recommended Control Contract
+
+This project targets event-driven latched control, not continuous motion mirroring.
+
+- `CONTINUE`: no new command, keep the current prosthesis state latched
+- `TENSE_OPEN`: explicit open/release command
+- `THUMB_UP`, `WRIST_CW`, `WRIST_CCW`, and other enabled action labels: switch the prosthesis to that target state and hold it
+
+The intended user experience is:
+
+1. wearer produces an onset intent
+2. model recognizes the onset class
+3. prosthesis switches to the target gesture
+4. prosthesis keeps that state until a new command arrives
+5. `TENSE_OPEN` explicitly returns the prosthesis to open/release
 
 ## Responsibility Split
 
-### Cloud side (this repo)
-1. DB5 foundation pretraining
-2. Wearer finetuning (using uploaded private clips)
+### Cloud side
+1. Optional DB5 foundation pretraining
+2. Wearer finetuning on private event-onset data
 3. CKPT -> MindIR conversion
 
-### PI side (this repo)
+### PI side
 1. Load MindIR + metadata
 2. Read armband stream
-3. Trigger actuator by predicted class/state
+3. Recognize onset intent and update the latched prosthesis state
 
-### App side (not in this repo)
-1. Upload private finetune data to cloud
-2. Download converted model package and deliver to PI
+### App side
+1. Upload private finetune data
+2. Download converted model package and deliver it to PI
 
-## Core 4 Entrypoints
+## Core Entrypoints
 
 - Pretrain: `scripts/pretrain_db5_repr_method_matrix.py`
 - Finetune: `scripts/finetune_event_onset.py`
 - Convert: `scripts/convert_event_onset.py`
 - Runtime: `scripts/run_event_runtime.py`
 
-Optional dual-track tools (offline compare only):
-- Algo train/export: `scripts/train_event_algo_baseline.py`
-- Model vs Algo A/B: `scripts/evaluate_event_dualtrack.py`
+Optional comparison tools only:
 
-## Cloud Commands
+- Algo baseline export: `scripts/train_event_algo_baseline.py`
+- Model vs algo offline compare: `scripts/evaluate_event_dualtrack.py`
 
-### 1) Pretrain (public DB5 only)
+The optional algo line and DB5 pretrain line are kept for baseline or ablation work. They are not the primary release path.
 
-```bash
-python scripts/pretrain_db5_repr_method_matrix.py \
-  --pretrain_config configs/pretrain_ninapro_db5.yaml \
-  --db5_data_dir ../data_ninaproDB5 \
-  --run_root artifacts/runs \
-  --run_prefix db5_repr_stage2_v1 \
-  --device_target Ascend \
-  --device_id 0 \
-  --fewshot_mode off
-```
+## Wearer Data Collection
 
-### 2) Finetune (wearer private data)
-
-```bash
-python scripts/finetune_event_onset.py \
-  --config configs/training_event_onset.yaml \
-  --data_dir ../data \
-  --recordings_manifest ../data/recordings_manifest.csv \
-  --pretrained_emg_checkpoint <foundation_ckpt_path> \
-  --run_root artifacts/runs \
-  --run_id event_finetune_v1
-```
-
-### 3) Convert to MindIR
-
-```bash
-python scripts/convert_event_onset.py \
-  --config configs/conversion_event_onset.yaml \
-  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
-  --run_root artifacts/runs \
-  --run_id event_convert_v1
-```
-
-## Wearer Data Collection (Live Armband)
-
-Use this to collect one event clip directly from the armband and append `recordings_manifest.csv`:
+Single clip collection from the live armband:
 
 ```bash
 python scripts/collect_event_data.py \
   --data_dir ../data \
   --recordings_manifest recordings_manifest.csv \
-  --target_state V_SIGN \
-  --start_state RELAX \
+  --target_state THUMB_UP \
+  --start_state CONTINUE \
   --user_id demo_user \
   --session_id s1 \
   --device_id armband01 \
@@ -89,17 +71,21 @@ python scripts/collect_event_data.py \
   --baudrate 115200
 ```
 
-Collector cue logic for action labels: keep `RELAX` for ~0.4s, then perform target action quickly and hold ~1.2s, then relax until clip end.
+Cue logic for action labels:
 
-Continuous capture + auto-slice (higher throughput, recommended for manual collection):
+- keep `CONTINUE` for about `0.4s`
+- perform a fast, clear onset toward the target action
+- let the motion settle naturally without trying to maintain a continuous EMG hold
+
+Continuous capture + auto-slice:
 
 ```bash
 python scripts/collect_event_data_continuous.py \
   --config configs/training_event_onset.yaml \
   --data_dir ../data \
   --recordings_manifest recordings_manifest.csv \
-  --target_state V_SIGN \
-  --start_state RELAX \
+  --target_state THUMB_UP \
+  --start_state CONTINUE \
   --user_id demo_user \
   --session_id s1 \
   --device_id armband01 \
@@ -112,11 +98,96 @@ python scripts/collect_event_data_continuous.py \
   --save_stream_csv
 ```
 
-## PI Runtime Command
+## Recommended 4-Action Demo Workflow
+
+The recommended release-candidate path for the 4-action demo line is:
+
+1. collect data
+2. `prepare`
+3. `screen`
+4. `longrun`
+5. `neighbor`
+6. `audit`
+7. run demo
+
+The single entrypoint is:
+
+- `scripts/train_event_model_90_sprint.py`
+
+One-command flow after collecting new data:
+
+```bash
+python scripts/train_event_model_90_sprint.py \
+  --stage all \
+  --device_target Ascend \
+  --device_id 0 \
+  --data_dir ../data \
+  --recordings_manifest recordings_manifest.csv \
+  --run_prefix s2_model90
+```
+
+Prepare-only smoke:
+
+```bash
+python scripts/train_event_model_90_sprint.py \
+  --stage prepare \
+  --device_target CPU \
+  --data_dir ../data \
+  --recordings_manifest recordings_manifest.csv \
+  --run_prefix s2_model90
+```
+
+Current default screen grid is intentionally bounded:
+
+- `loss_type in {cross_entropy, cb_focal}`
+- `base_channels in {16, 24}`
+- `freeze_emg_epochs in {6, 8, 10}`
+- `encoder_lr_ratio in {0.24, 0.30, 0.36}`
+- `pretrained_mode = off`
+
+`neighbor` is verification-only and checks five variants around the best longrun candidate:
+
+- `ref`
+- `lr_down`
+- `lr_up`
+- `freeze_down`
+- `freeze_up`
+
+See `docs/model_90_sprint_runbook.md` for the full release-candidate workflow.
+
+## Finetune and Convert
+
+Wearer finetune:
+
+```bash
+python scripts/finetune_event_onset.py \
+  --config configs/training_event_onset.yaml \
+  --data_dir ../data \
+  --recordings_manifest ../data/recordings_manifest.csv \
+  --pretrained_emg_checkpoint <optional_foundation_ckpt> \
+  --run_root artifacts/runs \
+  --run_id event_finetune_v1
+```
+
+Convert to MindIR:
+
+```bash
+python scripts/convert_event_onset.py \
+  --config configs/conversion_event_onset.yaml \
+  --checkpoint artifacts/runs/event_finetune_v1/checkpoints/event_onset_best.ckpt \
+  --run_root artifacts/runs \
+  --run_id event_convert_v1
+```
+
+Converted metadata now exposes `CONTINUE` as the public background label while remaining backward-compatible with legacy `RELAX` inputs.
+
+## PI Runtime
+
+Recommended demo runtime:
 
 ```bash
 python scripts/run_event_runtime.py \
-  --config configs/runtime_event_onset.yaml \
+  --config configs/runtime_event_onset_demo_latch.yaml \
   --recognizer_backend model \
   --backend lite
 ```
@@ -124,23 +195,19 @@ python scripts/run_event_runtime.py \
 Standalone smoke:
 
 ```bash
-python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --recognizer_backend model --backend lite --standalone --duration_sec 10
-```
-
-Algorithm backend (startup single-select, no runtime switching):
-
-```bash
 python scripts/run_event_runtime.py \
-  --config configs/runtime_event_onset.yaml \
-  --recognizer_backend algo \
-  --algo_model_path artifacts/runs/event_algo_baseline/models/algo_model.json
+  --config configs/runtime_event_onset_demo_latch.yaml \
+  --recognizer_backend model \
+  --backend lite \
+  --standalone \
+  --duration_sec 10
 ```
 
-If selected backend artifact is missing, runtime exits immediately (no fallback).
+If the selected backend artifact is missing, runtime exits immediately. There is no silent fallback.
 
-## Dual-track Offline A/B (same split, same control settings)
+## Optional Offline Compare
 
-Train/export algorithm recognizer:
+The algo baseline remains available for offline comparison, but it is not the primary delivery path:
 
 ```bash
 python scripts/train_event_algo_baseline.py \
@@ -151,8 +218,6 @@ python scripts/train_event_algo_baseline.py \
   --run_root artifacts/runs \
   --run_id s2_algo_baseline_seed77
 ```
-
-Evaluate model vs algo:
 
 ```bash
 python scripts/evaluate_event_dualtrack.py \
@@ -166,20 +231,9 @@ python scripts/evaluate_event_dualtrack.py \
   --split_manifest artifacts/splits/s2_stable4_relax12_seed77.json
 ```
 
-## Key Artifacts
+## Known Boundary
 
-Cloud outputs:
-- Foundation checkpoint
-- Finetuned event checkpoint
-- `models/event_onset.mindir`
-- `models/event_onset.model_metadata.json`
-- run summaries under `artifacts/runs/*`
-
-PI inputs:
-- `event_onset.mindir`
-- `event_onset.model_metadata.json`
-- `configs/runtime_event_onset.yaml`
-- `configs/event_actuation_mapping.yaml`
+This repository does not promise continuous real-time mirroring of every subtle hand pose detail. The supported target is discrete command switching with stable hold and explicit release.
 
 ## Preflight
 
@@ -190,7 +244,11 @@ python scripts/preflight.py --mode ascend --db5_data_dir ../data_ninaproDB5 --we
 
 ## Repository Hygiene
 
-Generated run outputs and temp caches are not source-of-truth and should not be committed:
+Generated outputs are not source-of-truth and should not be committed:
+
 - `code/artifacts/runs/**`
 - `code/artifacts/splits/*.json`
-- `**/__pycache__/`, `*.pyc`, `.ipynb_checkpoints/`, `.tmp_pytest*`
+- `**/__pycache__/`
+- `*.pyc`
+- `.ipynb_checkpoints/`
+- `.tmp_pytest*`

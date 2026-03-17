@@ -7,10 +7,17 @@ import csv
 import json
 from collections import Counter
 from pathlib import Path
+import sys
 from typing import Any
 
+CODE_ROOT = Path(__file__).resolve().parent.parent
+if str(CODE_ROOT) not in sys.path:
+    sys.path.insert(0, str(CODE_ROOT))
+
+from shared.event_labels import normalize_event_label_input, public_event_label, public_event_labels
+
 DEFAULT_TARGET_STATES = [
-    "RELAX",
+    "CONTINUE",
     "TENSE_OPEN",
     "V_SIGN",
     "OK_SIGN",
@@ -27,8 +34,8 @@ def _normalize_rel(path_value: str) -> str:
 def _parse_target_states(raw: str | None) -> list[str]:
     if not str(raw or "").strip():
         return list(DEFAULT_TARGET_STATES)
-    parsed = [item.strip().upper() for item in str(raw).split(",") if item.strip()]
-    return parsed or list(DEFAULT_TARGET_STATES)
+    parsed = [normalize_event_label_input(item) for item in str(raw).split(",") if str(item).strip()]
+    return public_event_labels(parsed) if parsed else list(DEFAULT_TARGET_STATES)
 
 
 def _load_manifest(path: Path) -> tuple[list[dict[str, str]], list[str]]:
@@ -148,7 +155,7 @@ def main() -> None:
         raise FileNotFoundError(f"audit_details_json not found: {audit_details}")
 
     target_states = _parse_target_states(args.target_states)
-    target_set = set(target_states)
+    target_set = {normalize_event_label_input(state) for state in target_states}
 
     action_min_selected_windows = (
         int(args.action_min_selected_windows)
@@ -167,10 +174,13 @@ def main() -> None:
     for row in rows:
         if str(row.get("session_id", "")).strip() != session_id:
             continue
-        target_state = str(row.get("target_state", "")).strip().upper()
+        target_state = normalize_event_label_input(row.get("target_state", ""))
         if target_state not in target_set:
             continue
-        considered.append(dict(row))
+        normalized_row = dict(row)
+        normalized_row["target_state"] = target_state
+        normalized_row["start_state"] = normalize_event_label_input(row.get("start_state", ""))
+        considered.append(normalized_row)
 
     kept_rows: list[dict[str, str]] = []
     dropped_rows: list[dict[str, Any]] = []
@@ -211,7 +221,7 @@ def main() -> None:
             dropped_rows.append(
                 {
                     "relative_path": rel,
-                    "target_state": target_state,
+                    "target_state": public_event_label(target_state),
                     "session_id": row.get("session_id", ""),
                     "quality_status": row.get("quality_status", ""),
                     "quality_reasons": row.get("quality_reasons", ""),
@@ -246,9 +256,13 @@ def main() -> None:
 
     coverage = {}
     for state in target_states:
-        current = int(kept_by_class_after_cap.get(state, 0))
-        target = int(args.relax_target_count) if state == "RELAX" else int(args.target_per_class)
-        coverage[state] = {
+        current = int(kept_by_class_after_cap.get(normalize_event_label_input(state), 0))
+        target = (
+            int(args.relax_target_count)
+            if normalize_event_label_input(state) == "RELAX"
+            else int(args.target_per_class)
+        )
+        coverage[public_event_label(state)] = {
             "target": target,
             "current": current,
             "gap": max(0, int(target - current)),
@@ -275,17 +289,17 @@ def main() -> None:
             "drop_categories": ["retake"],
             "drop_if_dead_channels": True,
         },
-        "target_states": target_states,
+        "target_states": public_event_labels(target_states),
         "target_per_class": int(args.target_per_class),
         "counts": {
             "considered": int(len(considered)),
             "kept": int(len(kept_rows_sorted)),
             "dropped": int(len(dropped_rows)),
         },
-        "by_target_total": dict(by_target_total),
-        "by_target_kept": dict(by_target_kept),
-        "by_target_dropped": dict(by_target_dropped),
-        "kept_by_class_after_cap": dict(kept_by_class_after_cap),
+        "by_target_total": {public_event_label(key): value for key, value in by_target_total.items()},
+        "by_target_kept": {public_event_label(key): value for key, value in by_target_kept.items()},
+        "by_target_dropped": {public_event_label(key): value for key, value in by_target_dropped.items()},
+        "kept_by_class_after_cap": {public_event_label(key): value for key, value in kept_by_class_after_cap.items()},
         "relax_kept_by_rule": dict(relax_kept_by_rule),
         "relax_dropped_by_rule": dict(relax_dropped_by_rule),
         "coverage": coverage,

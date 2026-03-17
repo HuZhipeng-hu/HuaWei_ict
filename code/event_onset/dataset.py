@@ -15,6 +15,7 @@ import numpy as np
 from event_onset.config import EventDataConfig
 from event_onset.manifest import load_event_manifest_rows, normalize_relative_path
 from scripts.collection_utils import STANDARD_CSV_HEADERS
+from shared.event_labels import normalize_event_label_input, public_event_label
 from shared.label_modes import get_label_mode_spec
 from shared.preprocessing import PreprocessPipeline
 
@@ -91,15 +92,18 @@ class EventClipDatasetLoader:
         for metadata in sorted(self._manifest_rows.values(), key=lambda row: row["relative_path"]):
             if metadata.get("capture_mode", "") != self.data_config.capture_mode_filter:
                 continue
-            target_state = str(metadata.get("target_state", "")).strip().upper()
+            target_state = normalize_event_label_input(metadata.get("target_state", ""))
             if target_state not in allowed_targets:
                 logger.warning("Skip clip with target_state=%s not in configured label set.", target_state)
                 continue
+            normalized = dict(metadata)
+            normalized["target_state"] = target_state
+            normalized["start_state"] = normalize_event_label_input(metadata.get("start_state", ""))
             csv_path = self.data_dir / metadata["relative_path"]
             if not csv_path.exists():
                 logger.warning("Manifest file missing on disk: %s", csv_path)
                 continue
-            yield csv_path, dict(metadata)
+            yield csv_path, normalized
 
     @staticmethod
     def _read_csv_matrix(csv_path: Path) -> np.ndarray:
@@ -216,7 +220,7 @@ class EventClipDatasetLoader:
         metadata: dict[str, str],
     ) -> tuple[list[EventWindowRecord], dict[str, Any]]:
         qf = self.data_config.quality_filter
-        target_state = str(metadata["target_state"]).strip().upper()
+        target_state = normalize_event_label_input(metadata["target_state"])
         if target_state not in self.label_spec.gesture_to_idx:
             raise ValueError(f"target_state={target_state!r} is not in configured label set {self.label_spec.class_names}")
         label = int(self.label_spec.gesture_to_idx[target_state])
@@ -236,7 +240,7 @@ class EventClipDatasetLoader:
 
         clip_diag: dict[str, Any] = {
             "relative_path": source_id,
-            "target_state": target_state,
+            "target_state": public_event_label(target_state),
             "policy": action_policy if not is_relax_clip else "relax_idle",
             "onset_indices": list(onset_indices),
             "selected_window_ranges": [],
@@ -265,6 +269,8 @@ class EventClipDatasetLoader:
             emg_feature = self._stft_pipeline.process_window(emg_window)
             imu_feature = self._resample_imu(imu_window)
             merged_metadata = dict(metadata)
+            merged_metadata["target_state"] = public_event_label(target_state)
+            merged_metadata["start_state"] = public_event_label(metadata.get("start_state", ""))
             merged_metadata["window_end_index"] = end
             merged_metadata["window_start_index"] = int(start)
             merged_metadata["window_energy"] = energy
@@ -370,7 +376,7 @@ class EventClipDatasetLoader:
         for csv_path, metadata in self._iter_clip_rows():
             matrix = self._read_csv_matrix(csv_path)
             selected, clip_diag = self._build_event_windows(matrix, metadata)
-            clip_stats[metadata["target_state"]] += 1
+            clip_stats[public_event_label(metadata["target_state"])] += 1
             window_stats["clips_total"] += 1
             window_stats["selected_windows"] += len(selected)
             clip_diagnostics.append(dict(clip_diag))
@@ -383,7 +389,7 @@ class EventClipDatasetLoader:
                 labels.append(int(item.label))
                 source_ids.append(item.source_id)
                 metadata_rows.append(dict(item.metadata))
-                window_stats[f"label_{self.label_spec.class_names[int(item.label)]}"] += 1
+                window_stats[f"label_{public_event_label(self.label_spec.class_names[int(item.label)])}"] += 1
 
         if not emg_features:
             raise RuntimeError("No event-onset samples were selected from the dataset.")
@@ -406,7 +412,7 @@ class EventClipDatasetLoader:
     def get_stats(self) -> dict[str, int]:
         stats: dict[str, int] = Counter()
         for _, metadata in self._iter_clip_rows():
-            stats[metadata["target_state"]] += 1
+            stats[public_event_label(metadata["target_state"])] += 1
             stats["total_clips"] += 1
         return dict(stats)
 

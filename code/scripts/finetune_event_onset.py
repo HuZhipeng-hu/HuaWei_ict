@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Comma-separated action keys, "
-            "e.g. TENSE_OPEN,V_SIGN,OK_SIGN,THUMB_UP,WRIST_CW,WRIST_CCW. RELAX is implicit."
+            "e.g. TENSE_OPEN,V_SIGN,OK_SIGN,THUMB_UP,WRIST_CW,WRIST_CCW. CONTINUE/RELAX is implicit."
         ),
     )
 
@@ -84,7 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--incremental_old_target_db5_keys",
         default=None,
-        help="Comma-separated old action keys used by incremental_from_checkpoint (RELAX is implicit).",
+        help="Comma-separated old action keys used by incremental_from_checkpoint (CONTINUE/RELAX is implicit).",
     )
     parser.add_argument(
         "--incremental_head_only",

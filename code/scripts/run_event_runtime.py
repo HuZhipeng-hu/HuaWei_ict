@@ -22,6 +22,7 @@ from event_onset.actuation_mapping import load_and_validate_actuation_map
 from event_onset.runtime import EventOnsetController
 from runtime.hardware.factory import create_actuator
 from scripts.collection_utils import STANDARD_CSV_HEADERS
+from shared.event_labels import normalize_event_label_input, public_event_labels
 from shared.label_modes import get_label_mode_spec
 
 
@@ -99,23 +100,23 @@ def _validate_runtime_class_contract(
     metadata_class_names: list[str] | None,
     recognizer_class_names: list[str] | None = None,
 ) -> None:
-    normalized_expected = [str(name).strip().upper() for name in expected_class_names]
+    normalized_expected = [normalize_event_label_input(name) for name in expected_class_names]
 
-    mapping_keys = sorted(str(key).strip().upper() for key in mapping_by_name.keys())
+    mapping_keys = sorted(normalize_event_label_input(key) for key in mapping_by_name.keys())
     if mapping_keys != sorted(normalized_expected):
         raise ValueError(
-            f"Actuation mapping keys mismatch expected classes. mapping_keys={mapping_keys}, "
-            f"expected={sorted(normalized_expected)}"
+            f"Actuation mapping keys mismatch expected classes. mapping_keys={public_event_labels(mapping_keys)}, "
+            f"expected={public_event_labels(sorted(normalized_expected))}"
         )
 
     if recognizer_backend == "algo":
-        names = [str(item).strip().upper() for item in (recognizer_class_names or [])]
+        names = [normalize_event_label_input(item) for item in (recognizer_class_names or [])]
         if not names:
             raise ValueError("Algorithm backend must provide non-empty class_names.")
         if names != normalized_expected:
             raise ValueError(
                 "Runtime class order mismatch between config and algo model: "
-                f"config={normalized_expected}, algo={names}"
+                f"config={public_event_labels(normalized_expected)}, algo={public_event_labels(names)}"
             )
         return
 
@@ -136,10 +137,11 @@ def _validate_runtime_class_contract(
         if model_backend == "lite":
             raise ValueError("Lite backend metadata must include non-empty class_names.")
         return
-    if metadata_class_names != normalized_expected:
+    normalized_metadata = [normalize_event_label_input(name) for name in metadata_class_names]
+    if normalized_metadata != normalized_expected:
         raise ValueError(
             "Runtime class order mismatch between config and model metadata: "
-            f"config={normalized_expected}, metadata={metadata_class_names}"
+            f"config={public_event_labels(normalized_expected)}, metadata={public_event_labels(normalized_metadata)}"
         )
 
 
@@ -157,10 +159,10 @@ def _validate_release_contract(
         raise ValueError(
             "release_mode=command_only requires class TENSE_OPEN in runtime label set."
         )
-    mapped = str(mapping_by_name.get("TENSE_OPEN", "")).strip().upper()
+    mapped = normalize_event_label_input(mapping_by_name.get("TENSE_OPEN", ""))
     if mapped != "RELAX":
         raise ValueError(
-            "release_mode=command_only requires mapping TENSE_OPEN -> RELAX."
+            "release_mode=command_only requires mapping TENSE_OPEN -> CONTINUE."
         )
 
 
