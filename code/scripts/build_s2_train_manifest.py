@@ -81,7 +81,18 @@ def _classify_row(
     selected_windows = int(detail.get("selected_windows", 0) or 0)
     dead_channels = list(detail.get("dead_channels", []) or [])
 
-    retake_relaxed = allow_retake_quality and quality_status == "retake_recommended" and not dead_channels
+    relax_warn_with_windows = (
+        allow_retake_quality
+        and quality_status in {"pass", "warn"}
+        and selected_windows >= int(min_selected_windows)
+    )
+    retake_relaxed = (
+        allow_retake_quality
+        and (
+            (quality_status == "retake_recommended" and not dead_channels)
+            or relax_warn_with_windows
+        )
+    )
 
     if category == "retake" and not retake_relaxed:
         reasons.append("retake_category")
@@ -89,7 +100,7 @@ def _classify_row(
         reasons.append("retake_quality_status")
     if selected_windows < int(min_selected_windows):
         reasons.append(f"selected_windows<{int(min_selected_windows)}")
-    if dead_channels:
+    if dead_channels and not relax_warn_with_windows:
         reasons.append("dead_channels")
 
     allowed_quality_status = {"pass", "warn"}

@@ -227,6 +227,7 @@ class EventClipDatasetLoader:
         source_id = normalize_relative_path(metadata["relative_path"])
         is_relax_clip = target_state == "RELAX"
         relax_candidates: list[EventWindowRecord] = []
+        relax_low_motion_candidates: list[EventWindowRecord] = []
         scored_action_windows: list[EventWindowRecord] = []
         action_policy = str(self.data_config.action_window_policy).strip().lower()
         onset_indices: list[int] = []
@@ -281,18 +282,19 @@ class EventClipDatasetLoader:
                 merged_metadata["onset_idx"] = int(onset_indices[0])
 
             if is_relax_clip:
-                if energy <= float(qf.energy_min) and imu_motion <= float(self.data_config.feature.imu_motion_std_max):
-                    relax_candidates.append(
-                        EventWindowRecord(
-                            emg_feature=emg_feature,
-                            imu_feature=imu_feature,
-                            label=0,
-                            source_id=source_id,
-                            metadata=merged_metadata,
-                            energy=energy,
-                            imu_motion=imu_motion,
-                        )
+                if imu_motion <= float(self.data_config.feature.imu_motion_std_max):
+                    record = EventWindowRecord(
+                        emg_feature=emg_feature,
+                        imu_feature=imu_feature,
+                        label=0,
+                        source_id=source_id,
+                        metadata=merged_metadata,
+                        energy=energy,
+                        imu_motion=imu_motion,
                     )
+                    relax_low_motion_candidates.append(record)
+                    if energy <= float(qf.energy_min):
+                        relax_candidates.append(record)
                 continue
 
             if energy < float(qf.energy_min):
@@ -312,10 +314,14 @@ class EventClipDatasetLoader:
             )
 
         if is_relax_clip:
+            selection_mode = "idle_relax"
+            if not relax_candidates and relax_low_motion_candidates:
+                relax_candidates = list(relax_low_motion_candidates)
+                selection_mode = "idle_relax_low_motion_fallback"
             relax_candidates.sort(key=lambda item: (item.energy, item.imu_motion, int(item.metadata["window_end_index"])))
             chosen = relax_candidates[: int(self.data_config.idle_top_k_windows_per_clip)]
             for entry in chosen:
-                entry.metadata["selection_mode"] = "idle_relax"
+                entry.metadata["selection_mode"] = selection_mode
                 clip_diag["selected_window_ranges"].append(
                     [int(entry.metadata["window_start_index"]), int(entry.metadata["window_end_index"])]
                 )

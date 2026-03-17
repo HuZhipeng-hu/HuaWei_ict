@@ -140,6 +140,27 @@ def test_event_loader_relax_clip_only_produces_idle_samples(tmp_path: Path):
     assert all(item["target_state"] == "CONTINUE" for item in metadata)
 
 
+def test_event_loader_relax_clip_falls_back_to_low_motion_idle_windows(tmp_path: Path):
+    config_path = tmp_path / "training_event_onset.yaml"
+    config_path.write_text(BASE_TRAINING_CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
+    loader, manifest_path = _build_loader(tmp_path)
+
+    relax_path = tmp_path / "CONTINUE" / "clip_continue.csv"
+    _write_standard_csv(relax_path, _build_relax_matrix(amp=5.0))
+    upsert_event_manifest(
+        manifest_path,
+        _manifest_row("CONTINUE/clip_continue.csv", start_state="CONTINUE", target_state="CONTINUE", sample_count=1000),
+    )
+
+    emg, imu, labels, _, metadata = loader.load_all_with_sources(return_metadata=True)
+
+    assert emg.shape[0] == 4
+    assert imu.shape[0] == emg.shape[0]
+    assert set(labels.tolist()) == {0}
+    assert all(item["target_state"] == "CONTINUE" for item in metadata)
+    assert all(item["selection_mode"] == "idle_relax_low_motion_fallback" for item in metadata)
+
+
 def test_event_loader_filters_low_energy_action_clip(tmp_path: Path):
     config_path = tmp_path / "training_event_onset.yaml"
     config_path.write_text(BASE_TRAINING_CONFIG.read_text(encoding="utf-8"), encoding="utf-8")

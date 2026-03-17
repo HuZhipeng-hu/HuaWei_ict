@@ -77,6 +77,25 @@ def test_classify_row_relax_can_keep_retake_recommended_when_enabled() -> None:
     assert reasons == []
 
 
+def test_classify_row_relax_warn_with_windows_can_ignore_dead_channels_when_enabled() -> None:
+    row = {"capture_mode": "event_onset"}
+    detail = {
+        "category": "suspicious",
+        "quality_status": "warn",
+        "selected_windows": 2,
+        "dead_channels": [3],
+    }
+    keep, reasons = _classify_row(
+        row,
+        detail,
+        require_capture_mode="event_onset",
+        min_selected_windows=1,
+        allow_retake_quality=True,
+    )
+    assert keep is True
+    assert reasons == []
+
+
 def test_classify_row_relax_retake_recommended_is_dropped_when_disabled() -> None:
     row = {"capture_mode": "event_onset"}
     detail = {
