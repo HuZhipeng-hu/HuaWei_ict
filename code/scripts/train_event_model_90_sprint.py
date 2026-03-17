@@ -135,6 +135,13 @@ def _prepare_target_states(args: argparse.Namespace) -> list[str]:
     return ["RELAX", *_parse_target_action_keys(args.target_db5_keys)]
 
 
+def _effective_prepare_session_id(args: argparse.Namespace) -> str:
+    explicit = str(getattr(args, "session_id", "") or "").strip()
+    if explicit:
+        return explicit
+    return str(getattr(args, "prepare_session_id", DEFAULT_PREPARE_SESSION_ID)).strip()
+
+
 def _training_manifest_for_args(args: argparse.Namespace) -> str:
     return str(getattr(args, "_prepared_recordings_manifest", "") or args.recordings_manifest)
 
@@ -274,6 +281,7 @@ def _stage_prepare(args: argparse.Namespace) -> dict:
     audit_run_id = f"{args.run_prefix}_prepare_audit"
     prepared_manifest_path = _prepare_output_manifest_path(args)
     drop_report_path = prepare_dir / "prepare_drop_report.json"
+    session_id = _effective_prepare_session_id(args)
 
     audit_cmd = [
         sys.executable,
@@ -305,7 +313,7 @@ def _stage_prepare(args: argparse.Namespace) -> dict:
         "--audit_details_json",
         str(audit_details_path),
         "--session_id",
-        str(args.prepare_session_id),
+        str(session_id),
         "--target_states",
         ",".join(_prepare_target_states(args)),
         "--target_per_class",
@@ -349,7 +357,7 @@ def _stage_prepare(args: argparse.Namespace) -> dict:
         "audit_details_json": str(audit_details_path),
         "drop_report_json": str(drop_report_path),
         "target_states": public_event_labels(_prepare_target_states(args)),
-        "session_id": str(args.prepare_session_id),
+        "session_id": str(session_id),
         "target_per_class": int(args.prepare_target_per_class),
         "relax_target_count": int(args.prepare_relax_target_count),
         "coverage": dict(drop_report.get("coverage", {})),
@@ -1068,6 +1076,44 @@ def _stage_longrun(args: argparse.Namespace, *, screen_summary: dict | None = No
     return summary
 
 
+def _build_tune_cmd(
+    args: argparse.Namespace,
+    *,
+    best_run_id: str,
+    output_json: Path,
+    output_csv: Path,
+    output_runtime_config: Path,
+) -> list[str]:
+    return [
+        sys.executable,
+        "scripts/tune_event_runtime_thresholds.py",
+        "--run_root",
+        str(args.run_root),
+        "--run_id",
+        str(best_run_id),
+        "--training_config",
+        str(args.training_config),
+        "--runtime_config",
+        str(args.runtime_config),
+        "--data_dir",
+        str(args.data_dir),
+        "--recordings_manifest",
+        str(_training_manifest_for_args(args)),
+        "--target_db5_keys",
+        str(args.target_db5_keys),
+        "--backend",
+        str(args.control_backend),
+        "--device_target",
+        str(args.device_target),
+        "--output_json",
+        str(output_json),
+        "--output_csv",
+        str(output_csv),
+        "--output_runtime_config",
+        str(output_runtime_config),
+    ]
+
+
 def _stage_tune(
     args: argparse.Namespace,
     *,
@@ -1097,34 +1143,13 @@ def _stage_tune(
     output_json = run_root / f"{args.run_prefix}_runtime_threshold_tuning_summary.json"
     output_csv = run_root / f"{args.run_prefix}_runtime_threshold_tuning_summary.csv"
     output_runtime_config = run_root / f"{args.run_prefix}_runtime_event_onset_demo3_latch_tuned.yaml"
-    cmd = [
-        sys.executable,
-        "scripts/tune_event_runtime_thresholds.py",
-        "--run_root",
-        str(args.run_root),
-        "--run_id",
-        str(best_run_id),
-        "--training_config",
-        str(args.training_config),
-        "--runtime_config",
-        str(args.runtime_config),
-        "--data_dir",
-        str(args.data_dir),
-        "--recordings_manifest",
-        str(args.recordings_manifest),
-        "--target_db5_keys",
-        str(args.target_db5_keys),
-        "--backend",
-        str(args.control_backend),
-        "--device_target",
-        str(args.device_target),
-        "--output_json",
-        str(output_json),
-        "--output_csv",
-        str(output_csv),
-        "--output_runtime_config",
-        str(output_runtime_config),
-    ]
+    cmd = _build_tune_cmd(
+        args,
+        best_run_id=str(best_run_id),
+        output_json=output_json,
+        output_csv=output_csv,
+        output_runtime_config=output_runtime_config,
+    )
     _run_checked("tune:runtime_thresholds", cmd)
     summary = {
         "status": "ok",
@@ -1226,6 +1251,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo3_latch.yaml")
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default=DEFAULT_SOURCE_RECORDINGS_MANIFEST)
+    parser.add_argument("--session_id", default="", help="Alias for --prepare_session_id used by the prepare stage.")
     parser.add_argument("--target_db5_keys", default=DEFAULT_TARGET_KEYS)
     parser.add_argument("--device_target", default="GPU", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)

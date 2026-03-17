@@ -5,7 +5,9 @@ from types import SimpleNamespace
 from pathlib import Path
 
 from scripts.train_event_model_90_sprint import (
+    _build_tune_cmd,
     _build_neighbor_candidates,
+    _effective_prepare_session_id,
     _metric_or,
     _model90_split_manifest_path,
     _prepare_split_seeds,
@@ -68,10 +70,43 @@ def test_prepare_split_seeds_unions_screen_longrun_and_neighbor() -> None:
     assert _prepare_split_seeds(args) == [42, 52, 62]
 
 
+def test_effective_prepare_session_id_prefers_explicit_session_alias() -> None:
+    args = SimpleNamespace(session_id="s3_demo3_0317", prepare_session_id="s2")
+    assert _effective_prepare_session_id(args) == "s3_demo3_0317"
+
+    args = SimpleNamespace(session_id="", prepare_session_id="s2")
+    assert _effective_prepare_session_id(args) == "s2"
+
+
 def test_metric_or_preserves_explicit_zero_values() -> None:
     assert _metric_or({"false_trigger_rate": 0.0}, "false_trigger_rate", default=1.0) == 0.0
     assert _metric_or({"false_release_rate": "0.0"}, "false_release_rate", default=1.0) == 0.0
     assert _metric_or({}, "false_release_rate", default=1.0) == 1.0
+
+
+def test_build_tune_cmd_uses_prepared_manifest_when_available(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        run_root="artifacts/runs",
+        training_config="configs/training_event_onset_demo3_two_stage.yaml",
+        runtime_config="configs/runtime_event_onset_demo3_latch.yaml",
+        data_dir="../data",
+        recordings_manifest="../data/recordings_manifest.csv",
+        target_db5_keys="TENSE_OPEN,THUMB_UP,WRIST_CW",
+        control_backend="ckpt",
+        device_target="Ascend",
+        _prepared_recordings_manifest=str(tmp_path / "prepared_manifest.csv"),
+    )
+
+    cmd = _build_tune_cmd(
+        args,
+        best_run_id="demo_best",
+        output_json=tmp_path / "summary.json",
+        output_csv=tmp_path / "summary.csv",
+        output_runtime_config=tmp_path / "runtime.yaml",
+    )
+
+    idx = cmd.index("--recordings_manifest")
+    assert cmd[idx + 1] == str(tmp_path / "prepared_manifest.csv")
 
 
 def test_reuse_trial_outputs_requires_matching_context(tmp_path: Path) -> None:
