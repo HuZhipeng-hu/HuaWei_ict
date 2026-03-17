@@ -22,7 +22,7 @@ from event_onset.actuation_mapping import load_and_validate_actuation_map
 from event_onset.runtime import EventOnsetController
 from runtime.hardware.factory import create_actuator
 from scripts.collection_utils import STANDARD_CSV_HEADERS
-from shared.event_labels import normalize_event_label_input, public_event_labels
+from shared.event_labels import normalize_event_label_input, public_event_labels, public_event_mapping
 from shared.label_modes import get_label_mode_spec
 
 
@@ -308,8 +308,8 @@ def main() -> None:
         )
     else:
         logger.info("Algo artifact: algo_model_path=%s", startup_artifacts["algo_model_path"])
-    logger.info("Class order: %s", list(label_spec.class_names))
-    logger.info("Class mapping: %s", mapping_by_name)
+    logger.info("Class order: %s", public_event_labels(label_spec.class_names))
+    logger.info("Class mapping: %s", public_event_mapping(mapping_by_name))
     logger.info("Release mode: %s", runtime_cfg.runtime.release_mode)
     if recognizer_backend == "model" and model_backend == "ckpt":
         logger.warning("CKPT backend is intended for debugging only. Use --backend lite for production deployment.")

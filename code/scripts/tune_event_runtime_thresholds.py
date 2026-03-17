@@ -24,7 +24,7 @@ from event_onset.dataset import EventClipDatasetLoader
 from event_onset.inference import EventPredictor
 from event_onset.runtime import EventOnsetController
 from shared.config import load_config
-from shared.event_labels import normalize_event_label_input, public_event_labels
+from shared.event_labels import normalize_event_label_input, public_event_labels, public_event_mapping
 from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
@@ -514,7 +514,7 @@ def main() -> None:
         "target_db5_keys": list(target_keys),
         "training_config": str(args.training_config),
         "runtime_config": str(args.runtime_config),
-        "mapping": mapping_by_name,
+        "mapping": public_event_mapping(mapping_by_name),
         "rank_rule": "command_success_rate desc, false_trigger_rate asc, false_release_rate asc",
         "search_space": {
             "confidence_thresholds": confs,

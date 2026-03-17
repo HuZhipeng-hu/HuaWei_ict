@@ -21,7 +21,7 @@ from event_onset.dataset import EventClipDatasetLoader
 from event_onset.inference import EventPredictor
 from event_onset.runtime import EventOnsetController
 from shared.config import load_config
-from shared.event_labels import normalize_event_label_input, public_event_labels
+from shared.event_labels import normalize_event_label_input, public_event_labels, public_event_mapping
 from shared.label_modes import get_label_mode_spec
 from training.data.split_strategy import load_manifest
 
@@ -402,7 +402,7 @@ def _run(args: argparse.Namespace) -> Path:
         "continue_clip_count": int(control["continue_clip_count"]),
         "release_command_clip_count": int(control["release_command_clip_count"]),
         "target_db5_keys": list(target_keys),
-        "mapping": mapping_by_name,
+        "mapping": public_event_mapping(mapping_by_name),
         "split_manifest": str(split_manifest),
         "recordings_manifest": str(data_cfg.recordings_manifest_path),
     }

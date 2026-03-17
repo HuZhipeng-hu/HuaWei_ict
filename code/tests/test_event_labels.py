@@ -3,6 +3,7 @@ from shared.event_labels import (
     normalize_event_label_input,
     public_event_label,
     public_event_labels,
+    public_event_mapping,
 )
 
 
@@ -17,3 +18,11 @@ def test_event_label_public_output_prefers_continue() -> None:
     assert public_event_label("RELAX") == "CONTINUE"
     assert public_event_label("continue") == "CONTINUE"
     assert public_event_labels(["RELAX", "THUMB_UP"]) == ["CONTINUE", "THUMB_UP"]
+
+
+def test_event_mapping_public_output_prefers_continue() -> None:
+    assert public_event_mapping({"RELAX": "RELAX", "TENSE_OPEN": "RELAX", "THUMB_UP": "THUMB_UP"}) == {
+        "CONTINUE": "CONTINUE",
+        "TENSE_OPEN": "CONTINUE",
+        "THUMB_UP": "THUMB_UP",
+    }

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Mapping
 
 PUBLIC_CONTINUE_LABEL = "CONTINUE"
 LEGACY_CONTINUE_LABEL = "RELAX"
@@ -30,3 +30,10 @@ def public_event_label(value: str | None) -> str:
 
 def public_event_labels(values: Iterable[str | None]) -> list[str]:
     return [public_event_label(value) for value in values]
+
+
+def public_event_mapping(mapping: Mapping[str, str]) -> dict[str, str]:
+    return {
+        public_event_label(key): public_event_label(value)
+        for key, value in mapping.items()
+    }
