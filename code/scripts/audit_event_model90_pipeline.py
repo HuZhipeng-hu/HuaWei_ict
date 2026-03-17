@@ -64,6 +64,17 @@ def _metric_close(lhs: float, rhs: float, *, atol: float = 1e-6) -> bool:
     return abs(float(lhs) - float(rhs)) <= float(atol)
 
 
+def _float_or_default(value: Any, default: float) -> float:
+    if value is None:
+        return float(default)
+    if isinstance(value, str) and not value.strip():
+        return float(default)
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
 def _format_cmd(parts: list[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in parts)
 
@@ -619,9 +630,9 @@ def _load_runtime_tuned_command_metrics(args: argparse.Namespace) -> dict[str, A
 
     return {
         "run_id": best_run_id,
-        "command_success_rate": float(best_row.get("command_success_rate", 0.0) or 0.0),
-        "false_trigger_rate": float(best_row.get("false_trigger_rate", 1.0) or 1.0),
-        "false_release_rate": float(best_row.get("false_release_rate", 1.0) or 1.0),
+        "command_success_rate": _float_or_default(best_row.get("command_success_rate"), 0.0),
+        "false_trigger_rate": _float_or_default(best_row.get("false_trigger_rate"), 1.0),
+        "false_release_rate": _float_or_default(best_row.get("false_release_rate"), 1.0),
         "source": str(runtime_path),
     }
 
@@ -638,12 +649,12 @@ def _assess_goal_and_conclusion(
     reference = _choose_best_reference_row(longrun_summary, neighbor_summary, screen_summary)
     runtime_tuned = _load_runtime_tuned_command_metrics(args)
 
-    event_action_accuracy = float(reference.get("event_action_accuracy", 0.0) or 0.0)
-    event_action_macro_f1 = float(reference.get("event_action_macro_f1", 0.0) or 0.0)
+    event_action_accuracy = _float_or_default(reference.get("event_action_accuracy"), 0.0)
+    event_action_macro_f1 = _float_or_default(reference.get("event_action_macro_f1"), 0.0)
 
-    command_success_rate = float(reference.get("command_success_rate", 0.0) or 0.0)
-    false_trigger_rate = float(reference.get("false_trigger_rate", 1.0) or 1.0)
-    false_release_rate = float(reference.get("false_release_rate", 1.0) or 1.0)
+    command_success_rate = _float_or_default(reference.get("command_success_rate"), 0.0)
+    false_trigger_rate = _float_or_default(reference.get("false_trigger_rate"), 1.0)
+    false_release_rate = _float_or_default(reference.get("false_release_rate"), 1.0)
     command_metric_source = f"run:{reference.get('run_id', '')}"
 
     if runtime_tuned:

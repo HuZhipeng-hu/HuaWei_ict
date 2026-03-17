@@ -148,6 +148,36 @@ def test_assess_goal_returns_data_bottleneck_when_gates_clear_but_metrics_fail()
     assert assessment["demo_gate"]["passed"] is False
 
 
+def test_assess_goal_preserves_zero_false_rates() -> None:
+    args = _base_args()
+    args.target_command_success_rate = 0.4
+    screen_summary = {
+        "rows": [
+            {
+                "run_id": "s1",
+                "event_action_accuracy": 0.91,
+                "event_action_macro_f1": 0.89,
+                "command_success_rate": 0.5,
+                "false_trigger_rate": 0.0,
+                "false_release_rate": 0.0,
+                "test_accuracy": 0.92,
+            }
+        ]
+    }
+
+    assessment = audit._assess_goal_and_conclusion(
+        args,
+        data_only_ready=True,
+        blocking_issues=[],
+        screen_summary=screen_summary,
+        longrun_summary={},
+        neighbor_summary={},
+    )
+    assert assessment["demo_gate"]["false_trigger_rate"] == 0.0
+    assert assessment["demo_gate"]["false_release_rate"] == 0.0
+    assert assessment["demo_gate"]["passed"] is True
+
+
 def test_assess_goal_returns_engineering_not_cleared_when_blocked() -> None:
     args = _base_args()
     assessment = audit._assess_goal_and_conclusion(
