@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from scripts.pretrain_ninapro_db5_repr import (
+from experimental.scripts.pretrain_ninapro_db5_repr import (
     _build_quality_aware_positive_pairs,
     _build_class_source_balanced_indices,
     _resolve_epoch_augmentation_params,

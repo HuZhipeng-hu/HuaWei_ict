@@ -11,15 +11,15 @@ import sys
 import time
 from pathlib import Path
 
-CODE_ROOT = Path(__file__).resolve().parent.parent
+CODE_ROOT = Path(__file__).resolve().parents[2]
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from ninapro_db5.config import load_db5_pretrain_config
-from ninapro_db5.dataset import DB5PretrainDatasetLoader
-from ninapro_db5.evaluate import _set_device
-from ninapro_db5.model import build_db5_encoder_model
-from scripts import pretrain_ninapro_db5_repr as repr_script
+from experimental.ninapro_db5.config import load_db5_pretrain_config
+from experimental.ninapro_db5.dataset import DB5PretrainDatasetLoader
+from experimental.ninapro_db5.evaluate import _set_device
+from experimental.ninapro_db5.model import build_db5_encoder_model
+from experimental.scripts import pretrain_ninapro_db5_repr as repr_script
 from shared.run_utils import dump_json
 from training.data.split_strategy import build_manifest
 
@@ -478,7 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--run_root", default="artifacts/runs")
     parser.add_argument("--run_prefix", default="db5_repr_stage2_v1")
-    parser.add_argument("--pretrain_config", default="configs/pretrain_ninapro_db5.yaml")
+    parser.add_argument("--pretrain_config", default="experimental/configs/pretrain_ninapro_db5.yaml")
     parser.add_argument("--db5_data_dir", default="../data_ninaproDB5")
     parser.add_argument("--foundation_dir", default="artifacts/foundation/db5_full53")
     parser.add_argument("--device_target", default="Ascend", choices=["CPU", "GPU", "Ascend"])

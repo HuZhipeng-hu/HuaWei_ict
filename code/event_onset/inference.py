@@ -27,9 +27,11 @@ except Exception:
 try:
     from mindspore_lite import Context as LiteContext
     from mindspore_lite import Model as LiteModel
+    from mindspore_lite import ModelType as LiteModelType
 except Exception:
     LiteContext = None  # type: ignore
     LiteModel = None  # type: ignore
+    LiteModelType = None  # type: ignore
 
 
 def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -199,7 +201,14 @@ class EventPredictor:
             except Exception:
                 pass
         self._lite_model = LiteModel()
-        self._lite_model.build_from_file(str(path), model_type=0, context=lite_context)
+        model_type = 0
+        if LiteModelType is not None:
+            for attr in ("MINDIR", "MINDIR_LITE", "MINDIR_IR"):
+                candidate = getattr(LiteModelType, attr, None)
+                if candidate is not None:
+                    model_type = candidate
+                    break
+        self._lite_model.build_from_file(str(path), model_type=model_type, context=lite_context)
 
         raw_inputs = self._lite_model.get_inputs()
         if len(raw_inputs) != 2:
@@ -243,7 +252,7 @@ class EventPredictor:
             raise ValueError(f"EMG shape mismatch: got {tuple(emg.shape)}, expected {self._expected_emg_shape}.")
         if self._expected_imu_shape is not None and not _shape_matches(imu.shape, self._expected_imu_shape):
             raise ValueError(f"IMU shape mismatch: got {tuple(imu.shape)}, expected {self._expected_imu_shape}.")
-        return emg, imu
+        return np.ascontiguousarray(emg), np.ascontiguousarray(imu)
 
     def _build_detail_from_logits(
         self,

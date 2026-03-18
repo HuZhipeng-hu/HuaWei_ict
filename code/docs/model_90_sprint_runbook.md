@@ -157,6 +157,9 @@ python scripts/train_event_model_90_sprint.py \
   --run_prefix s2_model90
 ```
 
+The current release default runtime thresholds are already baked into `configs/runtime_event_onset.yaml`.
+Only keep a new tuned configuration if it beats the current release baseline on online control metrics.
+
 Pipeline audit:
 
 ```bash
@@ -212,3 +215,10 @@ Runtime gate:
 - `command_success_rate >= 0.90`
 - `false_trigger_rate <= 0.05`
 - `false_release_rate <= 0.05`
+
+Deployment parity gate:
+
+- `CKPT` vs `MindIR/Lite` `command_success_rate` delta `<= 0.05`
+- `false_trigger_rate` delta `<= 0.05`
+- `false_release_rate` delta `<= 0.02`
+- `event_action_accuracy` delta `<= 0.02`

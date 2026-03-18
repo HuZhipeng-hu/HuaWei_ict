@@ -14,7 +14,7 @@ from typing import Any, Iterator
 import numpy as np
 import scipy.io as sio
 
-from ninapro_db5.config import DB5PretrainConfig
+from experimental.ninapro_db5.config import DB5PretrainConfig
 from shared.preprocessing import PreprocessPipeline
 
 logger = logging.getLogger(__name__)

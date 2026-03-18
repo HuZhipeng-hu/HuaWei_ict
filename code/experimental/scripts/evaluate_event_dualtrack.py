@@ -10,12 +10,12 @@ from pathlib import Path
 
 import numpy as np
 
-CODE_ROOT = Path(__file__).resolve().parent.parent
+CODE_ROOT = Path(__file__).resolve().parents[2]
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.actuation_mapping import load_and_validate_actuation_map
-from event_onset.algo import EventAlgoPredictor
+from experimental.event_onset_algo import EventAlgoPredictor
 from event_onset.config import load_event_runtime_config, load_event_training_config
 from event_onset.dataset import EventClipDatasetLoader
 from event_onset.inference import EventPredictor
@@ -35,8 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model_run_id", required=True)
     parser.add_argument("--eval_mode", default="dualtrack", choices=["dualtrack", "model_only"])
     parser.add_argument("--algo_model_path", default=None)
-    parser.add_argument("--training_config", default="configs/training_event_onset_demo_p0.yaml")
-    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
+    parser.add_argument("--training_config", default="experimental/configs/training_event_onset_demo_p0.yaml")
+    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo3_latch.yaml")
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default=None)
     parser.add_argument("--split_manifest", default=None)

@@ -10,16 +10,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-CODE_ROOT = Path(__file__).resolve().parent.parent
+CODE_ROOT = Path(__file__).resolve().parents[2]
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 
-DEFAULT_CONFIGS = "configs/training_event_onset_demo_p0.yaml,configs/training_event_onset_demo_p1.yaml"
+DEFAULT_CONFIGS = "experimental/configs/training_event_onset_demo_p0.yaml,experimental/configs/training_event_onset_demo_p1.yaml"
 DEFAULT_TAGS = "demo_p0,demo_p1"
 DEFAULT_SEEDS = "42,77,99"
 DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW,WRIST_CCW"
-DEFAULT_RUNTIME_CONFIG = "configs/runtime_event_onset_demo_latch.yaml"
+DEFAULT_RUNTIME_CONFIG = "experimental/configs/runtime_event_onset_demo_latch.yaml"
 
 
 def _format_cmd(cmd: list[str]) -> str:

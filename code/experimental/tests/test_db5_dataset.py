@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import scipy.io as sio
 
-from ninapro_db5.config import DB5FeatureConfig, DB5PretrainConfig
-from ninapro_db5.dataset import DB5PretrainDatasetLoader
+from experimental.ninapro_db5.config import DB5FeatureConfig, DB5PretrainConfig
+from experimental.ninapro_db5.dataset import DB5PretrainDatasetLoader
 
 
 def _write_db5_zip(

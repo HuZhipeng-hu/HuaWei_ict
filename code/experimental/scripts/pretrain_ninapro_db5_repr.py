@@ -15,15 +15,15 @@ from pathlib import Path
 
 import numpy as np
 
-CODE_ROOT = Path(__file__).resolve().parent.parent
+CODE_ROOT = Path(__file__).resolve().parents[2]
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
-from ninapro_db5.config import load_db5_pretrain_config
-from ninapro_db5.dataset import DB5PretrainDatasetLoader
-from ninapro_db5.evaluate import _set_device
-from ninapro_db5.model import build_db5_encoder_model
-from ninapro_db5.repr_pretrain_utils import (
+from experimental.ninapro_db5.config import load_db5_pretrain_config
+from experimental.ninapro_db5.dataset import DB5PretrainDatasetLoader
+from experimental.ninapro_db5.evaluate import _set_device
+from experimental.ninapro_db5.model import build_db5_encoder_model
+from experimental.ninapro_db5.repr_pretrain_utils import (
     augment_batch as _augment_batch,
     build_class_source_balanced_indices as _build_class_source_balanced_indices,
     build_quality_aware_positive_pairs as _build_quality_aware_positive_pairs,
@@ -904,7 +904,7 @@ def _run_repr_once(args: argparse.Namespace, *, ms_mode: str) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DB5 representation pretraining with supervised contrastive loss.")
-    parser.add_argument("--config", default="configs/pretrain_ninapro_db5.yaml")
+    parser.add_argument("--config", default="experimental/configs/pretrain_ninapro_db5.yaml")
     parser.add_argument("--data_dir", default=None)
     parser.add_argument("--device_target", default="Ascend", choices=["CPU", "GPU", "Ascend"])
     parser.add_argument("--device_id", type=int, default=0)

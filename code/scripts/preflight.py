@@ -1,4 +1,4 @@
-"""Preflight checks for the event-onset production pipeline."""
+"""Preflight checks for the demo3 event-onset production pipeline."""
 
 from __future__ import annotations
 
@@ -71,12 +71,9 @@ def collect_dependency_checks(mode: str) -> list[Check]:
 def collect_file_checks(code_root: Path, wearer_data_root: Path, db5_data_root: Path) -> list[Check]:
     checks: list[Check] = []
     required_files = [
-        code_root / "configs" / "pretrain_ninapro_db5.yaml",
         code_root / "configs" / "training_event_onset.yaml",
         code_root / "configs" / "conversion_event_onset.yaml",
         code_root / "configs" / "runtime_event_onset.yaml",
-        code_root / "scripts" / "pretrain_db5_repr_method_matrix.py",
-        code_root / "scripts" / "pretrain_ninapro_db5_repr.py",
         code_root / "scripts" / "finetune_event_onset.py",
         code_root / "scripts" / "convert_event_onset.py",
         code_root / "scripts" / "run_event_runtime.py",
@@ -93,13 +90,7 @@ def collect_file_checks(code_root: Path, wearer_data_root: Path, db5_data_root: 
             "exists" if wearer_data_root.exists() else "missing (set --wearer_data_dir)",
         )
     )
-    checks.append(
-        Check(
-            "INFO" if db5_data_root.exists() else "WARN",
-            f"dir:db5_data={db5_data_root}",
-            "exists" if db5_data_root.exists() else "missing (set --db5_data_dir)",
-        )
-    )
+    checks.append(Check("INFO", f"dir:db5_data={db5_data_root}", "optional experimental data root"))
     return checks
 
 def collect_config_checks(code_root: Path) -> list[Check]:
@@ -196,80 +187,8 @@ def collect_config_checks(code_root: Path) -> list[Check]:
     return checks
 
 def collect_db5_checks(code_root: Path, db5_data_root: Path, *, skip_probe: bool) -> list[Check]:
-    checks: list[Check] = []
-    try:
-        import numpy as np
-        import scipy.io as sio
-
-        from ninapro_db5.config import load_db5_pretrain_config
-    except Exception as exc:
-        checks.append(Check("ERROR", "db5.import", f"failed to import DB5 modules: {exc}"))
-        return checks
-
-    cfg_path = code_root / "configs" / "pretrain_ninapro_db5.yaml"
-    cfg = load_db5_pretrain_config(cfg_path)
-    zip_files = sorted(db5_data_root.glob(cfg.zip_glob))
-    subject_count = len(zip_files)
-    checks.append(Check("INFO", "db5.subject_zip_count", str(subject_count)))
-    if subject_count <= 0:
-        checks.append(Check("ERROR", "db5.subject_zip_count", f"no files matched {cfg.zip_glob} under {db5_data_root}"))
-        return checks
-    if subject_count < 10:
-        checks.append(Check("WARN", "db5.subject_zip_count", f"expected ~=10 subjects, found {subject_count}"))
-
-    if skip_probe:
-        checks.append(Check("WARN", "db5.full53_probe", "skipped by --skip_db5_probe"))
-        return checks
-
-    def _iter_segments(labels: np.ndarray):
-        start = 0
-        current = int(labels[0])
-        for idx in range(1, labels.shape[0]):
-            value = int(labels[idx])
-            if value != current:
-                yield current, start, idx
-                start = idx
-                current = value
-        yield current, start, labels.shape[0]
-
-    try:
-        action_keys: set[str] = set()
-        has_rest = False
-        labels_key = "restimulus" if bool(cfg.use_restimulus) else "stimulus"
-        for zip_path in zip_files:
-            with zipfile.ZipFile(zip_path) as zf:
-                members = sorted(
-                    (item for item in zf.infolist() if item.filename.lower().endswith(".mat")),
-                    key=lambda item: item.filename,
-                )
-                for member in members:
-                    with zf.open(member) as handle:
-                        mat = sio.loadmat(io.BytesIO(handle.read()))
-                    labels = np.asarray(mat[labels_key]).reshape(-1).astype(np.int32)
-                    exercise = int(np.asarray(mat["exercise"]).reshape(-1)[0])
-                    if labels.size <= 0:
-                        continue
-                    for local_label, _, _ in _iter_segments(labels):
-                        if int(local_label) == 0:
-                            has_rest = True
-                        else:
-                            key = f"E{int(exercise)}_G{int(local_label):02d}"
-                            action_keys.add(key)
-
-        checks.append(Check("INFO", "db5.full53.action_key_count", str(len(action_keys))))
-        checks.append(Check("INFO" if has_rest else "WARN", "db5.full53.has_rest", str(has_rest)))
-        if len(action_keys) < 52:
-            checks.append(
-                Check(
-                    "WARN",
-                    "db5.full53.action_key_count",
-                    f"expected around 52 action keys, found {len(action_keys)}",
-                )
-            )
-    except Exception as exc:
-        checks.append(Check("ERROR", "db5.full53_probe", str(exc)))
-
-    return checks
+    del code_root, db5_data_root, skip_probe
+    return [Check("INFO", "experimental.db5", "DB5 pretrain checks skipped in release preflight")]
 
 def collect_budget_checks(
     code_root: Path,
@@ -340,7 +259,7 @@ def print_checks(checks: Iterable[Check]) -> None:
         print(f"[{item.level}] {item.name}: {item.detail}")
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Event-onset preflight checks")
+    parser = argparse.ArgumentParser(description="Demo3 event-onset preflight checks")
     parser.add_argument("--mode", choices=("local", "ascend"), default="local")
     parser.add_argument("--db5_data_dir", default=None)
     parser.add_argument("--wearer_data_dir", default=None)

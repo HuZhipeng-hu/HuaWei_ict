@@ -1,51 +1,51 @@
 model:
-  model_type: event_onset
-  num_classes: 7
+  model_type: event_onset_two_stage_demo3
+  num_classes: 4
   base_channels: 16
   imu_base_channels: 16
   fusion_hidden_dim: 64
   dropout_rate: 0.3
   use_se: true
+  command_loss_weight: 1.0
 
 training:
   epochs: 60
   batch_size: 16
-  learning_rate: 0.0005
+  learning_rate: 0.0003
   weight_decay: 0.0003
   label_smoothing: 0.05
   warmup_epochs: 3
-  early_stopping_patience: 10
+  early_stopping_patience: 15
   split_seed: 42
   val_ratio: 0.2
   test_ratio: 0.2
   kfold: null
   num_workers: 0
-  freeze_emg_epochs: 3
+  freeze_emg_epochs: 8
   unfreeze_last_blocks: true
   encoder_lr_ratio: 0.3
   head_lr_ratio: 1.0
   loss:
-    type: cb_focal
+    type: cross_entropy
     focal_gamma: 1.5
     class_balance_beta: 0.999
   sampler:
     type: balanced
-    hard_mining_ratio: 0.3
+    hard_mining_ratio: 0.0
     confusion_pairs:
-      - [WRIST_CW, WRIST_CCW]
-      - [V_SIGN, OK_SIGN]
       - [TENSE_OPEN, THUMB_UP]
+      - [THUMB_UP, WRIST_CW]
   ema:
-    enabled: true
+    enabled: false
     decay: 0.999
 
 data:
   label_mode: event_onset
   capture_mode_filter: event_onset
   split_mode: grouped_file
-  split_manifest_path: artifacts/splits/event_onset_split_manifest.json
+  split_manifest_path: artifacts/splits/event_onset_demo3_split_manifest.json
   recordings_manifest_path: recordings_manifest.csv
-  target_db5_keys: [TENSE_OPEN, V_SIGN, OK_SIGN, THUMB_UP, WRIST_CW, WRIST_CCW]
+  target_db5_keys: [TENSE_OPEN, THUMB_UP, WRIST_CW]
   device_sampling_rate_hz: 500
   imu_sampling_rate_hz: 50
   clip_duration_ms: 1200
@@ -57,6 +57,7 @@ data:
   action_onset_post_ms: 220
   action_onset_min_gap_ms: 180
   action_onset_threshold_alpha: 0.25
+  action_onset_energy_ratio_min: 0.70
   use_imu: true
   feature:
     context_window_ms: 240

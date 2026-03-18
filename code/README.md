@@ -1,61 +1,40 @@
-# NeuroGrip Cloud-to-PI Pipeline (Core 4 Chain)
+# NeuroGrip Demo3 Release Path
 
-This repository now uses a single recommended production path:
+This repository now exposes a single recommended production path for the prosthesis demo:
 
-- Cloud side: foundation pretrain, wearer finetune, CKPT -> MindIR conversion
-- PI side: runtime inference and actuation only
-- App side: out of scope in this repo
+- collect wearer data
+- audit and prepare demo3 manifest/split
+- finetune the event-onset model
+- convert `CKPT -> MindIR + metadata`
+- run latched prosthesis control with the converted model
 
-## Recommended Control Contract
+The supported target is **event-driven latch control**, not continuous motion mirroring.
 
-This project targets event-driven latched control, not continuous motion mirroring.
+## Default Control Contract
 
-- `CONTINUE`: no new command, keep the current prosthesis state latched
+- `CONTINUE`: no new command, keep the current prosthesis state
 - `TENSE_OPEN`: explicit open/release command
-- Default demo actions are `THUMB_UP` and `WRIST_CW`
-- Other labels such as `WRIST_CCW`, `V_SIGN`, and `OK_SIGN` are extension paths, not the default release-candidate demo
+- `THUMB_UP`: switch to `THUMB_UP` and latch
+- `WRIST_CW`: switch to `WRIST_CW` and latch
 
-The intended user experience is:
+Runtime default is `release_mode=command_only`.
+The release default runtime thresholds are the tuned demo3 baseline thresholds baked into `configs/runtime_event_onset.yaml`.
 
-1. wearer produces an onset intent
-2. model recognizes the onset class
-3. prosthesis switches to the target gesture
-4. prosthesis keeps that state until a new command arrives
-5. `TENSE_OPEN` explicitly returns the prosthesis to open/release
+## Main Entrypoints
 
-## Responsibility Split
+- collect single clip: `scripts/collect_event_data.py`
+- collect continuous stream: `scripts/collect_event_data_continuous.py`
+- prepare + bounded search: `scripts/train_event_model_90_sprint.py`
+- direct finetune: `scripts/finetune_event_onset.py`
+- convert: `scripts/convert_event_onset.py`
+- runtime: `scripts/run_event_runtime.py`
+- control eval: `scripts/evaluate_event_demo_control.py`
 
-### Cloud side
-1. Optional DB5 foundation pretraining
-2. Wearer finetuning on private event-onset data
-3. CKPT -> MindIR conversion
+Experimental and retired branches are kept under `experimental/` and are not part of the release path.
 
-### PI side
-1. Load MindIR + metadata
-2. Read armband stream
-3. Recognize onset intent and update the latched prosthesis state
+## Collection
 
-### App side
-1. Upload private finetune data
-2. Download converted model package and deliver it to PI
-
-## Core Entrypoints
-
-- Pretrain: `scripts/pretrain_db5_repr_method_matrix.py`
-- Finetune: `scripts/finetune_event_onset.py`
-- Convert: `scripts/convert_event_onset.py`
-- Runtime: `scripts/run_event_runtime.py`
-
-Optional comparison tools only:
-
-- Algo baseline export: `scripts/train_event_algo_baseline.py`
-- Model vs algo offline compare: `scripts/evaluate_event_dualtrack.py`
-
-The optional algo line and DB5 pretrain line are kept for baseline or ablation work. They are not the primary release path.
-
-## Wearer Data Collection
-
-Single clip collection from the live armband:
+Single clip:
 
 ```bash
 python scripts/collect_event_data.py \
@@ -68,15 +47,9 @@ python scripts/collect_event_data.py \
   --device_id armband01 \
   --wearing_state normal \
   --duration_sec 3 \
-  --port COM4 \
+  --port COM5 \
   --baudrate 115200
 ```
-
-Cue logic for action labels:
-
-- keep `CONTINUE` for about `0.4s`
-- perform a fast, clear onset toward the target action
-- let the motion settle naturally without trying to maintain a continuous EMG hold
 
 Continuous capture + auto-slice:
 
@@ -99,23 +72,16 @@ python scripts/collect_event_data_continuous.py \
   --save_stream_csv
 ```
 
-## Recommended 4-Action Demo Workflow
+Cue logic for action labels:
 
-The recommended release-candidate path for the 4-action demo line is:
+- keep `CONTINUE` for about `0.4s`
+- perform a fast, clear onset toward the target action
+- return to `CONTINUE`
+- do not try to maintain a continuous EMG hold
 
-1. collect data
-2. `prepare`
-3. `screen`
-4. `longrun`
-5. `neighbor`
-6. `audit`
-7. run demo
+## Release-Candidate Workflow
 
-The single entrypoint is:
-
-- `scripts/train_event_model_90_sprint.py`
-
-One-command flow after collecting new data:
+One-command flow after collecting data:
 
 ```bash
 python scripts/train_event_model_90_sprint.py \
@@ -138,7 +104,7 @@ python scripts/train_event_model_90_sprint.py \
   --run_prefix s2_model90
 ```
 
-Current default screen grid is intentionally bounded:
+The bounded default screen grid is:
 
 - `loss_type in {cross_entropy, cb_focal}`
 - `base_channels in {16, 24}`
@@ -146,26 +112,17 @@ Current default screen grid is intentionally bounded:
 - `encoder_lr_ratio in {0.24, 0.30, 0.36}`
 - `pretrained_mode = off`
 
-`neighbor` is verification-only and checks five variants around the best longrun candidate:
-
-- `ref`
-- `lr_down`
-- `lr_up`
-- `freeze_down`
-- `freeze_up`
-
-See `docs/model_90_sprint_runbook.md` for the full release-candidate workflow.
+See [model_90_sprint_runbook.md](/F:/ICT/义肢核心代码/code/docs/model_90_sprint_runbook.md) for the full sprint flow.
 
 ## Finetune and Convert
 
-Wearer finetune:
+Direct finetune:
 
 ```bash
 python scripts/finetune_event_onset.py \
   --config configs/training_event_onset.yaml \
   --data_dir ../data \
   --recordings_manifest ../data/recordings_manifest.csv \
-  --pretrained_emg_checkpoint <optional_foundation_ckpt> \
   --run_root artifacts/runs \
   --run_id event_finetune_v1
 ```
@@ -180,16 +137,16 @@ python scripts/convert_event_onset.py \
   --run_id event_convert_v1
 ```
 
-Converted metadata now exposes `CONTINUE` as the public background label while remaining backward-compatible with legacy `RELAX` inputs.
+Converted metadata exposes `CONTINUE` as the public background label.
+Release freeze requires `CKPT` and `MindIR/Lite` control behavior to stay within a narrow parity band before deployment.
 
-## PI Runtime
+## Runtime
 
-Recommended demo runtime:
+Recommended runtime:
 
 ```bash
 python scripts/run_event_runtime.py \
-  --config configs/runtime_event_onset_demo3_latch.yaml \
-  --recognizer_backend model \
+  --config configs/runtime_event_onset.yaml \
   --backend lite
 ```
 
@@ -197,40 +154,13 @@ Standalone smoke:
 
 ```bash
 python scripts/run_event_runtime.py \
-  --config configs/runtime_event_onset_demo3_latch.yaml \
-  --recognizer_backend model \
+  --config configs/runtime_event_onset.yaml \
   --backend lite \
   --standalone \
   --duration_sec 10
 ```
 
 If the selected backend artifact is missing, runtime exits immediately. There is no silent fallback.
-
-## Optional Offline Compare
-
-The algo baseline remains available for offline comparison, but it is not the primary delivery path:
-
-```bash
-python scripts/train_event_algo_baseline.py \
-  --config configs/training_event_onset_demo_p0.yaml \
-  --data_dir ../data \
-  --recordings_manifest s2_train_manifest_relax12.csv \
-  --split_manifest artifacts/splits/s2_stable4_relax12_seed77.json \
-  --run_root artifacts/runs \
-  --run_id s2_algo_baseline_seed77
-```
-
-```bash
-python scripts/evaluate_event_dualtrack.py \
-  --run_root artifacts/runs \
-  --model_run_id s2_stable4_relax12_seed77 \
-  --algo_model_path artifacts/runs/s2_algo_baseline_seed77/models/algo_model.json \
-  --training_config configs/training_event_onset_demo_p0.yaml \
-  --runtime_config configs/runtime_event_onset_demo3_latch.yaml \
-  --data_dir ../data \
-  --recordings_manifest s2_train_manifest_relax12.csv \
-  --split_manifest artifacts/splits/s2_stable4_relax12_seed77.json
-```
 
 ## Known Boundary
 
@@ -239,13 +169,13 @@ This repository does not promise continuous real-time mirroring of every subtle 
 ## Preflight
 
 ```bash
-python scripts/preflight.py --mode local --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
-python scripts/preflight.py --mode ascend --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
+python scripts/preflight.py --mode local --wearer_data_dir ../data
+python scripts/preflight.py --mode ascend --wearer_data_dir ../data
 ```
 
 ## Repository Hygiene
 
-Generated outputs are not source-of-truth and should not be committed:
+Do not commit generated outputs:
 
 - `code/artifacts/runs/**`
 - `code/artifacts/splits/*.json`

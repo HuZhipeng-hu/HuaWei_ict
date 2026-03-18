@@ -4,7 +4,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from scripts.train_event_demo_latch_matrix import (
+from experimental.scripts.train_event_demo_latch_matrix import (
     _build_invalid_reason_counts,
     _compute_metric_invariant_ok,
     _rank_key,
@@ -45,7 +45,7 @@ def test_write_summary_csv_includes_control_fields() -> None:
         {
             "run_id": "exp_1",
             "config_tag": "demo_p0",
-            "config_path": "configs/training_event_onset_demo_p0.yaml",
+            "config_path": "experimental/configs/training_event_onset_demo_p0.yaml",
             "split_seed": 42,
             "event_action_accuracy": 0.7,
             "event_action_macro_f1": 0.6,

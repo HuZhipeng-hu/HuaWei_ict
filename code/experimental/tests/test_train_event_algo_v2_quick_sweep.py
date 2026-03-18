@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.train_event_algo_v2_quick_sweep import _build_presets, _pick_metric, _rank_key
+from experimental.scripts.train_event_algo_v2_quick_sweep import _build_presets, _pick_metric, _rank_key
 
 
 def test_pick_metric_handles_none_and_invalid() -> None:

@@ -1,8 +1,8 @@
-training_config: configs/training_event_onset_demo_p0.yaml
+training_config: experimental/configs/training_event_onset_demo_p0.yaml
 checkpoint_path: checkpoints/event_onset_best.ckpt
 model_path: models/event_onset.mindir
 model_metadata_path: models/event_onset.model_metadata.json
-actuation_mapping_path: configs/event_actuation_mapping_demo_latch.yaml
+actuation_mapping_path: experimental/configs/event_actuation_mapping_demo_latch.yaml
 
 data:
   label_mode: event_onset

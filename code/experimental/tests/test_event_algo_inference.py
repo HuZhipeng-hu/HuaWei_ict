@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from event_onset.algo import (
+from experimental.event_onset_algo import (
     ALGO_MODE_V1,
     ALGO_MODE_V2,
     EventAlgoModel,

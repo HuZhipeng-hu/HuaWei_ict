@@ -8,9 +8,9 @@ data:
   label_mode: event_onset
   capture_mode_filter: event_onset
   split_mode: grouped_file
-  split_manifest_path: artifacts/splits/event_onset_split_manifest.json
+  split_manifest_path: artifacts/splits/event_onset_demo3_split_manifest.json
   recordings_manifest_path: recordings_manifest.csv
-  target_db5_keys: [TENSE_OPEN, V_SIGN, OK_SIGN, THUMB_UP, WRIST_CW, WRIST_CCW]
+  target_db5_keys: [TENSE_OPEN, THUMB_UP, WRIST_CW]
   device_sampling_rate_hz: 500
   imu_sampling_rate_hz: 50
   clip_duration_ms: 1200
@@ -36,27 +36,26 @@ data:
     static_std_max: 0.5
 
 inference:
-  confidence_threshold: 0.75
+  confidence_threshold: 0.86
+  gate_confidence_threshold: 0.90
+  command_confidence_threshold: 0.78
   per_class_confidence_thresholds:
-    TENSE_OPEN: 0.72
-    V_SIGN: 0.78
-    OK_SIGN: 0.80
-    THUMB_UP: 0.80
-    WRIST_CW: 0.82
-    WRIST_CCW: 0.82
-  vote_window: 3
-  vote_min_count: 2
-  activation_margin_threshold: 0.08
-  switch_confidence_boost: 0.06
+    TENSE_OPEN: 0.78
+    THUMB_UP: 0.82
+    WRIST_CW: 0.84
+  vote_window: 5
+  vote_min_count: 3
+  activation_margin_threshold: 0.14
+  switch_confidence_boost: 0.12
   switch_margin_threshold: 0.12
 
 runtime:
-  idle_release_hold_ms: 700
+  idle_release_hold_ms: 86400000
   min_transition_gap_ms: 120
   post_transition_lock_ms: 220
   poll_interval_ms: 10
   low_energy_release_threshold: 2.5
-  release_mode: idle_or_command
+  release_mode: command_only
 
 device:
   target: CPU

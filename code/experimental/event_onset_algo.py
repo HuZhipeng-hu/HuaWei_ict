@@ -11,6 +11,8 @@ import numpy as np
 
 ALGO_MODE_V1 = "v1_single"
 ALGO_MODE_V2 = "v2_two_stage"
+DEFAULT_WRIST_CW_AXIS = 1
+DEFAULT_WRIST_CCW_AXIS = 2
 
 
 def _normalize_algo_mode(raw: str | None) -> str:
@@ -67,17 +69,111 @@ def _ensure_imu_shape(imu_feature: np.ndarray) -> np.ndarray:
     return imu
 
 
-def compute_rule_signal_scores(emg_feature: np.ndarray, imu_feature: np.ndarray) -> dict[str, float]:
+def _extract_gyro_axes(imu: np.ndarray) -> np.ndarray:
+    if imu.shape[0] >= 6:
+        axes = imu[3:6]
+    elif imu.shape[0] >= 3:
+        axes = imu[-3:]
+    else:
+        axes = imu
+    if axes.ndim != 2 or axes.shape[0] <= 0:
+        raise ValueError(f"Unable to extract gyro axes from imu shape={tuple(imu.shape)}")
+    return np.asarray(axes, dtype=np.float32)
+
+
+def _resolve_axis_index(raw_idx: int | float | None, axis_count: int, default: int) -> int:
+    if axis_count <= 0:
+        return 0
+    try:
+        idx = int(raw_idx) if raw_idx is not None else int(default)
+    except Exception:
+        idx = int(default)
+    idx = int(max(0, min(axis_count - 1, idx)))
+    return idx
+
+
+def _select_wrist_axes(
+    *,
+    axis_motion: np.ndarray,
+    labels: np.ndarray,
+    class_names: Sequence[str],
+    fallback_cw_axis: int,
+    fallback_ccw_axis: int,
+) -> tuple[int, int, dict[str, Any]]:
+    axis_count = int(axis_motion.shape[1]) if axis_motion.ndim == 2 else 0
+    if axis_count <= 0:
+        return 0, 0, {}
+
+    cw_axis = _resolve_axis_index(fallback_cw_axis, axis_count, DEFAULT_WRIST_CW_AXIS)
+    ccw_axis = _resolve_axis_index(fallback_ccw_axis, axis_count, DEFAULT_WRIST_CCW_AXIS)
+    if axis_count > 1 and cw_axis == ccw_axis:
+        ccw_axis = int((cw_axis + 1) % axis_count)
+
+    names = [str(item).strip().upper() for item in class_names]
+    cw_label = next((idx for idx, name in enumerate(names) if name == "WRIST_CW"), None)
+    ccw_label = next((idx for idx, name in enumerate(names) if name == "WRIST_CCW"), None)
+    if cw_label is None or ccw_label is None:
+        return cw_axis, ccw_axis, {}
+
+    cw_mask = np.asarray(labels == int(cw_label), dtype=bool)
+    ccw_mask = np.asarray(labels == int(ccw_label), dtype=bool)
+    if not np.any(cw_mask) or not np.any(ccw_mask):
+        return cw_axis, ccw_axis, {}
+
+    cw_mean = np.mean(axis_motion[cw_mask], axis=0, dtype=np.float32)
+    ccw_mean = np.mean(axis_motion[ccw_mask], axis=0, dtype=np.float32)
+    cw_delta = cw_mean - ccw_mean
+    ccw_delta = ccw_mean - cw_mean
+
+    cw_axis = int(np.argmax(cw_delta))
+    ccw_order = np.argsort(ccw_delta)[::-1].tolist()
+    ccw_axis = int(ccw_order[0]) if ccw_order else int((cw_axis + 1) % axis_count)
+    if axis_count > 1 and ccw_axis == cw_axis:
+        alt = [idx for idx in ccw_order if int(idx) != int(cw_axis)]
+        if alt:
+            ccw_axis = int(alt[0])
+        else:
+            ccw_axis = int((cw_axis + 1) % axis_count)
+
+    axis_stats = {
+        "wrist_cw_axis": int(cw_axis),
+        "wrist_ccw_axis": int(ccw_axis),
+        "wrist_axis_motion_mean_cw": [float(v) for v in cw_mean.tolist()],
+        "wrist_axis_motion_mean_ccw": [float(v) for v in ccw_mean.tolist()],
+        "wrist_axis_motion_delta_cw": [float(v) for v in cw_delta.tolist()],
+        "wrist_axis_motion_delta_ccw": [float(v) for v in ccw_delta.tolist()],
+    }
+    return int(cw_axis), int(ccw_axis), axis_stats
+
+
+def compute_rule_signal_scores(
+    emg_feature: np.ndarray,
+    imu_feature: np.ndarray,
+    *,
+    cw_axis_idx: int = DEFAULT_WRIST_CW_AXIS,
+    ccw_axis_idx: int = DEFAULT_WRIST_CCW_AXIS,
+) -> dict[str, float]:
     emg = _ensure_emg_shape(emg_feature)
     imu = _ensure_imu_shape(imu_feature)
 
     emg_energy = float(np.mean(np.abs(emg)))
     imu_motion = float(np.mean(np.abs(np.diff(imu, axis=1)))) if imu.shape[1] > 1 else 0.0
 
-    gyro_z_idx = 5 if imu.shape[0] > 5 else max(0, imu.shape[0] - 1)
-    gyro_z = imu[int(gyro_z_idx)]
-    cw_score = float(np.mean(np.maximum(gyro_z, 0.0)))
-    ccw_score = float(np.mean(np.maximum(-gyro_z, 0.0)))
+    gyro_axes = _extract_gyro_axes(imu)
+    axis_count = int(gyro_axes.shape[0])
+    cw_axis = _resolve_axis_index(cw_axis_idx, axis_count, DEFAULT_WRIST_CW_AXIS)
+    ccw_axis = _resolve_axis_index(ccw_axis_idx, axis_count, DEFAULT_WRIST_CCW_AXIS)
+    if axis_count > 1 and cw_axis == ccw_axis:
+        ccw_axis = int((cw_axis + 1) % axis_count)
+
+    yaw_signal = gyro_axes[axis_count - 1]
+    cw_sign_score = float(np.mean(np.maximum(yaw_signal, 0.0)))
+    ccw_sign_score = float(np.mean(np.maximum(-yaw_signal, 0.0)))
+
+    cw_axis_motion = float(np.mean(np.abs(gyro_axes[int(cw_axis)])))
+    ccw_axis_motion = float(np.mean(np.abs(gyro_axes[int(ccw_axis)])))
+    cw_score = float(cw_sign_score + cw_axis_motion)
+    ccw_score = float(ccw_sign_score + ccw_axis_motion)
     wrist_peak = float(max(cw_score, ccw_score))
     wrist_margin = float(abs(cw_score - ccw_score))
 
@@ -88,6 +184,10 @@ def compute_rule_signal_scores(emg_feature: np.ndarray, imu_feature: np.ndarray)
         "ccw_score": ccw_score,
         "wrist_peak": wrist_peak,
         "wrist_margin": wrist_margin,
+        "cw_axis_motion": float(cw_axis_motion),
+        "ccw_axis_motion": float(ccw_axis_motion),
+        "wrist_cw_axis": float(cw_axis),
+        "wrist_ccw_axis": float(ccw_axis),
     }
 
 
@@ -105,7 +205,7 @@ def suggest_rule_thresholds_from_features(
     *,
     class_names: Sequence[str],
     mask: np.ndarray | None = None,
-    fallback: dict[str, float] | None = None,
+    fallback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     fallback = dict(fallback or {})
     names = [str(name).strip().upper() for name in class_names]
@@ -128,12 +228,37 @@ def suggest_rule_thresholds_from_features(
                 "wrist_rule_margin": float(fallback.get("wrist_rule_margin", 0.10)),
                 "release_emg_min": float(fallback.get("release_emg_min", 0.45)),
                 "release_imu_max": float(fallback.get("release_imu_max", 1.50)),
+                "wrist_cw_axis": int(fallback.get("wrist_cw_axis", DEFAULT_WRIST_CW_AXIS)),
+                "wrist_ccw_axis": int(fallback.get("wrist_ccw_axis", DEFAULT_WRIST_CCW_AXIS)),
             },
             "stats": {},
             "sample_count": 0,
         }
 
-    score_rows = [compute_rule_signal_scores(emg_used[idx], imu_used[idx]) for idx in range(emg_used.shape[0])]
+    axis_motion = np.stack(
+        [
+            np.mean(np.abs(_extract_gyro_axes(_ensure_imu_shape(imu_used[idx]))), axis=1).astype(np.float32)
+            for idx in range(emg_used.shape[0])
+        ],
+        axis=0,
+    ).astype(np.float32)
+    cw_axis_idx, ccw_axis_idx, axis_stats = _select_wrist_axes(
+        axis_motion=axis_motion,
+        labels=label_used,
+        class_names=names,
+        fallback_cw_axis=int(fallback.get("wrist_cw_axis", DEFAULT_WRIST_CW_AXIS)),
+        fallback_ccw_axis=int(fallback.get("wrist_ccw_axis", DEFAULT_WRIST_CCW_AXIS)),
+    )
+
+    score_rows = [
+        compute_rule_signal_scores(
+            emg_used[idx],
+            imu_used[idx],
+            cw_axis_idx=int(cw_axis_idx),
+            ccw_axis_idx=int(ccw_axis_idx),
+        )
+        for idx in range(emg_used.shape[0])
+    ]
     wrist_peak = np.asarray([row["wrist_peak"] for row in score_rows], dtype=np.float32)
     wrist_margin = np.asarray([row["wrist_margin"] for row in score_rows], dtype=np.float32)
     emg_energy = np.asarray([row["emg_energy"] for row in score_rows], dtype=np.float32)
@@ -198,6 +323,8 @@ def suggest_rule_thresholds_from_features(
         "wrist_rule_margin": float(np.clip(wrist_rule_margin, 0.02, 1.20)),
         "release_emg_min": float(np.clip(release_emg_min, 0.10, 6.00)),
         "release_imu_max": float(np.clip(release_imu_max, 0.20, 6.00)),
+        "wrist_cw_axis": int(cw_axis_idx),
+        "wrist_ccw_axis": int(ccw_axis_idx),
     }
 
     stats = {
@@ -214,6 +341,7 @@ def suggest_rule_thresholds_from_features(
         "release_imu_p80_pos": _safe_percentile(imu_motion[tense_pos], 80.0) if tense_pos is not None else None,
         "release_imu_p10_neg": _safe_percentile(imu_motion[tense_neg], 10.0) if tense_pos is not None else None,
     }
+    stats.update(axis_stats)
 
     return {
         "status": "ok",
@@ -761,6 +889,8 @@ class EventAlgoPredictor:
         self.release_emg_min = float(cfg.get("release_emg_min", 0.45))
         self.release_imu_max = float(cfg.get("release_imu_max", 1.50))
         self.rule_confidence = float(cfg.get("rule_confidence", 0.94))
+        self.wrist_cw_axis = int(cfg.get("wrist_cw_axis", DEFAULT_WRIST_CW_AXIS))
+        self.wrist_ccw_axis = int(cfg.get("wrist_ccw_axis", DEFAULT_WRIST_CCW_AXIS))
         self.tuple_class_names = tuple(str(name).strip().upper() for name in self.model.class_names)
 
     @property
@@ -777,7 +907,12 @@ class EventAlgoPredictor:
     def _rule_predict(self, emg_feature: np.ndarray, imu_feature: np.ndarray) -> tuple[np.ndarray | None, str | None]:
         if not self.rules_enabled:
             return None, None
-        scores = compute_rule_signal_scores(emg_feature, imu_feature)
+        scores = compute_rule_signal_scores(
+            emg_feature,
+            imu_feature,
+            cw_axis_idx=int(self.wrist_cw_axis),
+            ccw_axis_idx=int(self.wrist_ccw_axis),
+        )
         num_classes = len(self.tuple_class_names)
         cw_score = float(scores["cw_score"])
         ccw_score = float(scores["ccw_score"])

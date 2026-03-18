@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.pretrain_db5_repr_method_matrix import (
+from experimental.scripts.pretrain_db5_repr_method_matrix import (
     _as_pretrain_row,
     _build_bottleneck_profile,
     _compute_recommended_budget,

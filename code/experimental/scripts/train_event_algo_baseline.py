@@ -10,12 +10,12 @@ from pathlib import Path
 
 import numpy as np
 
-CODE_ROOT = Path(__file__).resolve().parent.parent
+CODE_ROOT = Path(__file__).resolve().parents[2]
 if str(CODE_ROOT) not in sys.path:
     sys.path.insert(0, str(CODE_ROOT))
 
 from event_onset.actuation_mapping import load_and_validate_actuation_map
-from event_onset.algo import (
+from experimental.event_onset_algo import (
     ALGO_MODE_V1,
     ALGO_MODE_V2,
     EventAlgoModel,
@@ -34,8 +34,8 @@ from training.reporting import compute_classification_report, save_classificatio
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train lightweight algo recognizer for event-onset runtime")
-    parser.add_argument("--config", default="configs/training_event_onset.yaml")
-    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
+    parser.add_argument("--config", default="experimental/configs/training_event_onset_demo_p0.yaml")
+    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo3_latch.yaml")
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default=None)
     parser.add_argument("--split_manifest", default=None)
@@ -48,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--wrist_rule_margin", type=float, default=0.10)
     parser.add_argument("--release_emg_min", type=float, default=0.45)
     parser.add_argument("--release_imu_max", type=float, default=1.50)
+    parser.add_argument("--wrist_cw_axis", type=int, default=1)
+    parser.add_argument("--wrist_ccw_axis", type=int, default=2)
     parser.add_argument("--wrist_rule_min_delta", type=float, default=0.0)
     parser.add_argument("--wrist_rule_margin_delta", type=float, default=0.0)
     parser.add_argument("--release_emg_min_delta", type=float, default=0.0)
@@ -350,6 +352,8 @@ def main() -> None:
         "wrist_rule_margin": float(args.wrist_rule_margin),
         "release_emg_min": float(args.release_emg_min),
         "release_imu_max": float(args.release_imu_max),
+        "wrist_cw_axis": int(args.wrist_cw_axis),
+        "wrist_ccw_axis": int(args.wrist_ccw_axis),
     }
     calibration_report = {
         "enabled": bool(auto_calibration_enabled),
@@ -386,11 +390,15 @@ def main() -> None:
         + float(args.release_emg_min_delta),
         "release_imu_max": float(calibrated_thresholds.get("release_imu_max", base_rule_thresholds["release_imu_max"]))
         + float(args.release_imu_max_delta),
+        "wrist_cw_axis": int(calibrated_thresholds.get("wrist_cw_axis", base_rule_thresholds["wrist_cw_axis"])),
+        "wrist_ccw_axis": int(calibrated_thresholds.get("wrist_ccw_axis", base_rule_thresholds["wrist_ccw_axis"])),
     }
     final_rule_thresholds["wrist_rule_min"] = float(np.clip(final_rule_thresholds["wrist_rule_min"], 0.10, 6.00))
     final_rule_thresholds["wrist_rule_margin"] = float(np.clip(final_rule_thresholds["wrist_rule_margin"], 0.01, 2.00))
     final_rule_thresholds["release_emg_min"] = float(np.clip(final_rule_thresholds["release_emg_min"], 0.05, 8.00))
     final_rule_thresholds["release_imu_max"] = float(np.clip(final_rule_thresholds["release_imu_max"], 0.10, 8.00))
+    final_rule_thresholds["wrist_cw_axis"] = int(np.clip(final_rule_thresholds["wrist_cw_axis"], 0, 2))
+    final_rule_thresholds["wrist_ccw_axis"] = int(np.clip(final_rule_thresholds["wrist_ccw_axis"], 0, 2))
 
     model = EventAlgoModel(
         class_names=model.class_names,
@@ -404,6 +412,8 @@ def main() -> None:
             "wrist_rule_margin": float(final_rule_thresholds["wrist_rule_margin"]),
             "release_emg_min": float(final_rule_thresholds["release_emg_min"]),
             "release_imu_max": float(final_rule_thresholds["release_imu_max"]),
+            "wrist_cw_axis": int(final_rule_thresholds["wrist_cw_axis"]),
+            "wrist_ccw_axis": int(final_rule_thresholds["wrist_ccw_axis"]),
             "rule_confidence": float(args.rule_confidence),
         },
         algo_mode=model.algo_mode,

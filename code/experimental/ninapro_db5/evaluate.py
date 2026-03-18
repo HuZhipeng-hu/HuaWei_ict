@@ -8,8 +8,8 @@ from typing import Dict, Sequence
 
 import numpy as np
 
-from ninapro_db5.config import DB5PretrainConfig
-from ninapro_db5.model import build_db5_pretrain_model
+from experimental.ninapro_db5.config import DB5PretrainConfig
+from experimental.ninapro_db5.model import build_db5_pretrain_model
 
 try:
     import mindspore as ms

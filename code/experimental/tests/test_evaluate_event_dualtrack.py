@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import scripts.evaluate_event_dualtrack as dualtrack
+import experimental.scripts.evaluate_event_dualtrack as dualtrack
 from shared.gestures import GestureType
 
 
@@ -30,7 +30,7 @@ def _prepare_stubs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         data=SimpleNamespace(target_db5_keys=[], recordings_manifest_path="s2_train_manifest_relax12.csv"),
         inference=SimpleNamespace(),
         runtime=SimpleNamespace(),
-        actuation_mapping_path="configs/event_actuation_mapping_demo_latch.yaml",
+        actuation_mapping_path="experimental/configs/event_actuation_mapping_demo_latch.yaml",
         model_path="models/event_onset.mindir",
         model_metadata_path="models/event_onset.model_metadata.json",
     )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-import ninapro_db5.model as db5_model
+import experimental.ninapro_db5.model as db5_model
 
 
 class _Param:

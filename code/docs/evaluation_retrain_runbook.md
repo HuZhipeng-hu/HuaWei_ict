@@ -1,25 +1,27 @@
-﻿# Evaluation and Retrain Runbook (Core 4 Chain)
+# Evaluation and Retrain Runbook (Demo3 Release)
 
 ## Workflow
 
-1. Cloud pretrain (DB5 public)
-2. Cloud finetune (wearer private)
-3. Cloud convert (MindIR + metadata)
-4. PI runtime deployment
+1. collect wearer data
+2. run `prepare`
+3. finetune demo3 model
+4. convert to MindIR + metadata
+5. validate `ckpt` and `lite` control behavior
+6. deploy runtime
+
+The release default runtime thresholds are the tuned demo3 thresholds already written into `configs/runtime_event_onset.yaml`.
 
 ## Commands
 
-### Pretrain
+### Prepare
 
 ```bash
-python scripts/pretrain_db5_repr_method_matrix.py \
-  --pretrain_config configs/pretrain_ninapro_db5.yaml \
-  --db5_data_dir ../data_ninaproDB5 \
-  --run_root artifacts/runs \
-  --run_prefix db5_repr_stage2_v1 \
-  --device_target Ascend \
-  --device_id 0 \
-  --fewshot_mode off
+python scripts/train_event_model_90_sprint.py \
+  --stage prepare \
+  --device_target CPU \
+  --data_dir ../data \
+  --recordings_manifest recordings_manifest.csv \
+  --run_prefix s2_model90
 ```
 
 ### Finetune
@@ -29,7 +31,6 @@ python scripts/finetune_event_onset.py \
   --config configs/training_event_onset.yaml \
   --data_dir ../data \
   --recordings_manifest ../data/recordings_manifest.csv \
-  --pretrained_emg_checkpoint <foundation_ckpt_path> \
   --run_root artifacts/runs \
   --run_id event_finetune_v1
 ```
@@ -53,8 +54,8 @@ python scripts/run_event_runtime.py --config configs/runtime_event_onset.yaml --
 ## Quality Checks
 
 ```bash
-python scripts/preflight.py --mode local --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
-python scripts/preflight.py --mode ascend --db5_data_dir ../data_ninaproDB5 --wearer_data_dir ../data
+python scripts/preflight.py --mode local --wearer_data_dir ../data
+python scripts/preflight.py --mode ascend --wearer_data_dir ../data
 ```
 
 Optional:
@@ -66,6 +67,6 @@ python scripts/benchmark_event_runtime_ckpt.py --training_config configs/trainin
 
 ## Notes
 
-- Cloud side outputs are authoritative artifacts.
-- PI side only consumes converted model package for inference.
-- App transport (upload/download) is out of scope for this codebase.
+- Release authority comes from the demo3 mainline only.
+- `experimental/` contains retired or ablation-only branches.
+- PI side only consumes the converted model package for inference.

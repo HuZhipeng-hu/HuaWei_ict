@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from event_onset.config import EventModelConfig
+import event_onset.inference as inference
 from event_onset.inference import EventModelMetadata, EventPredictor
 
 
@@ -46,6 +47,21 @@ class _FakeTwoStageLiteModel:
             _FakeOutput([[0.1, 1.2]]),
             _FakeOutput([[2.2, 0.4, -0.3]]),
         ]
+
+
+class _FakeBuildLiteModel(_FakeLiteModel):
+    def __init__(self):
+        super().__init__()
+        self.build_calls = []
+
+    def build_from_file(self, path, *, model_type, context):
+        self.build_calls.append(
+            {
+                "path": path,
+                "model_type": model_type,
+                "context": context,
+            }
+        )
 
 
 def test_event_predictor_lite_backend_uses_two_inputs(monkeypatch):
@@ -136,3 +152,52 @@ def test_event_predictor_two_stage_lite_backend_returns_detail(monkeypatch):
     assert np.argmax(detail.public_probs) == 1
     assert np.isclose(np.sum(detail.gate_probs), 1.0, atol=1e-5)
     assert np.isclose(np.sum(detail.command_probs), 1.0, atol=1e-5)
+
+
+def test_event_predictor_load_lite_uses_modeltype_enum_when_available(tmp_path, monkeypatch):
+    model_path = tmp_path / "event_onset.mindir"
+    model_path.write_bytes(b"mindir")
+
+    fake_model = _FakeBuildLiteModel()
+
+    class _FakeContext:
+        def __init__(self):
+            self.target = []
+
+    class _FakeModelType:
+        MINDIR = "mindir_enum"
+
+    monkeypatch.setattr(inference, "LiteContext", _FakeContext)
+    monkeypatch.setattr(inference, "LiteModel", lambda: fake_model)
+    monkeypatch.setattr(inference, "LiteModelType", _FakeModelType)
+
+    predictor = EventPredictor(
+        backend="lite",
+        model_config=EventModelConfig(),
+        model_path=model_path,
+    )
+
+    assert predictor._lite_model is fake_model
+    assert fake_model.build_calls
+    assert fake_model.build_calls[0]["model_type"] == "mindir_enum"
+
+
+def test_event_predictor_validate_inputs_returns_contiguous_arrays(monkeypatch):
+    def _fake_load_ckpt(self, _checkpoint_path):
+        self._ckpt_model = object()
+        self._expected_emg_shape = (1, 8, 24, 3)
+        self._expected_imu_shape = (1, 6, 16)
+
+    monkeypatch.setattr(EventPredictor, "_load_ckpt", _fake_load_ckpt)
+    predictor = EventPredictor(
+        backend="ckpt",
+        model_config=EventModelConfig(),
+        checkpoint_path="artifacts/runs/any/checkpoints/event_onset_best.ckpt",
+    )
+
+    emg, imu = predictor._validate_inputs(
+        np.zeros((8, 24, 3), dtype=np.float32),
+        np.zeros((6, 16), dtype=np.float32),
+    )
+    assert emg.flags["C_CONTIGUOUS"]
+    assert imu.flags["C_CONTIGUOUS"]

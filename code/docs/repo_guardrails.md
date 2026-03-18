@@ -1,38 +1,51 @@
-# Repository Guardrails (Core 4 Chain)
+# Repository Guardrails (Demo3 Release)
 
 ## Single Source Of Truth
 
-Run all commands from the `code/` directory in this repository.
-Do not mix scripts from historical sibling directories.
+Run commands from the `code/` directory in this repository.
+Do not mix scripts from sibling or historical directories.
 
-## Allowed Production Entrypoints
+## Allowed Release Entrypoints
 
-Only these four are considered production chain entrypoints:
+Only these are considered release-path entrypoints:
 
-1. `scripts/pretrain_db5_repr_method_matrix.py`
-2. `scripts/finetune_event_onset.py`
-3. `scripts/convert_event_onset.py`
-4. `scripts/run_event_runtime.py`
+1. `scripts/collect_event_data.py`
+2. `scripts/collect_event_data_continuous.py`
+3. `scripts/train_event_model_90_sprint.py`
+4. `scripts/finetune_event_onset.py`
+5. `scripts/convert_event_onset.py`
+6. `scripts/run_event_runtime.py`
+7. `scripts/evaluate_event_demo_control.py`
 
-Supporting evaluation scripts retained by design:
+Supporting checks retained by design:
 
 - `scripts/evaluate_ckpt.py`
 - `scripts/benchmark_event_runtime_ckpt.py`
 - `scripts/validate_event_protocol.py`
+- `scripts/preflight.py`
+
+Anything under `experimental/` is outside the release path.
+
+## Control Contract
+
+- public labels: `CONTINUE`, `TENSE_OPEN`, `THUMB_UP`, `WRIST_CW`
+- runtime mode: event-driven latch control
+- release semantics: `release_mode=command_only`
 
 ## Cloud/PI Responsibility Split
 
-- Cloud: pretrain + finetune + convert
+- Cloud: prepare, finetune, convert, evaluation
 - PI: runtime inference + actuation only
-- App transport (upload/download): out of scope for this repository
+- App transport: out of scope for this repository
 
 ## Device Defaults
 
 - Cloud training/conversion defaults: `device_target=Ascend`
-- PI runtime default backend: `lite` (CPU path by runtime config)
+- PI runtime default backend: `lite`
 
 ## Hygiene Rules
 
 - Do not commit run outputs under `code/artifacts/runs/**`.
+- Do not commit split artifacts under `code/artifacts/splits/*.json`.
 - Do not commit cache/temp directories (`__pycache__`, `.tmp_pytest*`, `.ipynb_checkpoints`, `pytest-cache-files-*`, `pytest-of-*`).
-- Keep docs aligned with the core 4 chain; remove references to retired legacy scripts.
+- Keep docs aligned with the demo3 release path; experimental content must live under `experimental/`.

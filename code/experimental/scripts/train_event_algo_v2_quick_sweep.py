@@ -15,8 +15,8 @@ DEFAULT_TARGET_KEYS = "TENSE_OPEN,THUMB_UP,WRIST_CW,WRIST_CCW"
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run 6-run quick sweep for algo v2")
-    parser.add_argument("--config", default="configs/training_event_onset_demo_p0.yaml")
-    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo_latch.yaml")
+    parser.add_argument("--config", default="experimental/configs/training_event_onset_demo_p0.yaml")
+    parser.add_argument("--runtime_config", default="configs/runtime_event_onset_demo3_latch.yaml")
     parser.add_argument("--data_dir", default="../data")
     parser.add_argument("--recordings_manifest", default="s2_train_manifest_event_clean.csv")
     parser.add_argument("--split_manifest", default="artifacts/splits/s2_stable4_relax12_seed42.json")
@@ -141,7 +141,7 @@ def main() -> None:
         run_id = f"{args.run_prefix}_{idx:02d}_{preset['preset']}"
         cmd = [
             sys.executable,
-            "scripts/train_event_algo_baseline.py",
+            "experimental/scripts/train_event_algo_baseline.py",
             "--config",
             str(args.config),
             "--runtime_config",

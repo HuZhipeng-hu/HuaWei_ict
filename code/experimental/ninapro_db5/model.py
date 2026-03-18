@@ -17,7 +17,7 @@ except Exception:
     MINDSPORE_AVAILABLE = False
 
 from event_onset.model import GlobalAvgPool2DCompat
-from ninapro_db5.config import DB5PretrainConfig
+from experimental.ninapro_db5.config import DB5PretrainConfig
 from shared.models.blocks import ParallelConvBlock, _check_mindspore
 
 
