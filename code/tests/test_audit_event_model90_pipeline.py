@@ -180,6 +180,50 @@ def test_assess_goal_preserves_zero_false_rates() -> None:
     assert assessment["demo_gate"]["passed"] is True
 
 
+def test_assess_goal_prefers_longrun_aggregate_for_demo_gate() -> None:
+    args = _base_args()
+    screen_summary = {
+        "rows": [
+            {
+                "run_id": "screen_offline_best",
+                "event_action_accuracy": 1.0,
+                "event_action_macro_f1": 1.0,
+                "command_success_rate": 0.58,
+                "false_trigger_rate": 0.41,
+                "false_release_rate": 0.33,
+                "test_accuracy": 0.95,
+            }
+        ]
+    }
+    longrun_summary = {
+        "candidate_summaries": [
+            {
+                "candidate_key": "cand_a",
+                "event_action_accuracy_mean": 0.62,
+                "event_action_macro_f1_mean": 0.59,
+                "command_success_rate_mean": 0.69,
+                "false_trigger_rate_mean": 0.31,
+                "false_release_rate_mean": 0.11,
+            }
+        ]
+    }
+
+    assessment = audit._assess_goal_and_conclusion(
+        args,
+        data_only_ready=True,
+        blocking_issues=[],
+        screen_summary=screen_summary,
+        longrun_summary=longrun_summary,
+        neighbor_summary={},
+    )
+
+    assert assessment["development_gate"]["source_run_id"] == "longrun_candidate:cand_a"
+    assert assessment["demo_gate"]["source"] == "run:longrun_candidate:cand_a"
+    assert assessment["demo_gate"]["command_success_rate"] == 0.69
+    assert assessment["demo_gate"]["false_trigger_rate"] == 0.31
+    assert assessment["demo_gate"]["false_release_rate"] == 0.11
+
+
 def test_assess_goal_returns_engineering_not_cleared_when_blocked() -> None:
     args = _base_args()
     assessment = audit._assess_goal_and_conclusion(

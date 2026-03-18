@@ -80,13 +80,24 @@ def _format_cmd(parts: list[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
-def _rank_row(row: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+def _development_rank_row(row: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
     return (
         float(row.get("event_action_accuracy", 0.0)),
         float(row.get("event_action_macro_f1", 0.0)),
         float(row.get("command_success_rate", 0.0)),
         -float(row.get("false_trigger_rate", 1.0)),
         -float(row.get("false_release_rate", 1.0)),
+        float(row.get("test_accuracy", 0.0)),
+    )
+
+
+def _demo_rank_row(row: dict[str, Any]) -> tuple[float, float, float, float, float, float]:
+    return (
+        float(row.get("command_success_rate", 0.0)),
+        -float(row.get("false_trigger_rate", 1.0)),
+        -float(row.get("false_release_rate", 1.0)),
+        float(row.get("event_action_accuracy", 0.0)),
+        float(row.get("event_action_macro_f1", 0.0)),
         float(row.get("test_accuracy", 0.0)),
     )
 
@@ -471,7 +482,7 @@ def _choose_stability_run_id(
     screen_rows = list(screen_summary.get("rows") or [])
     if not screen_rows:
         return ""
-    return str(sorted(screen_rows, key=_rank_row, reverse=True)[0].get("run_id", "")).strip()
+    return str(sorted(screen_rows, key=_demo_rank_row, reverse=True)[0].get("run_id", "")).strip()
 
 
 def _run_control_eval_once(
@@ -618,13 +629,25 @@ def _check_eval_stability(
     return result
 
 
-def _choose_best_reference_row(*summaries: dict[str, Any]) -> dict[str, Any]:
+def _choose_best_reference_row(*summaries: dict[str, Any], rank_key) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for summary in summaries:
         rows.extend(list(summary.get("rows") or []))
     if not rows:
         return {}
-    return dict(sorted(rows, key=_rank_row, reverse=True)[0])
+    return dict(sorted(rows, key=rank_key, reverse=True)[0])
+
+
+def _choose_best_longrun_candidate_summary(
+    longrun_summary: dict[str, Any],
+    *,
+    rank_key,
+) -> dict[str, Any]:
+    rows = list(longrun_summary.get("candidate_summaries") or [])
+    if not rows:
+        return {}
+    best = dict(sorted(rows, key=rank_key, reverse=True)[0])
+    return best
 
 
 def _load_runtime_tuned_command_metrics(args: argparse.Namespace) -> dict[str, Any]:
@@ -661,16 +684,71 @@ def _assess_goal_and_conclusion(
     longrun_summary: dict[str, Any],
     neighbor_summary: dict[str, Any],
 ) -> dict[str, Any]:
-    reference = _choose_best_reference_row(longrun_summary, neighbor_summary, screen_summary)
+    development_reference = _choose_best_longrun_candidate_summary(
+        longrun_summary,
+        rank_key=lambda row: (
+            float(row.get("event_action_accuracy_mean", 0.0)),
+            float(row.get("event_action_macro_f1_mean", 0.0)),
+            float(row.get("command_success_rate_mean", 0.0)),
+            -float(row.get("false_trigger_rate_mean", 1.0)),
+            -float(row.get("false_release_rate_mean", 1.0)),
+        ),
+    )
+    if development_reference:
+        development_reference = {
+            "run_id": f"longrun_candidate:{development_reference.get('candidate_key', '')}",
+            "event_action_accuracy": float(development_reference.get("event_action_accuracy_mean", 0.0) or 0.0),
+            "event_action_macro_f1": float(development_reference.get("event_action_macro_f1_mean", 0.0) or 0.0),
+            "command_success_rate": float(development_reference.get("command_success_rate_mean", 0.0) or 0.0),
+            "false_trigger_rate": float(development_reference.get("false_trigger_rate_mean", 1.0) or 1.0),
+            "false_release_rate": float(development_reference.get("false_release_rate_mean", 1.0) or 1.0),
+            "source": "longrun_candidate_summary",
+        }
+    else:
+        development_reference = _choose_best_reference_row(
+            longrun_summary,
+            neighbor_summary,
+            screen_summary,
+            rank_key=_development_rank_row,
+        )
+
+    demo_reference = _choose_best_longrun_candidate_summary(
+        longrun_summary,
+        rank_key=lambda row: (
+            float(row.get("command_success_rate_mean", 0.0)),
+            -float(row.get("false_trigger_rate_mean", 1.0)),
+            -float(row.get("false_release_rate_mean", 1.0)),
+            float(row.get("event_action_accuracy_mean", 0.0)),
+            float(row.get("event_action_macro_f1_mean", 0.0)),
+        ),
+    )
+    if demo_reference:
+        demo_reference = {
+            "run_id": f"longrun_candidate:{demo_reference.get('candidate_key', '')}",
+            "event_action_accuracy": float(demo_reference.get("event_action_accuracy_mean", 0.0) or 0.0),
+            "event_action_macro_f1": float(demo_reference.get("event_action_macro_f1_mean", 0.0) or 0.0),
+            "command_success_rate": float(demo_reference.get("command_success_rate_mean", 0.0) or 0.0),
+            "false_trigger_rate": float(demo_reference.get("false_trigger_rate_mean", 1.0) or 1.0),
+            "false_release_rate": float(demo_reference.get("false_release_rate_mean", 1.0) or 1.0),
+            "source": "longrun_candidate_summary",
+        }
+    else:
+        demo_reference = _choose_best_reference_row(
+            longrun_summary,
+            neighbor_summary,
+            screen_summary,
+            rank_key=_demo_rank_row,
+        )
+
     runtime_tuned = _load_runtime_tuned_command_metrics(args)
 
-    event_action_accuracy = _float_or_default(reference.get("event_action_accuracy"), 0.0)
-    event_action_macro_f1 = _float_or_default(reference.get("event_action_macro_f1"), 0.0)
+    event_action_accuracy = _float_or_default(development_reference.get("event_action_accuracy"), 0.0)
+    event_action_macro_f1 = _float_or_default(development_reference.get("event_action_macro_f1"), 0.0)
 
-    command_success_rate = _float_or_default(reference.get("command_success_rate"), 0.0)
-    false_trigger_rate = _float_or_default(reference.get("false_trigger_rate"), 1.0)
-    false_release_rate = _float_or_default(reference.get("false_release_rate"), 1.0)
-    command_metric_source = f"run:{reference.get('run_id', '')}"
+    command_success_rate = _float_or_default(demo_reference.get("command_success_rate"), 0.0)
+    false_trigger_rate = _float_or_default(demo_reference.get("false_trigger_rate"), 1.0)
+    false_release_rate = _float_or_default(demo_reference.get("false_release_rate"), 1.0)
+    command_metric_source = f"run:{demo_reference.get('run_id', '')}"
 
     if runtime_tuned:
         command_success_rate = float(runtime_tuned["command_success_rate"])
@@ -704,7 +782,7 @@ def _assess_goal_and_conclusion(
             "target_event_action_accuracy": float(args.target_event_action_accuracy),
             "target_event_action_macro_f1": float(args.target_event_action_macro_f1),
             "passed": dev_pass,
-            "source_run_id": str(reference.get("run_id", "")),
+            "source_run_id": str(development_reference.get("run_id", "")),
         },
         "demo_gate": {
             "command_success_rate": command_success_rate,
