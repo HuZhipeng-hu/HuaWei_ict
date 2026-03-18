@@ -8,9 +8,11 @@ from scripts.train_event_model_90_sprint import (
     _build_tune_cmd,
     _build_neighbor_candidates,
     _effective_prepare_session_id,
+    _longrun_rank_key,
     _metric_or,
     _model90_split_manifest_path,
     _prepare_split_seeds,
+    _rank_row,
     _reuse_trial_outputs_if_compatible,
 )
 
@@ -82,6 +84,50 @@ def test_metric_or_preserves_explicit_zero_values() -> None:
     assert _metric_or({"false_trigger_rate": 0.0}, "false_trigger_rate", default=1.0) == 0.0
     assert _metric_or({"false_release_rate": "0.0"}, "false_release_rate", default=1.0) == 0.0
     assert _metric_or({}, "false_release_rate", default=1.0) == 1.0
+
+
+def test_rank_row_prefers_online_control_when_no_candidate_passes_strict_gate() -> None:
+    high_offline = {
+        "pass_strict_online_gate": False,
+        "event_action_accuracy": 0.94,
+        "event_action_macro_f1": 0.92,
+        "command_success_rate": 0.65,
+        "false_trigger_rate": 0.35,
+        "false_release_rate": 0.0,
+    }
+    better_control = {
+        "pass_strict_online_gate": False,
+        "event_action_accuracy": 0.81,
+        "event_action_macro_f1": 0.78,
+        "command_success_rate": 0.76,
+        "false_trigger_rate": 0.24,
+        "false_release_rate": 0.0,
+    }
+
+    ranked = sorted([high_offline, better_control], key=_rank_row, reverse=True)
+    assert ranked[0] is better_control
+
+
+def test_longrun_rank_prefers_online_control_mean_before_offline_mean() -> None:
+    high_offline = {
+        "strict_online_pass_rate": 0.0,
+        "event_action_accuracy_mean": 0.73,
+        "event_action_macro_f1_mean": 0.71,
+        "command_success_rate_mean": 0.67,
+        "false_trigger_rate_mean": 0.31,
+        "false_release_rate_mean": 0.11,
+    }
+    better_control = {
+        "strict_online_pass_rate": 0.0,
+        "event_action_accuracy_mean": 0.63,
+        "event_action_macro_f1_mean": 0.60,
+        "command_success_rate_mean": 0.71,
+        "false_trigger_rate_mean": 0.29,
+        "false_release_rate_mean": 0.0,
+    }
+
+    ranked = sorted([high_offline, better_control], key=_longrun_rank_key, reverse=True)
+    assert ranked[0] is better_control
 
 
 def test_build_tune_cmd_uses_prepared_manifest_when_available(tmp_path: Path) -> None:

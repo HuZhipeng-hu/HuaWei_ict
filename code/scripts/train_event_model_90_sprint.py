@@ -385,11 +385,11 @@ def _strict_online_pass(row: dict, *, target_command_success_rate: float, max_fa
 def _rank_row(row: dict) -> tuple[int, float, float, float, float, float]:
     return (
         int(bool(row.get("pass_strict_online_gate", False))),
-        float(row.get("event_action_accuracy", 0.0)),
-        float(row.get("event_action_macro_f1", 0.0)),
         float(row.get("command_success_rate", 0.0)),
         -float(row.get("false_trigger_rate", 1.0)),
         -float(row.get("false_release_rate", 1.0)),
+        float(row.get("event_action_accuracy", 0.0)),
+        float(row.get("event_action_macro_f1", 0.0)),
     )
 
 
@@ -749,9 +749,9 @@ def _stage_screen(args: argparse.Namespace) -> dict:
         "split_seed": int(args.screen_split_seed),
         "split_manifest_path": split_manifest,
         "rank_rule": (
-            "pass_strict_online_gate desc, event_action_accuracy desc, "
-            "event_action_macro_f1 desc, command_success_rate desc, "
-            "false_trigger_rate asc, false_release_rate asc"
+            "pass_strict_online_gate desc, command_success_rate desc, "
+            "false_trigger_rate asc, false_release_rate asc, "
+            "event_action_accuracy desc, event_action_macro_f1 desc"
         ),
         "rows": rows,
         "top_candidates": top_rows,
@@ -818,11 +818,11 @@ def _aggregate_candidate(rows: list[dict], *, candidate_key: str) -> dict:
 def _longrun_rank_key(summary_row: dict) -> tuple[float, float, float, float, float, float]:
     return (
         float(summary_row.get("strict_online_pass_rate", 0.0)),
-        float(summary_row.get("event_action_accuracy_mean", 0.0)),
-        float(summary_row.get("event_action_macro_f1_mean", 0.0)),
         float(summary_row.get("command_success_rate_mean", 0.0)),
         -float(summary_row.get("false_trigger_rate_mean", 1.0)),
         -float(summary_row.get("false_release_rate_mean", 1.0)),
+        float(summary_row.get("event_action_accuracy_mean", 0.0)),
+        float(summary_row.get("event_action_macro_f1_mean", 0.0)),
     )
 
 
