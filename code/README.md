@@ -30,8 +30,6 @@ The release default runtime thresholds are the tuned demo3 baseline thresholds b
 - runtime: `scripts/run_event_runtime.py`
 - control eval: `scripts/evaluate_event_demo_control.py`
 
-Experimental and retired branches are kept under `experimental/` and are not part of the release path.
-
 ## Collection
 
 Single clip:
@@ -110,7 +108,6 @@ The bounded default screen grid is:
 - `base_channels in {16, 24}`
 - `freeze_emg_epochs in {6, 8, 10}`
 - `encoder_lr_ratio in {0.24, 0.30, 0.36}`
-- `pretrained_mode = off`
 
 See [model_90_sprint_runbook.md](/F:/ICT/义肢核心代码/code/docs/model_90_sprint_runbook.md) for the full sprint flow.
 

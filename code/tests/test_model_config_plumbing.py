@@ -21,7 +21,6 @@ def test_train_cli_overrides_update_model_and_augmentation_settings():
         use_mixup=True,
         augmentation_enabled=True,
         split_seed=99,
-        pretrained_emg_checkpoint="checkpoints/db5.ckpt",
     )
     model_cfg = EventModelConfig()
     train_cfg = TrainingConfig()
@@ -31,7 +30,6 @@ def test_train_cli_overrides_update_model_and_augmentation_settings():
 
     assert model_cfg.base_channels == 24
     assert model_cfg.use_se is False
-    assert model_cfg.pretrained_emg_checkpoint == "checkpoints/db5.ckpt"
     assert train_cfg.loss.type == "focal"
     assert train_cfg.sampler.hard_mining_ratio == 0.5
     assert train_cfg.split_seed == 99

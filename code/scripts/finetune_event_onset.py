@@ -72,11 +72,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--pretrained_emg_checkpoint",
-        default=None,
-        help="Optional DB5 pretrained checkpoint for EMG encoder warm start.",
-    )
-    parser.add_argument(
         "--incremental_from_checkpoint",
         default=None,
         help="Optional previous event-onset checkpoint for incremental head expansion.",
@@ -133,10 +128,6 @@ def main() -> None:
     )
     args = build_parser().parse_args()
     logger = logging.getLogger("event_onset.finetune")
-    if args.pretrained_emg_checkpoint:
-        logger.info("Using pretrained EMG checkpoint: %s", args.pretrained_emg_checkpoint)
-    else:
-        logger.warning("No pretrained EMG checkpoint supplied. Finetune will run from random initialization.")
     if args.incremental_from_checkpoint:
         logger.info(
             "Incremental mode enabled: checkpoint=%s old_target_db5_keys=%s",

@@ -21,7 +21,6 @@ from event_onset.head_expansion import (
 )
 from event_onset.evaluate import load_and_evaluate_event
 from event_onset.model import TWO_STAGE_COMMAND_CLASSES, TWO_STAGE_GATE_CLASSES, build_event_model, is_two_stage_demo3_model
-from event_onset.pretrained_init import load_emg_encoder_from_checkpoint
 from event_onset.trainer import EventTrainer
 from shared.event_labels import public_event_labels
 from shared.label_modes import get_label_mode_spec
@@ -45,7 +44,6 @@ OFFLINE_SUMMARY_FIELDS = [
     "use_mixup",
     "budget_per_class",
     "budget_seed",
-    "used_pretrained_init",
     "target_db5_keys",
     "incremental_mode",
     "incremental_reused_class_count",
@@ -101,8 +99,6 @@ def _apply_cli_overrides(args, model_cfg: EventModelConfig, train_cfg, augmentat
         augmentation_cfg.enabled = bool(args.augmentation_enabled)
     if args.split_seed is not None:
         train_cfg.split_seed = int(args.split_seed)
-    if getattr(args, "pretrained_emg_checkpoint", None):
-        model_cfg.pretrained_emg_checkpoint = args.pretrained_emg_checkpoint
     return model_cfg, train_cfg, augmentation_cfg
 
 
@@ -506,7 +502,6 @@ def run_event_training(args) -> None:
                 "base_channels": model_cfg.base_channels,
                 "use_se": model_cfg.use_se,
                 "dropout_rate": model_cfg.dropout_rate,
-                "pretrained_emg_checkpoint": model_cfg.pretrained_emg_checkpoint,
             },
             "training": {
                 "loss_type": train_cfg.loss.type,
@@ -617,14 +612,6 @@ def run_event_training(args) -> None:
         logger.warning("Event-onset pipeline does not yet augment EMG+IMU jointly. Ignoring augmentation factor=%s.", augmentation_cfg.augment_factor)
 
     model = build_event_model(model_cfg)
-    if model_cfg.pretrained_emg_checkpoint:
-        transferred = load_emg_encoder_from_checkpoint(model, model_cfg.pretrained_emg_checkpoint)
-        logger.info(
-            "Loaded DB5 EMG encoder weights from %s (loaded=%d skipped=%d)",
-            model_cfg.pretrained_emg_checkpoint,
-            transferred["loaded"],
-            transferred["skipped"],
-        )
     incremental_transfer: dict[str, object] = {"enabled": False}
     if incremental_checkpoint:
         incremental_transfer = _apply_incremental_checkpoint(
@@ -681,7 +668,6 @@ def run_event_training(args) -> None:
         "use_mixup": False,
         "budget_per_class": int(budget_per_class),
         "budget_seed": int(budget_seed),
-        "used_pretrained_init": bool(model_cfg.pretrained_emg_checkpoint),
         "target_db5_keys": ",".join(data_cfg.target_db5_keys),
         "incremental_mode": bool(incremental_checkpoint),
         "incremental_reused_class_count": int(

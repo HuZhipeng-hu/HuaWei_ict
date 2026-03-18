@@ -68,7 +68,7 @@ def collect_dependency_checks(mode: str) -> list[Check]:
 
     return checks
 
-def collect_file_checks(code_root: Path, wearer_data_root: Path, db5_data_root: Path) -> list[Check]:
+def collect_file_checks(code_root: Path, wearer_data_root: Path) -> list[Check]:
     checks: list[Check] = []
     required_files = [
         code_root / "configs" / "training_event_onset.yaml",
@@ -90,7 +90,6 @@ def collect_file_checks(code_root: Path, wearer_data_root: Path, db5_data_root: 
             "exists" if wearer_data_root.exists() else "missing (set --wearer_data_dir)",
         )
     )
-    checks.append(Check("INFO", f"dir:db5_data={db5_data_root}", "optional experimental data root"))
     return checks
 
 def collect_config_checks(code_root: Path) -> list[Check]:
@@ -186,10 +185,6 @@ def collect_config_checks(code_root: Path) -> list[Check]:
 
     return checks
 
-def collect_db5_checks(code_root: Path, db5_data_root: Path, *, skip_probe: bool) -> list[Check]:
-    del code_root, db5_data_root, skip_probe
-    return [Check("INFO", "experimental.db5", "DB5 pretrain checks skipped in release preflight")]
-
 def collect_budget_checks(
     code_root: Path,
     wearer_data_root: Path,
@@ -261,10 +256,8 @@ def print_checks(checks: Iterable[Check]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Demo3 event-onset preflight checks")
     parser.add_argument("--mode", choices=("local", "ascend"), default="local")
-    parser.add_argument("--db5_data_dir", default=None)
     parser.add_argument("--wearer_data_dir", default=None)
     parser.add_argument("--budget_per_class", type=int, default=60)
-    parser.add_argument("--skip_db5_probe", action="store_true")
     parser.add_argument("--skip_budget_probe", action="store_true")
     args = parser.parse_args()
 
@@ -276,12 +269,10 @@ def main() -> int:
 
     code_root = CODE_ROOT
     wearer_data_root = _resolve_data_arg(args.wearer_data_dir, code_root.parent / "data")
-    db5_data_root = _resolve_data_arg(args.db5_data_dir, code_root.parent / "data_ninaproDB5")
 
     checks.extend(collect_dependency_checks(args.mode))
-    checks.extend(collect_file_checks(code_root, wearer_data_root, db5_data_root))
+    checks.extend(collect_file_checks(code_root, wearer_data_root))
     checks.extend(collect_config_checks(code_root))
-    checks.extend(collect_db5_checks(code_root, db5_data_root, skip_probe=bool(args.skip_db5_probe)))
     checks.extend(
         collect_budget_checks(
             code_root,
@@ -294,7 +285,6 @@ def main() -> int:
     print("=" * 72)
     print(f"Event-onset preflight mode={args.mode}")
     print(f"code_root={code_root}")
-    print(f"db5_data_root={db5_data_root}")
     print(f"wearer_data_root={wearer_data_root}")
     print("=" * 72)
     print_checks(checks)

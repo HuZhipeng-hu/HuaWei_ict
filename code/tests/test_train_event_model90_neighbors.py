@@ -27,7 +27,6 @@ def test_build_neighbor_candidates_has_reference_and_unique_grid() -> None:
         "base_channels": 16,
         "freeze_emg_epochs": 5,
         "encoder_lr_ratio": 0.2,
-        "pretrained_mode": "off",
     }
 
     rows = _build_neighbor_candidates(args, reference=reference)
@@ -41,7 +40,6 @@ def test_build_neighbor_candidates_has_reference_and_unique_grid() -> None:
             int(row["base_channels"]),
             int(row["freeze_emg_epochs"]),
             float(row["encoder_lr_ratio"]),
-            str(row["pretrained_mode"]),
         )
         for row in rows
     }
@@ -195,7 +193,6 @@ def test_reuse_trial_outputs_requires_matching_context(tmp_path: Path) -> None:
             [
                 "model:",
                 "  base_channels: 16",
-                "  pretrained_emg_checkpoint: ''",
                 "training:",
                 "  loss_type: cross_entropy",
                 "  freeze_emg_epochs: 5",
@@ -229,7 +226,6 @@ def test_reuse_trial_outputs_requires_matching_context(tmp_path: Path) -> None:
         data_dir=str(tmp_path),
         device_target="CPU",
         device_id=0,
-        pretrained_emg_checkpoint="",
     )
 
     assert (
@@ -242,7 +238,6 @@ def test_reuse_trial_outputs_requires_matching_context(tmp_path: Path) -> None:
             base_channels=16,
             freeze_emg_epochs=5,
             encoder_lr_ratio=0.3,
-            pretrained_mode="off",
         )
         is False
     )

@@ -87,7 +87,6 @@ class EventModelConfig:
     fusion_hidden_dim: int = 64
     dropout_rate: float = 0.3
     use_se: bool = True
-    pretrained_emg_checkpoint: str | None = None
     command_loss_weight: float = 1.0
 
 

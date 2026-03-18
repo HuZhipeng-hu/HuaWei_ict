@@ -407,14 +407,7 @@ def _check_param_coverage(
     expected_base = _parse_int_tokens(args.screen_base_channels)
     expected_freeze = _parse_int_tokens(args.screen_freeze_emg_epochs)
     expected_elr = [float(item) for item in _parse_tokens(args.screen_encoder_lr_ratios)]
-    expected_pt = _parse_tokens(args.screen_pretrained_modes)
-
-    observed_pt = sorted({str(row.get("pretrained_mode", "")).strip().lower() for row in screen_rows})
-    filtered_pt = [item for item in expected_pt if item.lower() in observed_pt]
-    if not filtered_pt:
-        filtered_pt = observed_pt
-
-    expected_total = len(expected_loss) * len(expected_base) * len(expected_freeze) * len(expected_elr) * len(filtered_pt)
+    expected_total = len(expected_loss) * len(expected_base) * len(expected_freeze) * len(expected_elr)
     result.details["screen_expected_rows"] = int(expected_total)
     result.details["screen_actual_rows"] = int(len(screen_rows))
     if len(screen_rows) != expected_total:
@@ -427,7 +420,6 @@ def _check_param_coverage(
             int(row.get("base_channels")),
             int(row.get("freeze_emg_epochs")),
             float(row.get("encoder_lr_ratio")),
-            str(row.get("pretrained_mode")),
         )
         if key in tuples_seen:
             result.fail(f"duplicate screen candidate: {key}")
@@ -893,7 +885,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screen_base_channels", default="16,24")
     parser.add_argument("--screen_freeze_emg_epochs", default="6,8,10")
     parser.add_argument("--screen_encoder_lr_ratios", default="0.24,0.3,0.36")
-    parser.add_argument("--screen_pretrained_modes", default="off")
     parser.add_argument("--longrun_seeds", default="42,52,62")
 
     parser.add_argument("--neighbor_summary", default=None)

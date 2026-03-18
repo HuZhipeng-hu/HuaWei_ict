@@ -114,8 +114,7 @@ python scripts/train_event_model_90_sprint.py \
   --screen_loss_types cross_entropy,cb_focal \
   --screen_base_channels 16,24 \
   --screen_freeze_emg_epochs 6,8,10 \
-  --screen_encoder_lr_ratios 0.24,0.3,0.36 \
-  --screen_pretrained_modes off
+  --screen_encoder_lr_ratios 0.24,0.3,0.36
 ```
 
 Longrun:

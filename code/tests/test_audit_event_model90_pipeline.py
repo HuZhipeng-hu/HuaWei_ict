@@ -11,7 +11,6 @@ def _base_args() -> SimpleNamespace:
         screen_base_channels="16,24",
         screen_freeze_emg_epochs="6,8,10",
         screen_encoder_lr_ratios="0.24,0.3,0.36",
-        screen_pretrained_modes="off",
         longrun_seeds="42,52,62",
         runtime_tuning_summary="missing_runtime_tuning_summary.json",
         tune_summary="missing_tune_summary.json",
@@ -36,7 +35,6 @@ def test_param_coverage_blocks_when_neighbor_has_significant_gain() -> None:
                 "base_channels": 16,
                 "freeze_emg_epochs": 5,
                 "encoder_lr_ratio": 0.3,
-                "pretrained_mode": "off",
             },
             {
                 "run_id": "b",
@@ -44,7 +42,6 @@ def test_param_coverage_blocks_when_neighbor_has_significant_gain() -> None:
                 "base_channels": 16,
                 "freeze_emg_epochs": 5,
                 "encoder_lr_ratio": 0.2,
-                "pretrained_mode": "off",
             },
             {
                 "run_id": "c",
@@ -52,7 +49,6 @@ def test_param_coverage_blocks_when_neighbor_has_significant_gain() -> None:
                 "base_channels": 16,
                 "freeze_emg_epochs": 8,
                 "encoder_lr_ratio": 0.3,
-                "pretrained_mode": "off",
             },
             {
                 "run_id": "d",
@@ -60,7 +56,6 @@ def test_param_coverage_blocks_when_neighbor_has_significant_gain() -> None:
                 "base_channels": 16,
                 "freeze_emg_epochs": 8,
                 "encoder_lr_ratio": 0.2,
-                "pretrained_mode": "off",
             },
             {
                 "run_id": "e",
@@ -68,7 +63,6 @@ def test_param_coverage_blocks_when_neighbor_has_significant_gain() -> None:
                 "base_channels": 24,
                 "freeze_emg_epochs": 5,
                 "encoder_lr_ratio": 0.3,
-                "pretrained_mode": "off",
             },
             {
                 "run_id": "f",
@@ -76,7 +70,6 @@ def test_param_coverage_blocks_when_neighbor_has_significant_gain() -> None:
                 "base_channels": 24,
                 "freeze_emg_epochs": 5,
                 "encoder_lr_ratio": 0.2,
-                "pretrained_mode": "off",
             },
             {
                 "run_id": "g",
@@ -84,7 +77,6 @@ def test_param_coverage_blocks_when_neighbor_has_significant_gain() -> None:
                 "base_channels": 24,
                 "freeze_emg_epochs": 8,
                 "encoder_lr_ratio": 0.3,
-                "pretrained_mode": "off",
             },
             {
                 "run_id": "h",
@@ -92,7 +84,6 @@ def test_param_coverage_blocks_when_neighbor_has_significant_gain() -> None:
                 "base_channels": 24,
                 "freeze_emg_epochs": 8,
                 "encoder_lr_ratio": 0.2,
-                "pretrained_mode": "off",
             },
         ]
     }

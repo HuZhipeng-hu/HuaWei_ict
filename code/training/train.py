@@ -40,7 +40,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest_strategy", default="v2", choices=["v1", "v2"])
     parser.add_argument("--quality_report_out", default=None)
     parser.add_argument("--eval_protocol", default="same_user_same_day_v1")
-    parser.add_argument("--pretrained_emg_checkpoint", default=None)
     return parser.parse_args()
 
 

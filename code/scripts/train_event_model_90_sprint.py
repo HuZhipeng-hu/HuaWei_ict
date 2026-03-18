@@ -217,7 +217,6 @@ def _reuse_trial_outputs_if_compatible(
     base_channels: int,
     freeze_emg_epochs: int,
     encoder_lr_ratio: float,
-    pretrained_mode: str,
 ) -> bool:
     offline_summary_path = run_dir / "offline_summary.json"
     test_metrics_path = run_dir / "evaluation" / "test_metrics.json"
@@ -261,16 +260,6 @@ def _reuse_trial_outputs_if_compatible(
     if str(device_section.get("device_target", "")).strip() != str(args.device_target):
         return False
     if int(device_section.get("device_id", -1)) != int(args.device_id):
-        return False
-
-    expected_pretrained = str(args.pretrained_emg_checkpoint or "").strip() if str(pretrained_mode).strip().lower() == "on" else ""
-    actual_pretrained = str(model_section.get("pretrained_emg_checkpoint", "") or "").strip()
-    if expected_pretrained:
-        if not actual_pretrained:
-            return False
-        if _resolve_path(actual_pretrained) != _resolve_path(expected_pretrained):
-            return False
-    elif actual_pretrained:
         return False
     return True
 
@@ -404,7 +393,6 @@ def _build_finetune_cmd(
     base_channels: int | None,
     freeze_emg_epochs: int | None,
     encoder_lr_ratio: float | None,
-    pretrained_mode: str,
 ) -> list[str]:
     split_manifest_raw = str(split_manifest_path).strip()
     split_manifest_abs = Path(split_manifest_raw)
@@ -466,12 +454,6 @@ def _build_finetune_cmd(
         cmd.extend(["--freeze_emg_epochs", str(int(freeze_emg_epochs))])
     if encoder_lr_ratio is not None:
         cmd.extend(["--encoder_lr_ratio", str(float(encoder_lr_ratio))])
-
-    if pretrained_mode == "on":
-        ckpt = str(args.pretrained_emg_checkpoint or "").strip()
-        if not ckpt:
-            raise ValueError("pretrained_mode=on requires --pretrained_emg_checkpoint")
-        cmd.extend(["--pretrained_emg_checkpoint", ckpt])
     return cmd
 
 
@@ -519,7 +501,6 @@ def _collect_metrics_row(
     base_channels: int,
     freeze_emg_epochs: int,
     encoder_lr_ratio: float,
-    pretrained_mode: str,
 ) -> dict:
     run_root = Path(args.run_root)
     run_dir = run_root / run_id
@@ -537,7 +518,6 @@ def _collect_metrics_row(
         "base_channels": int(base_channels),
         "freeze_emg_epochs": int(freeze_emg_epochs),
         "encoder_lr_ratio": float(encoder_lr_ratio),
-        "pretrained_mode": str(pretrained_mode),
         "checkpoint_path": str(offline.get("checkpoint_path", "")),
         "event_action_accuracy": _metric_or(test_metrics, "event_action_accuracy"),
         "event_action_macro_f1": _metric_or(test_metrics, "event_action_macro_f1"),
@@ -583,7 +563,6 @@ def _run_single_trial(
     base_channels: int,
     freeze_emg_epochs: int,
     encoder_lr_ratio: float,
-    pretrained_mode: str,
 ) -> dict:
     run_dir = Path(args.run_root) / str(run_id)
     offline_summary_path = run_dir / "offline_summary.json"
@@ -600,7 +579,6 @@ def _run_single_trial(
         base_channels=base_channels,
         freeze_emg_epochs=freeze_emg_epochs,
         encoder_lr_ratio=encoder_lr_ratio,
-        pretrained_mode=pretrained_mode,
     )
     if not has_finetune_outputs:
         finetune_cmd = _build_finetune_cmd(
@@ -613,7 +591,6 @@ def _run_single_trial(
             base_channels=base_channels,
             freeze_emg_epochs=freeze_emg_epochs,
             encoder_lr_ratio=encoder_lr_ratio,
-            pretrained_mode=pretrained_mode,
         )
         _run_checked(f"{stage}:finetune:{run_id}", finetune_cmd)
     else:
@@ -644,7 +621,6 @@ def _run_single_trial(
         base_channels=base_channels,
         freeze_emg_epochs=freeze_emg_epochs,
         encoder_lr_ratio=encoder_lr_ratio,
-        pretrained_mode=pretrained_mode,
     )
 
 
@@ -653,23 +629,16 @@ def _screen_candidates(args: argparse.Namespace) -> list[dict]:
     base_channels = _parse_int_tokens(args.screen_base_channels, name="--screen_base_channels")
     freeze_epochs = _parse_int_tokens(args.screen_freeze_emg_epochs, name="--screen_freeze_emg_epochs")
     encoder_lrs = _parse_float_tokens(args.screen_encoder_lr_ratios, name="--screen_encoder_lr_ratios")
-    pretrained_modes = _parse_tokens(args.screen_pretrained_modes, name="--screen_pretrained_modes")
     candidates: list[dict] = []
-    for loss_type, base_ch, freeze_ep, enc_lr, pt_mode in itertools.product(
-        loss_types, base_channels, freeze_epochs, encoder_lrs, pretrained_modes
+    for loss_type, base_ch, freeze_ep, enc_lr in itertools.product(
+        loss_types, base_channels, freeze_epochs, encoder_lrs
     ):
-        mode = str(pt_mode).strip().lower()
-        if mode not in {"off", "on"}:
-            raise ValueError(f"Unsupported pretrained mode: {pt_mode!r}")
-        if mode == "on" and not str(args.pretrained_emg_checkpoint or "").strip():
-            continue
         candidates.append(
             {
                 "loss_type": str(loss_type),
                 "base_channels": int(base_ch),
                 "freeze_emg_epochs": int(freeze_ep),
                 "encoder_lr_ratio": float(enc_lr),
-                "pretrained_mode": mode,
             }
         )
     if not candidates:
@@ -690,7 +659,6 @@ def _stage_baseline(args: argparse.Namespace) -> dict:
         base_channels=int(args.baseline_base_channels),
         freeze_emg_epochs=int(args.baseline_freeze_emg_epochs),
         encoder_lr_ratio=float(args.baseline_encoder_lr_ratio),
-        pretrained_mode=str(args.baseline_pretrained_mode),
     )
     summary = {
         "status": "ok",
@@ -718,7 +686,7 @@ def _stage_screen(args: argparse.Namespace) -> dict:
             f"{args.run_prefix}_scr_{idx:02d}_"
             f"l{candidate['loss_type']}_bc{candidate['base_channels']}_"
             f"fz{candidate['freeze_emg_epochs']}_"
-            f"elr{_safe_float_token(candidate['encoder_lr_ratio'])}_pt{candidate['pretrained_mode']}"
+            f"elr{_safe_float_token(candidate['encoder_lr_ratio'])}"
         )
         row = _run_single_trial(
             args,
@@ -730,7 +698,6 @@ def _stage_screen(args: argparse.Namespace) -> dict:
             base_channels=int(candidate["base_channels"]),
             freeze_emg_epochs=int(candidate["freeze_emg_epochs"]),
             encoder_lr_ratio=float(candidate["encoder_lr_ratio"]),
-            pretrained_mode=str(candidate["pretrained_mode"]),
         )
         row["candidate_index"] = int(idx)
         rows.append(row)
@@ -777,7 +744,6 @@ def _stage_screen(args: argparse.Namespace) -> dict:
             "base_channels",
             "freeze_emg_epochs",
             "encoder_lr_ratio",
-            "pretrained_mode",
             "event_action_accuracy",
             "event_action_macro_f1",
             "command_success_rate",
@@ -831,7 +797,6 @@ def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> 
     freeze_ep = int(reference["freeze_emg_epochs"])
     enc_lr = float(reference["encoder_lr_ratio"])
     loss_type = str(reference["loss_type"])
-    pretrained_mode = str(reference.get("pretrained_mode", "off"))
 
     lr_delta_ratio = max(0.01, float(args.neighbor_lr_delta_ratio))
     freeze_delta = max(1, int(args.neighbor_freeze_delta))
@@ -842,7 +807,6 @@ def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> 
             "base_channels": base_ch,
             "freeze_emg_epochs": freeze_ep,
             "encoder_lr_ratio": enc_lr,
-            "pretrained_mode": pretrained_mode,
         },
         {
             "variant": "lr_down",
@@ -850,7 +814,6 @@ def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> 
             "base_channels": base_ch,
             "freeze_emg_epochs": freeze_ep,
             "encoder_lr_ratio": max(0.01, enc_lr * (1.0 - lr_delta_ratio)),
-            "pretrained_mode": pretrained_mode,
         },
         {
             "variant": "lr_up",
@@ -858,7 +821,6 @@ def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> 
             "base_channels": base_ch,
             "freeze_emg_epochs": freeze_ep,
             "encoder_lr_ratio": enc_lr * (1.0 + lr_delta_ratio),
-            "pretrained_mode": pretrained_mode,
         },
         {
             "variant": "freeze_down",
@@ -866,7 +828,6 @@ def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> 
             "base_channels": base_ch,
             "freeze_emg_epochs": max(1, freeze_ep - freeze_delta),
             "encoder_lr_ratio": enc_lr,
-            "pretrained_mode": pretrained_mode,
         },
         {
             "variant": "freeze_up",
@@ -874,7 +835,6 @@ def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> 
             "base_channels": base_ch,
             "freeze_emg_epochs": freeze_ep + freeze_delta,
             "encoder_lr_ratio": enc_lr,
-            "pretrained_mode": pretrained_mode,
         },
     ]
 
@@ -886,7 +846,6 @@ def _build_neighbor_candidates(args: argparse.Namespace, *, reference: dict) -> 
             int(item["base_channels"]),
             int(item["freeze_emg_epochs"]),
             round(float(item["encoder_lr_ratio"]), 6),
-            str(item["pretrained_mode"]),
         )
         if key in seen:
             continue
@@ -934,7 +893,6 @@ def _stage_neighbor(args: argparse.Namespace, *, longrun_summary: dict | None = 
             base_channels=int(candidate["base_channels"]),
             freeze_emg_epochs=int(candidate["freeze_emg_epochs"]),
             encoder_lr_ratio=float(candidate["encoder_lr_ratio"]),
-            pretrained_mode=str(candidate["pretrained_mode"]),
         )
         row["neighbor_variant"] = str(candidate["variant"])
         row["neighbor_index"] = int(idx)
@@ -980,7 +938,6 @@ def _stage_neighbor(args: argparse.Namespace, *, longrun_summary: dict | None = 
             "base_channels",
             "freeze_emg_epochs",
             "encoder_lr_ratio",
-            "pretrained_mode",
             "event_action_accuracy",
             "event_action_macro_f1",
             "command_success_rate",
@@ -1016,13 +973,11 @@ def _stage_longrun(args: argparse.Namespace, *, screen_summary: dict | None = No
                 base_channels=int(candidate["base_channels"]),
                 freeze_emg_epochs=int(candidate["freeze_emg_epochs"]),
                 encoder_lr_ratio=float(candidate["encoder_lr_ratio"]),
-                pretrained_mode=str(candidate["pretrained_mode"]),
             )
             row["candidate_rank"] = int(candidate_rank)
             row["candidate_key"] = (
                 f"rank{candidate_rank}:loss={candidate['loss_type']},bc={candidate['base_channels']},"
-                f"freeze={candidate['freeze_emg_epochs']},elr={candidate['encoder_lr_ratio']},"
-                f"pt={candidate['pretrained_mode']}"
+                f"freeze={candidate['freeze_emg_epochs']},elr={candidate['encoder_lr_ratio']}"
             )
             rows.append(row)
 
@@ -1062,7 +1017,6 @@ def _stage_longrun(args: argparse.Namespace, *, screen_summary: dict | None = No
             "base_channels",
             "freeze_emg_epochs",
             "encoder_lr_ratio",
-            "pretrained_mode",
             "event_action_accuracy",
             "event_action_macro_f1",
             "command_success_rate",
@@ -1200,8 +1154,6 @@ def _stage_audit(args: argparse.Namespace) -> dict:
         str(args.screen_freeze_emg_epochs),
         "--screen_encoder_lr_ratios",
         str(args.screen_encoder_lr_ratios),
-        "--screen_pretrained_modes",
-        str(args.screen_pretrained_modes),
         "--longrun_seeds",
         str(args.longrun_seeds),
         "--neighbor_summary",
@@ -1267,13 +1219,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip_control_eval", action="store_true")
     parser.add_argument("--budget_per_class", type=int, default=0)
     parser.add_argument("--budget_seed", type=int, default=42)
-    parser.add_argument("--pretrained_emg_checkpoint", default="")
 
     parser.add_argument("--baseline_loss_type", default="cross_entropy")
     parser.add_argument("--baseline_base_channels", type=int, default=16)
     parser.add_argument("--baseline_freeze_emg_epochs", type=int, default=6)
     parser.add_argument("--baseline_encoder_lr_ratio", type=float, default=0.3)
-    parser.add_argument("--baseline_pretrained_mode", default="off", choices=["off", "on"])
 
     parser.add_argument("--screen_split_seed", type=int, default=42)
     parser.add_argument("--screen_split_manifest", default="")
@@ -1281,7 +1231,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--screen_base_channels", default="16,24")
     parser.add_argument("--screen_freeze_emg_epochs", default="6,8,10")
     parser.add_argument("--screen_encoder_lr_ratios", default="0.24,0.3,0.36")
-    parser.add_argument("--screen_pretrained_modes", default="off")
     parser.add_argument("--topk_for_longrun", type=int, default=2)
     parser.add_argument("--longrun_seeds", default="42,52,62")
     parser.add_argument("--neighbor_lr_delta_ratio", type=float, default=0.2)
