@@ -6,19 +6,29 @@
 /data_ninaproDB5.zip
 
 # Local caches and test temp artifacts
+.codex_tmp/
 **/__pycache__/
 *.pyc
 *.pyo
 *.pyd
 **/.ipynb_checkpoints/
 **/.pytest_cache/
+.pytest_tmp/
 .tmp_pytest_runcheck*/
+artifacts/
+s*_data_pack.tgz
+s*_upload_pack_*.zip
 code/.tmp_pytest*/
 code/.tmp_pytest_runcheck*/
+code/.pt_run_*/
 code/.codex_tmp/
+code/.pytest_tmp/
+code/.tmp_transfer/
 code/pytest-cache-files-*/
 code/pytest-of-ASUS/
 code/tmpr*/
+code/*_train_manifest.csv
+code/submission_polish_scratch.ipynb
 code/artifacts/pytest_tmp/
 
 # Keep repository clean from generated benchmark/training outputs
